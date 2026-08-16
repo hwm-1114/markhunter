@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file:; script-src 'self'; object-src 'self' file: data:; base-uri 'none'" />
+  <title>MarkHunter</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- 顶部工具栏 -->
+  <header id="toolbar">
+    <div class="brand">
+      <span class="brand-mark">M↓</span>
+      <div class="brand-text">
+        <span class="brand-name">MarkHunter</span>
+        <span class="brand-slogan">执笔即江湖，所写皆锋芒</span>
+      </div>
+    </div>
+    <div class="toolbar-group">
+      <button id="btn-open-dir" class="tbtn" title="选择本地目录 (Ctrl+O)">📂 选择目录</button>
+      <button id="btn-toggle-fav" class="tbtn" title="收藏当前工作目录" disabled>☆ 收藏</button>
+      <span id="dir-label" class="dir-label" title="">未打开目录</span>
+    </div>
+    <div class="toolbar-group">
+      <button id="btn-global-search" class="tbtn" title="全局搜索（Ctrl+Shift+F）">🔍 搜索</button>
+    </div>
+    <div class="toolbar-group">
+      <button id="btn-preview-mode" class="tbtn" title="切换预览模式">👁 预览</button>
+      <button id="btn-run-py" class="tbtn accent" title="运行当前 Python 文件">▶ 运行</button>
+      <button id="btn-ai" class="tbtn" title="AI 助手（读/改文档）">🤖 AI</button>
+      <button id="btn-settings" class="tbtn" title="设置">⚙ 设置</button>
+    </div>
+  </header>
+
+  <!-- 主体：左树 + 右编辑区 -->
+  <main id="main">
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <span>文件</span>
+      </div>
+      <div class="sidebar-actions">
+        <button id="btn-new-file" class="tbtn" title="新建文件">📄 新建文件</button>
+        <button id="btn-new-dir" class="tbtn" title="新建目录">📁 新建目录</button>
+        <button id="btn-refresh" class="tbtn" title="刷新目录树">🔄 刷新</button>
+      </div>
+      <!-- 收藏目录 -->
+      <div id="fav-block" class="fav-block">
+        <div id="fav-header" class="fav-header" title="点击折叠/展开">
+          <span class="fav-caret" id="fav-caret">▶</span>
+          <span>📌 收藏目录</span>
+        </div>
+        <div id="fav-list" class="fav-list"></div>
+      </div>
+      <div id="file-tree" class="file-tree">
+        <div class="tree-empty">点击「选择目录」打开一个本地文件夹</div>
+      </div>
+      <div id="tree-search-divider" class="resize-divider h"></div>
+      <!-- 全局搜索（左侧栏展示） -->
+      <div id="sidebar-search">
+        <div class="gs-bar">
+          <input id="gs-input" type="text" placeholder="全局搜索（Ctrl+Shift+F）…" />
+          <button id="btn-gs-go" class="tbtn">搜索</button>
+        </div>
+        <div id="gs-results" class="gs-results"></div>
+        <div class="gs-count-row"><span id="gs-count" class="find-count"></span></div>
+      </div>
+    </aside>
+
+    <section id="workbench">
+      <div id="tabs" class="tabs"></div>
+      <div id="editor-wrap" class="editor-wrap">
+        <div id="editor-host" class="editor-host"></div>
+        <div id="image-host" class="image-host hidden"></div>
+        <div id="split-divider" class="split-divider hidden"></div>
+        <div id="preview-host" class="preview-host hidden">
+          <div id="zoom-badge" class="zoom-badge hidden">100%</div>
+          <div id="preview-content" class="markdown-body"></div>
+        </div>
+        <div id="editor-empty" class="editor-empty">
+          <div class="empty-icon">✍</div>
+          <p>从左侧打开一个文件开始编辑</p>
+          <p class="empty-sub">支持 .md / .txt / .json / .py</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- AI 助手侧栏 -->
+    <div id="ai-divider" class="resize-divider v hidden"></div>
+    <aside id="ai-panel" class="ai-panel hidden">
+      <div class="ai-header">
+        <span class="ai-title">🤖 AI 助手</span>
+        <span id="ai-model-badge" class="ai-model-badge">—</span>
+        <div class="ai-header-actions">
+          <button id="btn-ai-full" class="tbtn small" title="附加当前文档全文作为上下文">📄 全文</button>
+          <button id="btn-ai-sel" class="tbtn small" title="附加选中文字作为上下文">✂ 选中</button>
+          <button id="btn-ai-close" class="tbtn small" title="收起 AI 侧栏">✕</button>
+        </div>
+      </div>
+      <div id="ai-messages" class="ai-messages"></div>
+      <div class="ai-input-row">
+        <textarea id="ai-input" rows="3" placeholder="向 AI 提问，或让它读取/修改当前文档…"></textarea>
+        <button id="btn-ai-send" class="tbtn accent" title="发送">发送</button>
+        <button id="btn-ai-stop" class="tbtn danger" title="停止生成">■</button>
+      </div>
+    </aside>
+    <div id="sidebar-divider" class="resize-divider v"></div>
+  </main>
+
+  <!-- 底部面板 -->
+  <div id="bottom-divider" class="resize-divider h"></div>
+  <footer id="bottom-panel">
+    <div class="panel-tabs">
+      <button class="ptab" data-panel="find">文件内搜索</button>
+      <button class="ptab" data-panel="python">Python 运行</button>
+      <div class="panel-actions">
+        <span id="save-status" class="save-status"></span>
+        <button id="btn-close-panel" class="tbtn small" title="收起面板">✕</button>
+      </div>
+    </div>
+
+    <!-- 文件内搜索 -->
+    <div class="panel-body" id="panel-find">
+      <div class="find-bar">
+        <input id="find-input" type="text" placeholder="在当前文件中查找…" />
+        <span id="find-count" class="find-count"></span>
+      </div>
+      <div id="find-results" class="find-results"></div>
+    </div>
+
+    <!-- Python 输出 -->
+    <div class="panel-body hidden" id="panel-python">
+      <div class="python-bar">
+        <span id="py-status" class="py-status">未运行</span>
+        <button id="btn-py-kill" class="tbtn small danger">■ 终止</button>
+        <button id="btn-py-clear" class="tbtn small">清空</button>
+      </div>
+      <pre id="py-output" class="py-output"></pre>
+    </div>
+  </footer>
+
+  <!-- 状态栏：当前文件位置 / 字数 -->
+  <div id="status-bar">
+    <span id="sb-file">未打开文件</span>
+    <span class="sb-spacer"></span>
+    <span id="sb-pos"></span>
+    <span id="sb-len"></span>
+  </div>
+
+  <!-- 弹窗 -->
+  <div id="modal-mask" class="modal-mask hidden">
+    <div class="modal" id="modal-box">
+      <div class="modal-title" id="modal-title"></div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-actions" id="modal-actions"></div>
+    </div>
+  </div>
+
+  <div id="ctx-menu" class="ctx-menu hidden"></div>
+
+  <script src="dist/bundle.js"></script>
+</body>
+</html>

@@ -1,0 +1,146 @@
+// 文件内搜索：底部面板展示全部匹配 + 编辑器高亮
+import { Decoration, EditorView } from '@codemirror/view';
+import { $, escapeHtml } from './ui.js';
+import { matchEffect } from './tabs.js';
+
+export function createFind(getEditor, getTab) {
+  const input = $('#find-input');
+  const count = $('#find-count');
+  const resultsEl = $('#find-results');
+  const panel = $('#panel-find');
+
+  let matches = [];      // 全部匹配 {line, from, to, text}
+  let current = -1;      // 当前选中匹配下标
+  let query = '';
+
+  function getView() {
+    return getEditor().getView();
+  }
+
+  /** 收集文档中全部匹配（不区分大小写，含一行多处） */
+  function collect(state, q) {
+    const out = [];
+    const lower = q.toLowerCase();
+    const doc = state.doc;
+    for (let i = 1; i <= doc.lines; i++) {
+      const line = doc.line(i);
+      const text = line.text;
+      let idx = text.toLowerCase().indexOf(lower);
+      while (idx >= 0) {
+        out.push({ line: i, from: line.from + idx, to: line.from + idx + q.length, text });
+        idx = text.toLowerCase().indexOf(lower, idx + q.length);
+      }
+    }
+    return out;
+  }
+
+  function applyHighlights() {
+    const view = getView();
+    const ranges = [];
+    matches.forEach((m, i) => {
+      const cls = i === current ? 'cm-search-current' : 'cm-search-match';
+      ranges.push(Decoration.mark({ class: cls }).range(m.from, m.to));
+    });
+    view.dispatch({ effects: matchEffect.of(Decoration.set(ranges, true)) });
+  }
+
+  function renderResults() {
+    resultsEl.innerHTML = '';
+    if (!query) {
+      resultsEl.innerHTML = '<div class="find-empty">输入关键词开始搜索（不区分大小写，展示全部匹配）</div>';
+      return;
+    }
+    if (matches.length === 0) {
+      resultsEl.innerHTML = '<div class="find-empty">没有找到匹配项</div>';
+      return;
+    }
+    matches.forEach((m, i) => {
+      const row = document.createElement('div');
+      row.className = `find-result ${i === current ? 'current' : ''}`;
+      const lineNo = document.createElement('span');
+      lineNo.className = 'r-line';
+      lineNo.textContent = m.line;
+      const text = document.createElement('span');
+      text.className = 'r-text';
+      text.innerHTML = highlightText(m.text, query);
+      row.append(lineNo, text);
+      row.addEventListener('click', () => jumpTo(i));
+      resultsEl.appendChild(row);
+    });
+    // 当前项滚入视野
+    const cur = resultsEl.querySelector('.current');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+
+  function highlightText(text, q) {
+    const lower = text.toLowerCase();
+    const ql = q.toLowerCase();
+    let html = '';
+    let i = 0;
+    let idx = lower.indexOf(ql);
+    while (idx >= 0) {
+      html += escapeHtml(text.slice(i, idx));
+      html += `<mark>${escapeHtml(text.slice(idx, idx + q.length))}</mark>`;
+      i = idx + q.length;
+      idx = lower.indexOf(ql, i);
+    }
+    html += escapeHtml(text.slice(i));
+    return html;
+  }
+
+  function jumpTo(i) {
+    if (i < 0 || i >= matches.length) return;
+    current = i;
+    const m = matches[i];
+    const view = getView();
+    view.dispatch({
+      selection: { anchor: m.from },
+      effects: EditorView.scrollIntoView(m.from, { y: 'center' }),
+    });
+    applyHighlights();
+    renderResults();
+  }
+
+  function runSearch(noJump = false) {
+    const tab = getTab();
+    query = input.value.trim();
+    current = -1;
+    // 图片标签页没有文档（tab.state 为 null），清空匹配
+    if (!query || !tab || !tab.state) {
+      matches = [];
+      count.textContent = '';
+      applyHighlights();
+      renderResults();
+      return;
+    }
+    matches = collect(tab.state, query);
+    count.textContent = `${matches.length} 处匹配`;
+    applyHighlights();
+    renderResults();
+    // noJump=true 时不抢占光标（编辑文档触发时用），只更新高亮与列表
+    if (matches.length > 0 && !noJump) jumpTo(0);
+  }
+
+  function clearSearch() {
+    input.value = '';
+    runSearch();
+  }
+
+  /** 外部设置搜索词（如点击全局搜索结果），noJump 时不抢占当前光标 */
+  function setQuery(q, noJump = false) {
+    input.value = q;
+    runSearch(noJump);
+  }
+
+  input.addEventListener('input', () => runSearch());
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (matches.length === 0) return;
+      const step = e.shiftKey ? -1 : 1;
+      jumpTo((current + step + matches.length) % matches.length);
+    }
+  });
+
+  return { runSearch, setQuery, clearSearch, focus: () => { panel.classList.remove('hidden'); input.focus(); input.select(); } };
+}

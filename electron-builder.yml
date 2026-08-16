@@ -1,0 +1,46 @@
+# electron-builder 配置：产出 Windows NSIS 独立安装包
+appId: com.vibecode.markhunter
+productName: MarkHunter
+copyright: Copyright © 2026 VibeCode
+
+directories:
+  output: dist
+  buildResources: assets
+
+# 只打包应用代码（前端依赖已由 esbuild 打进 bundle.js）
+files:
+  - src/**/*
+  - assets/**/*
+  - package.json
+  - "!**/*.map"
+
+# S11：应用代码打进 asar，并启用 Electron Fuses 加固
+asar: true
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+
+win:
+  icon: assets/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MarkHunter
+  artifactName: ${productName}-Setup-${version}.exe
+  uninstallDisplayName: MarkHunter
+  include: build/installer.nsh
+
+# Electron 二进制下载镜像（国内网络加速）
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/

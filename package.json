@@ -1,0 +1,27 @@
+{
+    "name":  "markhunter",
+    "productName":  "MarkHunter",
+    "version":  "0.1.39",
+    "description":  "MarkHunter 马克猎手 —— 执笔即江湖，所写皆锋芒",
+    "main":  "src/main/main.js",
+    "scripts":  {
+                    "start":  "electron .",
+                    "build":  "node scripts/build.js",
+                    "icon":  "python scripts/gen_icon.py",
+                    "smoke":  "electron . --smoke",
+                    "release":  "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
+                },
+    "author":  "VibeCode",
+    "license":  "MIT",
+    "devDependencies":  {
+                            "@codemirror/lang-json":  "^6.0.1",
+                            "@codemirror/lang-markdown":  "^6.3.4",
+                            "@codemirror/lang-python":  "^6.2.1",
+                            "codemirror":  "^6.0.2",
+                            "electron":  "^43.3.0",
+                            "electron-builder":  "^26.0.12",
+                            "esbuild":  "^0.28.2",
+                            "markdown-it":  "^14.1.0",
+                            "mermaid":  "^11.16.1"
+                        }
+}
