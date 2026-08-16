@@ -60,6 +60,7 @@ async function boot() {
       if (tab) {
         $('#save-status').textContent = tab.dirty ? '未保存…' : '';
         if (findQuery()) find.runSearch();
+        tree.reveal(tab.path).catch(() => {}); // 树跟随定位（文件不在当前工作目录内时自动 no-op）
       } else {
         $('#save-status').textContent = '';
         find.clearSearch();
@@ -69,6 +70,7 @@ async function boot() {
       if (tab.dirty) editor.saveNow(tab);
       editor.closeTab(tab);
     },
+    onSessionChange: () => persistSession(),
   });
 
   preview = createPreview(() => editor, getActiveTab);
@@ -147,6 +149,7 @@ async function boot() {
         }
         const p = (state.rootDir + '\\' + name).replace(/\//g, '\\');
         const opened = await editor.openFile(p);
+        tree.reveal(p).catch(() => {}); // 树跟随定位
         return opened ? `已打开 ${p}` : '打开失败（文件不存在或过大）';
       }
       default:
@@ -218,10 +221,53 @@ async function boot() {
     $('#btn-run-py').disabled = !(tab && isPython(tab.name));
   }
 
+  // ---------- 会话保持：标签快照持久化（防抖 600ms） + 跨重启恢复 ----------
+  let sessionTimer = null;
+
+  /** 将当前打开标签快照写入设置；force=true 立即落盘，否则 600ms 防抖合并 */
+  function persistSession(force = false) {
+    if (!force) {
+      clearTimeout(sessionTimer);
+      sessionTimer = setTimeout(() => persistSession(true), 600);
+      return;
+    }
+    const s = editor.getSession();
+    if (!s.paths.length) {
+      window.api.setSettings({ lastSession: null });
+    } else {
+      window.api.setSettings({ lastSession: { paths: s.paths, active: s.active } });
+    }
+  }
+
+  /** 启动时恢复上次会话：逐个重新打开标签（失败静默跳过，仅 console.warn），最多 50 个，最后激活活动标签 */
+  async function restoreSession() {
+    const ls = state.settings.lastSession;
+    if (!ls || !Array.isArray(ls.paths) || ls.paths.length === 0) return;
+    const paths = ls.paths.slice(0, 50);
+    for (const p of paths) {
+      try {
+        await editor.openFile(p);
+      } catch (err) {
+        console.warn('[session] 恢复标签失败（已跳过）:', p, err && err.message ? err.message : err);
+      }
+    }
+    const active = typeof ls.active === 'number' && ls.active >= 0 && ls.active < paths.length ? ls.active : -1;
+    if (active >= 0) {
+      try {
+        await editor.openFile(paths[active]); // openFile 对已存在标签会 switchTab 激活
+      } catch (err) {
+        console.warn('[session] 激活标签失败:', paths[active], err && err.message ? err.message : err);
+      }
+    }
+  }
+
   // ---------- 树回调 ----------
   tree.setCallbacks({
     // 图片文件由 tabs.js 内部分发为图片标签页（编辑区查看）
-    onOpenFile: (p) => editor.openFile(p),
+    onOpenFile: (p) => {
+      editor.openFile(p);
+      tree.reveal(p).catch(() => {}); // 树定位到该文件
+    },
     onOpenDir: () => {},
     onClosePath: (p, newPath) => {
       const tab = editor.findTabByPath(p);
@@ -306,6 +352,7 @@ async function boot() {
   // ---------- 打开文件并定位行（全局搜索结果点击） ----------
   async function openFileAt(file, line, query) {
     const tab = await editor.openFile(file);
+    tree.reveal(file).catch(() => {}); // 全局搜索跳转：树跟随定位
     if (!tab) return;
     // 先定位（switchTab 激活视图），再高亮关键词，避免视图重建丢失高亮
     if (line) editor.jumpToLine(tab, line);
@@ -623,6 +670,7 @@ async function boot() {
       for (const f of files) {
         try {
           editor.openFile(f.path);
+          tree.reveal(f.path).catch(() => {}); // 拖拽打开：树跟随定位
         } catch {
           /* 忽略无法打开的文件 */
         }
@@ -669,16 +717,17 @@ async function boot() {
     }
   });
 
-  // ---------- 恢复上次目录 ----------
+  // ---------- 恢复上次目录与会话 ----------
   await favorites.load(); // 启动时渲染收藏列表 + 同步按钮状态
   if (state.settings.lastDirectory) {
     await openDirFromPath(state.settings.lastDirectory);
   }
+  await restoreSession(); // 恢复上次会话（先恢复目录，再恢复标签，保证树定位可用）
 
   updateRunButton();
   // S10：window.__app 仅开发环境暴露（冒烟/扩展测试在 dev 下运行，不受影响；打包版无此接口）
   if (!(await window.api.isPackaged())) {
-    window.__app = { state, editor, tree, preview, find, globalSearch, python, openDirFromPath, aiPanel, executeAiTool, favorites };
+    window.__app = { state, editor, tree, preview, find, globalSearch, python, openDirFromPath, aiPanel, executeAiTool, favorites, session: { save: () => persistSession(true), restore: restoreSession } };
   }
 }
 

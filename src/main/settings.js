@@ -17,6 +17,7 @@ const ALLOWED_KEYS = new Set([
   'aiApiKey',
   'aiApiKeyClear',
   'favoriteDirs',
+  'lastSession',
 ]);
 
 const DEFAULTS = {
@@ -26,6 +27,7 @@ const DEFAULTS = {
   wordWrap: true,        // 自动换行
   scrollbarWidth: 10,    // 滚动条滑块宽度（px）
   lastDirectory: '',     // 上次打开的工作目录
+  lastSession: null,     // 上次会话快照（打开过的标签路径 + 活动标签下标；跨重启恢复）
   favoriteDirs: [],      // 收藏的本地目录（最多 50 个，保持添加顺序）
   // AI 大模型配置（OpenAI 兼容接口，DeepSeek 预置）
   aiApiKey: '',          // API Key（S5：存盘前经 safeStorage/DPAPI 加密，形如 enc:v1:<base64>）

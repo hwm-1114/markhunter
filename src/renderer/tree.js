@@ -11,6 +11,11 @@ function iconFor(name) {
   return FILE_ICONS[ext] || '📄';
 }
 
+/** 规范化路径键：小写 + 正斜杠（Windows 下 Explorer 路径与 readdir 返回的大小写/分隔符可能不同） */
+function normalizeKey(p) {
+  return String(p).replace(/\\/g, '/').toLowerCase();
+}
+
 export function createTree() {
   const container = $('#file-tree');
   const ctxMenu = $('#ctx-menu');
@@ -121,24 +126,35 @@ export function createTree() {
     if (children) children.style.display = expanded.has(dirPath) ? '' : 'none';
   }
 
-  /** 加载某个目录的子节点（懒加载） */
-  async function loadChildren(dirPath, force = false) {
+  const loadingDirs = new Map(); // 规范键 -> 进行中的加载 Promise（并发去重，防止同一目录重复追加子节点）
+
+  /** 加载某个目录的子节点（懒加载）；同一目录的并发调用共享同一次加载 */
+  function loadChildren(dirPath, force = false) {
     const entry = nodeMap.get(dirPath);
-    if (!entry || !entry.isDir) return;
-    if (!force && entry.children.childElementCount > 0) return;
-    entry.children.innerHTML = '';
-    let items;
-    try {
-      items = await window.api.readTree(dirPath);
-    } catch (err) {
-      entry.children.innerHTML = `<div class="tree-empty">读取失败：${escapeHtml(err.message || err)}</div>`;
-      return;
-    }
-    for (const it of items) {
-      const sub = makeRow(it);
-      entry.children.appendChild(sub.row);
-      entry.children.appendChild(sub.children);
-    }
+    if (!entry || !entry.isDir) return Promise.resolve();
+    if (!force && entry.children.childElementCount > 0) return Promise.resolve();
+    const key = normalizeKey(dirPath);
+    const inFlight = loadingDirs.get(key);
+    if (inFlight) return inFlight;
+    const p = (async () => {
+      entry.children.innerHTML = '';
+      let items;
+      try {
+        items = await window.api.readTree(dirPath);
+      } catch (err) {
+        entry.children.innerHTML = `<div class="tree-empty">读取失败：${escapeHtml(err.message || err)}</div>`;
+        return;
+      }
+      for (const it of items) {
+        const sub = makeRow(it);
+        entry.children.appendChild(sub.row);
+        entry.children.appendChild(sub.children);
+      }
+    })();
+    loadingDirs.set(key, p);
+    const done = () => loadingDirs.delete(key);
+    p.then(done, done);
+    return p;
   }
 
   async function expandNode(dirPath, entry) {
@@ -286,5 +302,53 @@ export function createTree() {
     return rootDir;
   }
 
-  return { setRoot, setCallbacks, refreshNode, refreshSelected, getTargetDir, select, hideCtx };
+  /** 树定位：展开 path 所在各级目录并选中该节点（不在工作目录内 / 中间读取失败 / 节点不存在 → 静默返回） */
+  let revealSeq = 0;
+  async function reveal(path) {
+    if (!rootDir || !path) return;
+    const target = String(path);
+    const rootKey = normalizeKey(rootDir).replace(/\/+$/, '');
+    const targetKey = normalizeKey(target).replace(/\/+$/, '');
+    if (targetKey === rootKey || !targetKey.startsWith(rootKey)) return;
+    const rest = targetKey.slice(rootKey.length);
+    if (!rest.startsWith('/')) return; // 仅接受根内子路径（防 F:/ab 前缀误匹配 F:/a）
+    const segs = rest.replace(/^\/+/, '').split('/').filter(Boolean);
+    if (!segs.length) return;
+    const seq = ++revealSeq;
+
+    // 按规范化路径在 nodeMap 中查找（兼容大小写差异）
+    const findNode = (key) => {
+      for (const [p, entry] of nodeMap) {
+        if (normalizeKey(p) === key) return entry;
+      }
+      return null;
+    };
+
+    // 逐级展开目录（已展开的确保子节点已加载；中间任何一级缺失 → 静默返回）
+    let curKey = rootKey;
+    for (let i = 0; i < segs.length - 1; i++) {
+      if (seq !== revealSeq) return; // 已有更新的 reveal，放弃本次
+      curKey = curKey + '/' + segs[i];
+      const entry = findNode(curKey);
+      if (!entry || !entry.isDir) return;
+      const dirPath = entry.row.dataset.path;
+      if (seq !== revealSeq) return;
+      if (expanded.has(dirPath)) {
+        await loadChildren(dirPath, false); // 已展开：子节点未加载则补加载
+        refreshIcon(entry.row, dirPath); // 防御：保证展开态图标/箭头与 expanded 集合一致
+      } else {
+        expanded.add(dirPath);
+        await loadChildren(dirPath, true);
+        refreshIcon(entry.row, dirPath);
+      }
+    }
+
+    // 最后一级：选中并滚动到可见（不切换根、不展开其它无关目录、不影响编辑器焦点）
+    const entry = findNode(targetKey);
+    if (!entry || seq !== revealSeq) return;
+    select(entry.row.dataset.path);
+    entry.row.scrollIntoView({ block: 'nearest' });
+  }
+
+  return { setRoot, setCallbacks, refreshNode, refreshSelected, getTargetDir, select, hideCtx, reveal };
 }

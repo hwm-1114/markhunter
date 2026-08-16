@@ -105,6 +105,12 @@ const RENDERER_TEST = `
       results.push([name, 'ERR: ' + (err && err.stack ? err.stack.split('\\n').slice(0, 4).join(' // ') : err)]);
     }
   };
+  // 会话隔离：清空 boot 可能恢复的历史会话标签（.smoke-test 之外的路径也可能被恢复），
+  // 保证后续 .tab 数量等断言不受用户历史会话干扰
+  await step('sessionClean', async () => {
+    app.editor.closeAll();
+    return true;
+  });
   await step('tabs', async () => {
     await api.writeFile(root + '/ui.md', '一行一\\n二行二\\n三行三');
     await app.editor.openFile(root + '/ui.md');
@@ -862,6 +868,72 @@ const RENDERER_TEST = `
     return empty && saved && removed
       ? true
       : 'empty=' + empty + ',saved=' + JSON.stringify(s1.favoriteDirs) + ',removed=' + removed;
+  });
+
+  // ---- 会话保持：切换工作目录不丢标签（回归保障） ----
+  await step('tabPersist', async () => {
+    await app.editor.closeAll(); // 隔离：保证活动标签断言确定
+    const p = root + '/persist.md';
+    await api.writeFile(p, '# 会话保持\\n内容');
+    await app.editor.openFile(p);
+    await api.create(root, 'persist-sub', 'dir');
+    // 切换到另一个子目录：已打开标签不应消失
+    await app.openDirFromPath(root + '/persist-sub');
+    const act = app.editor.getActiveTab();
+    const ok1 = !!act && act.path === p;
+    // 再切回 root：标签仍在
+    await app.openDirFromPath(root);
+    const ok2 = !!app.editor.findTabByPath(p);
+    return ok1 && ok2 ? true : 'ok1=' + ok1 + ',ok2=' + ok2 + ',act=' + (act && act.path);
+  });
+
+  // ---- 会话保持：持久化到设置 + 清空后恢复（路径与活动标签正确） ----
+  await step('sessionRestore', async () => {
+    await app.editor.closeAll(); // 隔离：保证会话内容确定
+    const p1 = root + '/sess1.md';
+    const p2 = root + '/sess2.md';
+    await api.writeFile(p1, '# 会话一\\n内容');
+    await api.writeFile(p2, '# 会话二\\n内容');
+    await app.editor.openFile(p1);
+    await app.editor.openFile(p2);
+    await window.__app.session.save(); // 强制落盘（跳过 600ms 防抖）
+    app.state.settings = await api.getSettings(); // 同步渲染进程设置视图（save 只更新主进程缓存）
+    const s = await api.getSettings();
+    const ls = s.lastSession || {};
+    const pathsOk = Array.isArray(ls.paths) && ls.paths.length === 2 && ls.paths[0] === p1 && ls.paths[1] === p2;
+    const activeOk = ls.active === 1; // 当前活动标签为 sess2
+    await app.editor.closeAll();
+    const closedOk = app.editor.getActiveTab() === null;
+    await window.__app.session.restore();
+    const t1 = app.editor.findTabByPath(p1);
+    const t2 = app.editor.findTabByPath(p2);
+    const act = app.editor.getActiveTab();
+    return pathsOk && activeOk && closedOk && !!t1 && !!t2 && !!act && act.path === p2
+      ? true
+      : 'paths=' + JSON.stringify(ls) + ',closed=' + closedOk + ',t1=' + !!t1 + ',t2=' + !!t2 + ',act=' + (act && act.path);
+  });
+
+  // ---- 树自动定位：打开深层文件时左侧树展开各级目录并选中该文件 ----
+  await step('revealTree', async () => {
+    await app.openDirFromPath(root);
+    // 逐级创建深层目录结构（S1：父目录须在工作目录内，create 会校验）
+    await api.create(root, 'reveal-a', 'dir');
+    await api.create(root + '/reveal-a', 'reveal-b', 'dir');
+    const p = await api.create(root + '/reveal-a/reveal-b', 'c.md', 'file');
+    await api.writeFile(p, '# 深层文件\\n内容');
+    await app.tree.setRoot(root); // api.create 不经 UI，手动刷新树让新节点可见
+    await app.editor.openFile(p);
+    await window.__app.tree.reveal(p); // 等待 reveal 完成
+    const rows = Array.from(document.querySelectorAll('#file-tree .tree-node'));
+    const node = rows.find((n) => n.dataset.path === p);
+    if (!node) return 'no node';
+    const selected = node.classList.contains('selected');
+    // 中间各级目录应为展开态（caret.open）
+    const dirsOk = ['reveal-a', 'reveal-b'].every((d) => {
+      const r = rows.find((n) => n.querySelector('.name').textContent === d);
+      return !!r && r.querySelector('.caret').classList.contains('open');
+    });
+    return selected && dirsOk ? true : 'selected=' + selected + ',dirs=' + dirsOk;
   });
 
   return results;

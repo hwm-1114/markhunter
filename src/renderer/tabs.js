@@ -43,7 +43,7 @@ const lightTheme = EditorView.theme({
 export function createEditor(callbacks) {
   const host = document.getElementById('editor-host');
   const tabsEl = document.getElementById('tabs');
-  const { onDocChanged, onTabSwitch, onRequestClose, getWordWrap, onSaveStatus } = callbacks;
+  const { onDocChanged, onTabSwitch, onRequestClose, getWordWrap, onSaveStatus, onSessionChange } = callbacks;
 
   const tabs = []; // { id, path, name, lang, state, dirty, saveTimer, savedContent }
   let activeTab = null;
@@ -140,6 +140,7 @@ export function createEditor(callbacks) {
     tabs.push(tab);
     switchTab(tab);
     window.api.watchFile(path, data.mtime); // 监听外部修改
+    if (onSessionChange) onSessionChange();
     return tab;
   }
 
@@ -162,6 +163,7 @@ export function createEditor(callbacks) {
     };
     tabs.push(tab);
     switchTab(tab);
+    if (onSessionChange) onSessionChange();
     return tab;
   }
 
@@ -181,6 +183,7 @@ export function createEditor(callbacks) {
     renderTabs();
     updateStatusBar();
     onTabSwitch(tab);
+    if (onSessionChange) onSessionChange();
   }
 
   /** Ctrl+Tab / Ctrl+Shift+Tab 循环切换标签 */
@@ -304,6 +307,7 @@ export function createEditor(callbacks) {
     } else {
       renderTabs();
     }
+    if (onSessionChange) onSessionChange();
   }
 
   function closeAll() {
@@ -369,6 +373,21 @@ export function createEditor(callbacks) {
 
   function getActiveTab() {
     return activeTab;
+  }
+
+  /** 会话快照：所有标签路径（含图片/PDF，保持顺序）+ 活动标签下标 */
+  function getSession() {
+    return { paths: tabs.map((t) => t.path), active: tabs.indexOf(activeTab) };
+  }
+
+  /** 若该路径标签已存在则激活并返回 true（会话恢复用），否则 false */
+  function activateByPath(path) {
+    const tab = tabs.find((t) => t.path === path);
+    if (tab) {
+      switchTab(tab);
+      return true;
+    }
+    return false;
   }
 
   function getView() {
@@ -540,5 +559,5 @@ export function createEditor(callbacks) {
     toast(`已从外部重新加载 ${tab.name}`);
   });
 
-  return { openFile, closeTab, closeAll, saveNow, setWordWrap, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab };
+  return { openFile, closeTab, closeAll, saveNow, setWordWrap, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath };
 }
