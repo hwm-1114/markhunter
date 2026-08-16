@@ -4,12 +4,14 @@
 #   npm run release                 # bump patch (0.1.0 -> 0.1.1)
 #   npm run release -- --minor      # bump minor (0.1.0 -> 0.2.0)
 #   npm run release -- --major      # bump major (0.1.0 -> 1.0.0)
+#   npm run release -- -Publish     # bump patch + publish to GitHub Releases (needs GH_TOKEN)
 # NOTE: keep this file pure ASCII (Windows PowerShell 5.1 reads
 #       BOM-less .ps1 as ANSI and CJK chars would corrupt parsing)
 # ============================================================
 param(
   [ValidateSet("patch", "minor", "major")]
-  [string]$Bump = "patch"
+  [string]$Bump = "patch",
+  [switch]$Publish
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,7 +55,13 @@ Write-Host "==> [3/4] electron-builder packaging..."
 if (Test-Path dist) { Remove-Item dist -Recurse -Force }
 $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
 $env:ELECTRON_BUILDER_BINARIES_MIRROR = "https://npmmirror.com/mirrors/electron-builder-binaries/"
-node node_modules/electron-builder/cli.js --win nsis
+$publishArgs = @()
+if ($Publish) {
+  if (-not $env:GH_TOKEN) { throw "-Publish requires GH_TOKEN (GitHub token with repo scope)" }
+  $publishArgs = @("--publish", "always")
+  Write-Host "  -> GitHub Releases publish ENABLED (tag v$newVer will be created)"
+}
+node node_modules/electron-builder/cli.js --win nsis @publishArgs
 if ($LASTEXITCODE -ne 0) { throw "packaging failed" }
 
 # 5. result
@@ -68,4 +76,5 @@ Write-Host " Installer: $($exe.FullName)"
 Write-Host " Size: $sizeMB MB"
 Write-Host " Version: $newVer"
 Write-Host " Copy it to any Windows machine and double-click to install."
+if ($Publish) { Write-Host " Released: https://github.com/hwm-1114/markhunter/releases" }
 Write-Host "============================================================"

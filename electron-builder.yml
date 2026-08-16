@@ -44,3 +44,10 @@ nsis:
 # Electron 二进制下载镜像（国内网络加速）
 electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/
+
+# GitHub Releases 自动发布（release.ps1 -Publish 或 CI 打 tag 时生效；需 GH_TOKEN）
+publish:
+  provider: github
+  owner: hwm-1114
+  repo: markhunter
+  private: true
