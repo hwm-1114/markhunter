@@ -18,7 +18,7 @@
                   "build/**/*",
                   "electron-builder.yml",
                   "README.md",
-                  "README.txt"
+                  "CHANGELOG.md"
               ],
     "scripts":  {
                     "start":  "electron .",
