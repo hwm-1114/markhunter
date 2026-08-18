@@ -10,6 +10,7 @@ const ALLOWED_KEYS = new Set([
   'wordWrap',
   'scrollbarWidth',
   'indentSize',
+  'theme',
   'lastDirectory',
   'aiBaseUrl',
   'aiModel',
@@ -21,6 +22,25 @@ const ALLOWED_KEYS = new Set([
   'lastSession',
 ]);
 
+// 主题引擎：36 个合法主题名（daisyUI 5.7.18 内置 35 + 自研经典 markhunter-classic；实证 theme/*.css = 35）
+// 清单与 docs/开发计划-多主题皮肤.md §3.3.2 分组表一致；非法主题名在 settings:set 静默丢弃（延续 S6 风格）
+const THEME_NAMES = [
+  'markhunter-classic', // 自研经典（应用默认，与 0.1.42 浅色视觉一致）
+  // 浅色 21（内置 color-scheme: light）
+  'light', 'cupcake', 'bumblebee', 'emerald', 'corporate', 'retro', 'cyberpunk',
+  'valentine', 'garden', 'lofi', 'pastel', 'fantasy', 'wireframe', 'cmyk',
+  'autumn', 'acid', 'lemonade', 'winter', 'nord', 'caramellatte', 'silk',
+  // 暗色 14（内置 color-scheme: dark，实证清单 §3.2.7）
+  'dark', 'synthwave', 'halloween', 'forest', 'aqua', 'black', 'luxury',
+  'dracula', 'business', 'night', 'coffee', 'dim', 'sunset', 'abyss',
+];
+
+// 暗色主题 14 个：供主进程窗口底色（防闪白第一层）与 mermaid 明暗切换
+const DARK_THEMES = [
+  'dark', 'synthwave', 'halloween', 'forest', 'aqua', 'black', 'luxury',
+  'dracula', 'business', 'night', 'coffee', 'dim', 'sunset', 'abyss',
+];
+
 const DEFAULTS = {
   pythonPath: '',        // 自定义 Python 解释器路径，空 = 自动检测
   maxFileSizeMB: 50,     // 大文件上限（MB）
@@ -28,6 +48,7 @@ const DEFAULTS = {
   wordWrap: true,        // 自动换行
   scrollbarWidth: 10,    // 滚动条滑块宽度（px）
   indentSize: 4,         // Tab 键插入的空格数（1~8，Shift+Tab 反向缩进）
+  theme: 'markhunter-classic', // 主题（36 款皮肤，见 THEME_NAMES；默认经典，老用户观感零变化）
   lastDirectory: '',     // 上次打开的工作目录
   lastSession: null,     // 上次会话快照（打开过的标签路径 + 活动标签下标；跨重启恢复）
   favoriteDirs: [],      // 收藏的本地目录（最多 50 个，保持添加顺序）
@@ -91,6 +112,8 @@ function loadSettings() {
   } catch {
     cache = { ...DEFAULTS };
   }
+  // 主题名校验（S6 延续）：非法/旧值静默回退默认，防止脏数据进入渲染层
+  if (!THEME_NAMES.includes(cache.theme)) cache.theme = DEFAULTS.theme;
   // API Key 处理：解密供主进程内部使用；检测到旧明文自动迁移为加密并重写文件
   if (cache.aiApiKey) {
     if (cache.aiApiKey.startsWith(AI_KEY_PREFIX)) {
@@ -161,9 +184,13 @@ function registerSettingsIpc() {
         delete p.aiApiKey;
       }
     }
+    // S6 延续：theme 值须在 36 个合法主题名内（非字符串/非法名一律静默丢弃，回退默认）
+    if ('theme' in p && (typeof p.theme !== 'string' || !THEME_NAMES.includes(p.theme))) {
+      delete p.theme;
+    }
     delete p.aiApiKeyClear; // 保险：命令键不落盘
     return toRendererSettings(saveSettings(p));
   });
 }
 
-module.exports = { DEFAULTS, loadSettings, saveSettings, getSettings, registerSettingsIpc };
+module.exports = { DEFAULTS, THEME_NAMES, DARK_THEMES, loadSettings, saveSettings, getSettings, registerSettingsIpc };

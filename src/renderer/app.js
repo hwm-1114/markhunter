@@ -25,13 +25,93 @@ async function boot() {
     settings: await window.api.getSettings(),
   };
 
+  let tree, editor, preview, find, globalSearch, python;
+
   // 应用滚动条宽度
   const applyScrollbarWidth = (w) => {
     document.documentElement.style.setProperty('--scrollbar-width', (w || 10) + 'px');
   };
   applyScrollbarWidth(state.settings.scrollbarWidth);
 
-  let tree, editor, preview, find, globalSearch, python;
+  // ---------- 主题引擎（36 皮肤 = daisyUI 内置 35 + 自研经典） ----------
+  // 清单/分组与 docs/开发计划-多主题皮肤.md §3.3.2 一致；暗色清单 = 实证 14 个 color-scheme: dark
+  const THEME_NAMES = [
+    'markhunter-classic', 'light', 'cupcake', 'bumblebee', 'emerald', 'corporate',
+    'retro', 'cyberpunk', 'valentine', 'garden', 'lofi', 'pastel', 'fantasy',
+    'wireframe', 'cmyk', 'autumn', 'acid', 'lemonade', 'winter', 'nord',
+    'caramellatte', 'silk', 'dark', 'synthwave', 'halloween', 'forest', 'aqua',
+    'black', 'luxury', 'dracula', 'business', 'night', 'coffee', 'dim', 'sunset', 'abyss',
+  ];
+  const DARK_THEMES = [
+    'dark', 'synthwave', 'halloween', 'forest', 'aqua', 'black', 'luxury',
+    'dracula', 'business', 'night', 'coffee', 'dim', 'sunset', 'abyss',
+  ];
+  // 设置下拉分组（label = 下拉显示文案，格式「名 · 中文」）
+  const THEME_GROUPS = [
+    { label: '经典', items: [{ name: 'markhunter-classic', label: 'markhunter-classic · 经典' }] },
+    {
+      label: '推荐',
+      items: [
+        { name: 'light', label: 'light · 亮白' },
+        { name: 'dark', label: 'dark · 曜黑' },
+        { name: 'night', label: 'night · 深蓝夜' },
+        { name: 'dracula', label: 'dracula · 德古拉' },
+        { name: 'nord', label: 'nord · 北欧极光' },
+        { name: 'synthwave', label: 'synthwave · 合成波' },
+        { name: 'corporate', label: 'corporate · 商务' },
+        { name: 'business', label: 'business · 商务暗' },
+      ],
+    },
+    {
+      label: '浅色',
+      items: [
+        { name: 'cupcake', label: 'cupcake · 马卡龙' },
+        { name: 'bumblebee', label: 'bumblebee · 大黄蜂' },
+        { name: 'emerald', label: 'emerald · 祖母绿' },
+        { name: 'retro', label: 'retro · 复古' },
+        { name: 'cyberpunk', label: 'cyberpunk · 赛博朋克' },
+        { name: 'valentine', label: 'valentine · 情人节' },
+        { name: 'garden', label: 'garden · 花园' },
+        { name: 'lofi', label: 'lofi · 低保真' },
+        { name: 'pastel', label: 'pastel · 粉彩' },
+        { name: 'fantasy', label: 'fantasy · 奇幻' },
+        { name: 'wireframe', label: 'wireframe · 线框' },
+        { name: 'cmyk', label: 'cmyk · 印刷四色' },
+        { name: 'autumn', label: 'autumn · 秋日' },
+        { name: 'acid', label: 'acid · 酸性' },
+        { name: 'lemonade', label: 'lemonade · 柠檬水' },
+        { name: 'winter', label: 'winter · 冬日' },
+        { name: 'caramellatte', label: 'caramellatte · 焦糖拿铁' },
+        { name: 'silk', label: 'silk · 丝绸' },
+        { name: 'aqua', label: 'aqua · 水蓝' },
+        { name: 'forest', label: 'forest · 森林' },
+      ],
+    },
+    {
+      label: '深色',
+      items: [
+        { name: 'halloween', label: 'halloween · 万圣节' },
+        { name: 'black', label: 'black · 纯黑' },
+        { name: 'luxury', label: 'luxury · 奢华' },
+        { name: 'coffee', label: 'coffee · 咖啡' },
+        { name: 'dim', label: 'dim · 朦胧' },
+        { name: 'sunset', label: 'sunset · 落日' },
+        { name: 'abyss', label: 'abyss · 深渊' },
+      ],
+    },
+  ];
+
+  /** 全局主题应用：设 data-theme + mermaid 明暗重渲染。
+   *  boot / 设置保存 / 下拉即时预览统一走这里；非法名回退经典 */
+  function applyTheme(name) {
+    const v = THEME_NAMES.includes(name) ? name : 'markhunter-classic';
+    document.documentElement.setAttribute('data-theme', v);
+    if (preview) preview.refreshMermaid(); // 按当前明暗重渲染 mermaid（预览模块未创建时跳过）
+    return v;
+  }
+  // 防闪白第二层：boot 最早阶段（创建编辑器/树之前）应用持久化主题；
+  // 与 index.html 静态 data-theme="markhunter-classic" 组成双层保障（阶段2 裁定：无需 preload sendSync）
+  applyTheme(state.settings.theme);
 
   const getActiveTab = () => editor.getActiveTab();
   const findQuery = () => $('#find-input').value.trim();
@@ -82,7 +162,9 @@ async function boot() {
     },
   });
 
-  preview = createPreview(() => editor, getActiveTab);
+  preview = createPreview(() => editor, getActiveTab, () =>
+    DARK_THEMES.includes(document.documentElement.getAttribute('data-theme'))
+  );
   find = createFind(() => editor, getActiveTab);
   globalSearch = createGlobalSearch(() => state.rootDir, openFileAt);
   python = createPythonPanel(getActiveTab, () => state.settings);
@@ -418,6 +500,30 @@ async function boot() {
     const s = state.settings;
     const body = document.createElement('div');
 
+    // 主题（36 款皮肤，按「经典 / 推荐 / 浅色 / 深色」四组；切换即整窗即时预览，取消/关闭还原）
+    const themeField = document.createElement('div');
+    themeField.className = 'field';
+    const themeLabel = document.createElement('label');
+    themeLabel.textContent = '主题（36 款皮肤，切换即时预览）';
+    const themeSelect = document.createElement('select');
+    themeSelect.className = 'field-select';
+    themeSelect.id = 'theme-select';
+    for (const g of THEME_GROUPS) {
+      const og = document.createElement('optgroup');
+      og.label = g.label;
+      for (const t of g.items) {
+        const opt = document.createElement('option');
+        opt.value = t.name;
+        opt.textContent = t.label;
+        og.appendChild(opt);
+      }
+      themeSelect.appendChild(og);
+    }
+    themeSelect.value = THEME_NAMES.includes(s.theme) ? s.theme : 'markhunter-classic';
+    const openedTheme = themeSelect.value; // 打开时的主题：取消时还原到它
+    themeSelect.addEventListener('change', () => applyTheme(themeSelect.value)); // Q9：下拉即色板
+    themeField.append(themeLabel, themeSelect);
+
     // Python 解释器
     const pyField = document.createElement('div');
     pyField.className = 'field';
@@ -613,18 +719,25 @@ async function boot() {
     wrapText.textContent = '自动换行';
     wrapRow.append(wrapInput, wrapText);
 
-    body.append(pyField, sizeField, saveField, sbField, indentField, aiField, wrapRow);
+    body.append(themeField, pyField, sizeField, saveField, sbField, indentField, aiField, wrapRow);
 
     openModal({
       title: '设置',
       body,
       actions: [
-        { label: '取消', onClick: closeModal },
+        {
+          label: '取消',
+          onClick: () => {
+            applyTheme(openedTheme); // 还原打开时的主题（即时预览不落盘）
+            closeModal();
+          },
+        },
         {
           label: '保存',
           primary: true,
           onClick: async (btn) => {
             const patch = {
+              theme: themeSelect.value,
               pythonPath: pyInput.value.trim(),
               maxFileSizeMB: Math.min(2048, Math.max(1, parseInt(sizeInput.value, 10) || 50)),
               autoSaveDelay: Math.max(100, parseInt(saveInput.value, 10) || 800),
@@ -639,6 +752,7 @@ async function boot() {
               aiAskBeforeApply: aiAskInput.checked,
             };
             state.settings = await window.api.setSettings(patch);
+            applyTheme(state.settings.theme); // 兜底：保证 data-theme 与落盘值一致（change 已即时预览，此处幂等）
             editor.setWordWrap(patch.wordWrap);
             editor.setIndentSize(patch.indentSize);
             applyScrollbarWidth(patch.scrollbarWidth);
@@ -785,7 +899,7 @@ async function boot() {
   updateRunButton();
   // S10：window.__app 仅开发环境暴露（冒烟/扩展测试在 dev 下运行，不受影响；打包版无此接口）
   if (!(await window.api.isPackaged())) {
-    window.__app = { state, editor, tree, preview, find, globalSearch, python, openDirFromPath, aiPanel, executeAiTool, favorites, syncExternalTree, session: { save: () => persistSession(true), restore: restoreSession } };
+    window.__app = { state, editor, tree, preview, find, globalSearch, python, openDirFromPath, aiPanel, executeAiTool, favorites, syncExternalTree, session: { save: () => persistSession(true), restore: restoreSession }, applyTheme, THEME_NAMES, DARK_THEMES };
   }
 }
 

@@ -1,0 +1,99 @@
+/* ============================================================
+   MarkHunter 主题引擎入口（Tailwind CSS v4 + daisyUI 5）
+   - 纯编译期 CSS：产物 src/renderer/dist/tailwind.css（不入库，dist/ 约定）
+   - 层叠设计：产物先于 styles.css 加载；styles.css 保持 unlayered（最高优先级）
+   - 36 皮肤 = daisyUI 内置 35 + 自研「经典」markhunter-classic（应用默认）
+   - 本文件改动后需重新构建：node scripts/build.js
+   ============================================================ */
+@import "tailwindcss";
+
+/* daisyUI 主题引擎：全量 35 个内置皮肤
+   （light 为内置默认、dark 自动跟随 prefers-color-scheme，仅无 data-theme 时生效） */
+@plugin "daisyui" {
+  themes: all;
+  logs: false;
+}
+
+/* 「经典」皮肤：自研主题，映射 styles.css 0.1.42 现 :root 浅色值
+   default: true → 应用到 :where(:root)，无 data-theme 时即生效，杜绝闪白 */
+@plugin "daisyui/theme" {
+  name: "markhunter-classic";
+  default: true;
+  color-scheme: light;
+
+  /* —— daisyUI 基础令牌（映射 styles.css 现 :root 值） —— */
+  --color-base-100: #ffffff;      /* 面板底  ← --bg-panel */
+  --color-base-200: #f5f7fa;      /* 页面底  ← --bg */
+  --color-base-300: #eef2f7;      /* hover   ← --bg-hover */
+  --color-base-content: #26303e;  /* 正文    ← --text */
+  --color-primary: #3b82f6;       /* ← --accent */
+  --color-primary-content: #ffffff;
+  --color-secondary: #14b8a6;     /* ← --accent-2 */
+  --color-secondary-content: #ffffff;
+  --color-accent: #3b82f6;
+  --color-accent-content: #ffffff;
+  --color-error: #e5484d;         /* ← --danger */
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;                  /* daisyUI 语义：边框宽度（与 MarkHunter --mh-border 颜色语义不冲突） */
+  --depth: 1;
+  --noise: 0;
+
+  /* 注：--mh-* 扩展令牌不在本块声明 —— default:true 会让本块以 :where(:root) 形式
+     无条件匹配 html，若在此声明 --mh-*，会以 @layer base 恒压过下方 @layer theme 的
+     桥接推导层，导致所有主题的 --mh-* 都被锁成经典值（探针实证）。经典精确值改由
+     下方 @layer base 的 [data-theme="markhunter-classic"] 精确层提供。 */
+}
+
+/* ============================================================
+   令牌桥（:root 通用推导层）
+   --mh-* 语义变量 = daisyUI 主题令牌 → 35 个内置主题自适应
+   置于 @layer theme。
+   ============================================================ */
+@layer theme {
+  :root {
+    --mh-bg-panel: var(--color-base-100);                                   /* 面板底 */
+    --mh-bg: var(--color-base-200);                                         /* 页面底 */
+    --mh-bg-hover: color-mix(in oklab, var(--color-base-200), black 2%);    /* 悬停（不映射 base-300，防与边框糊成一片） */
+    --mh-bg-active: var(--color-base-300);                                  /* 选中态 */
+    --mh-border: var(--color-base-300);                                     /* 边框（daisyUI 无颜色等价令牌） */
+    --mh-text: var(--color-base-content);                                   /* 正文 */
+    --mh-text-2: color-mix(in oklab, var(--color-base-content) 60%, transparent); /* 次级文字 */
+    --mh-accent: var(--color-primary);                                      /* 主强调 */
+    --mh-accent-content: var(--color-primary-content);                      /* 主强调上的文字 */
+    --mh-accent-soft: color-mix(in oklab, var(--color-primary) 12%, var(--color-base-100)); /* 强调淡底 */
+    --mh-accent-2: var(--color-secondary);                                  /* 次强调 */
+    --mh-danger: var(--color-error);                                        /* 危险色 */
+    --mh-radius: 8px;                                                       /* 圆角（经典现值） */
+    --mh-shadow: 0 1px 3px rgba(16, 42, 84, 0.08), 0 4px 16px rgba(16, 42, 84, 0.06); /* 阴影（经典现值） */
+  }
+}
+
+/* ============================================================
+   经典精确层（修正：default:true 的 :where(:root) 零特异性、无条件匹配，
+   若 --mh-* 写在主题块内会以 @layer base 恒压过上方 @layer theme 桥接层，
+   使所有主题的 --mh-* 锁死为经典值。故经典精确 hex 仅在
+   [data-theme="markhunter-classic"] 时声明：@layer base 优先于 theme 层，
+   经典主题下像素级覆盖桥接推导值；其余 35 个内置主题不受影响，自适应推导。）
+   ============================================================ */
+@layer base {
+  [data-theme="markhunter-classic"] {
+    --mh-bg-panel: #ffffff;
+    --mh-bg: #f5f7fa;
+    --mh-bg-hover: #eef2f7;
+    --mh-bg-active: #e2ecfc;
+    --mh-border: #e3e8ef;
+    --mh-text: #26303e;
+    --mh-text-2: #6b7686;
+    --mh-accent: #3b82f6;
+    --mh-accent-content: #ffffff;
+    --mh-accent-soft: #e8f1fe;
+    --mh-accent-2: #14b8a6;
+    --mh-danger: #e5484d;
+    --mh-radius: 8px;
+    --mh-shadow: 0 1px 3px rgba(16, 42, 84, 0.08), 0 4px 16px rgba(16, 42, 84, 0.06);
+  }
+}

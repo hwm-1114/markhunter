@@ -1514,6 +1514,128 @@ const RENDERER_TEST = `
     return fOk && dOk ? true : 'f=' + items1.join('|') + ',d=' + items2.join('|');
   });
 
+  // ================= 多主题皮肤（阶段2：主题下拉 / 持久化 / 白名单 / 防闪白 / 明暗适配） =================
+  // 本地助手：落盘 + 同步渲染层 state.settings（openSettings 读它）+ 应用。
+  // 缺 state.settings 同步会导致后续用例的下拉初值与 data-theme 失真（api.setSettings 不更新渲染层状态）
+  const setTheme = async (name) => {
+    await api.setSettings({ theme: name });
+    app.state.settings = await api.getSettings();
+    app.applyTheme(name);
+  };
+
+  // themeDefault：默认主题 = markhunter-classic（重置后 getSettings 往返 + applyTheme 应用一致）
+  await step('themeDefault', async () => {
+    await setTheme('markhunter-classic');
+    const s = await api.getSettings();
+    const attr = document.documentElement.getAttribute('data-theme');
+    return s.theme === 'markhunter-classic' && attr === 'markhunter-classic'
+      ? true
+      : 'saved=' + s.theme + ',attr=' + attr;
+  });
+
+  // themeCatalog：主题全集 36 个合法名（含 markhunter-classic、无重复）+ 暗色 14 个
+  await step('themeCatalog', async () => {
+    const names = app.THEME_NAMES || [];
+    const dark = app.DARK_THEMES || [];
+    const uniq = new Set(names).size === names.length;
+    return names.length === 36 && names.includes('markhunter-classic') && dark.length === 14 && uniq
+      ? true
+      : 'names=' + names.length + ',dark=' + dark.length + ',uniq=' + uniq;
+  });
+
+  // themeApplyDirect：applyTheme('night') → data-theme 变化 + 页面背景实际变色（暗色生效）
+  await step('themeApplyDirect', async () => {
+    const bgBefore = getComputedStyle(document.body).backgroundColor;
+    app.applyTheme('night');
+    const attr = document.documentElement.getAttribute('data-theme');
+    const bgAfter = getComputedStyle(document.body).backgroundColor;
+    const changed = bgAfter !== bgBefore;
+    app.applyTheme('markhunter-classic');
+    return attr === 'night' && changed
+      ? true
+      : 'attr=' + attr + ',bg=' + bgBefore + '->' + bgAfter;
+  });
+
+  // themePersist：setSettings 后 getSettings 往返保持
+  await step('themePersist', async () => {
+    await setTheme('dracula');
+    const s = await api.getSettings();
+    await setTheme('markhunter-classic');
+    return s.theme === 'dracula' ? true : 'saved=' + s.theme;
+  });
+
+  // themeWhitelist：非法主题名被静默丢弃（保持原值，不回退崩坏）
+  await step('themeWhitelist', async () => {
+    await setTheme('markhunter-classic');
+    await api.setSettings({ theme: '不存在的主题名' });
+    const s = await api.getSettings();
+    return s.theme === 'markhunter-classic' ? true : 'saved=' + s.theme;
+  });
+
+  // themeRoundTrip：白名单 + 持久化往返（仿 scrollbarSetting 模式；非法值 12345 被丢弃）
+  await step('themeRoundTrip', async () => {
+    await setTheme('nord');
+    const s1 = await api.getSettings();
+    await api.setSettings({ theme: 12345 });
+    const s2 = await api.getSettings();
+    await setTheme('markhunter-classic');
+    return s1.theme === 'nord' && s2.theme === 'nord' ? true : 's1=' + s1.theme + ',s2=' + s2.theme;
+  });
+
+  // themeApplyViaUI：设置面板主题下拉改值 → data-theme 即时变化；取消后还原
+  await step('themeApplyViaUI', async () => {
+    document.querySelector('#btn-settings').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const sel = document.querySelector('#theme-select');
+    if (!sel) {
+      document.querySelector('#modal-actions .tbtn').click();
+      return 'no theme-select';
+    }
+    sel.value = 'synthwave';
+    sel.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 50));
+    const changed = document.documentElement.getAttribute('data-theme') === 'synthwave';
+    document.querySelector('#modal-actions .tbtn').click(); // 取消
+    await new Promise((r) => setTimeout(r, 50));
+    const restored = document.documentElement.getAttribute('data-theme') === 'markhunter-classic';
+    return changed && restored ? true : 'changed=' + changed + ',restored=' + restored;
+  });
+
+  // themeRestore：打开设置时下拉值 = 当前主题；改值预览后取消 → 还原打开时的主题
+  await step('themeRestore', async () => {
+    await setTheme('corporate');
+    document.querySelector('#btn-settings').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const sel = document.querySelector('#theme-select');
+    const openedVal = sel ? sel.value : '';
+    sel.value = 'black';
+    sel.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 50));
+    const changed = document.documentElement.getAttribute('data-theme') === 'black';
+    document.querySelector('#modal-actions .tbtn').click(); // 取消
+    await new Promise((r) => setTimeout(r, 50));
+    const restored = document.documentElement.getAttribute('data-theme') === 'corporate';
+    await setTheme('markhunter-classic');
+    return changed && restored && openedVal === 'corporate'
+      ? true
+      : 'changed=' + changed + ',restored=' + restored + ',opened=' + openedVal;
+  });
+
+  // previewListStyle：预览 ul/ol 有 list-style（Preflight 视觉盲区防回归：disc/decimal）
+  await step('previewListStyle', async () => {
+    await api.writeFile(root + '/liststyle.md', '- 甲\\n- 乙\\n\\n1. 一\\n2. 二');
+    await app.editor.openFile(root + '/liststyle.md');
+    app.preview.setMode('split');
+    await new Promise((r) => setTimeout(r, 400));
+    const uls = document.querySelectorAll('.markdown-body ul');
+    const ols = document.querySelectorAll('.markdown-body ol');
+    const ulOk = uls.length > 0 && getComputedStyle(uls[0]).listStyleType === 'disc';
+    const olOk = ols.length > 0 && getComputedStyle(ols[0]).listStyleType === 'decimal';
+    return ulOk && olOk
+      ? true
+      : 'ul=' + (uls[0] ? getComputedStyle(uls[0]).listStyleType : 'none') + ',ol=' + (ols[0] ? getComputedStyle(ols[0]).listStyleType : 'none');
+  });
+
   return results;
 })()
 `;

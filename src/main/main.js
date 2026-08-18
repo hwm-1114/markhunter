@@ -3,7 +3,7 @@ const path = require('path');
 const { registerFileIpc } = require('./ipc');
 const { registerSearchIpc } = require('./search');
 const { registerPythonIpc } = require('./python');
-const { registerSettingsIpc } = require('./settings');
+const { registerSettingsIpc, loadSettings, DARK_THEMES } = require('./settings');
 const { registerWatchIpc, markSelfWrite, stopAllWatches } = require('./filewatch');
 const { registerAiIpc } = require('./ai');
 
@@ -21,6 +21,10 @@ const dirArg = (() => {
 })();
 
 function createWindow() {
+  // 防闪白第一层：暗色主题（DARK_THEMES 14 个）设深色窗口底色，避免冷启动首帧白闪；
+  // 渲染侧另有 index.html 静态 data-theme + boot 即时应用双层保障（阶段2，无需 preload sendSync）
+  const themeName = loadSettings().theme;
+  const isDarkTheme = DARK_THEMES.includes(themeName);
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -28,7 +32,7 @@ function createWindow() {
     minHeight: 600,
     title: 'MarkHunter',
     autoHideMenuBar: true,
-    backgroundColor: '#f5f7fa',
+    backgroundColor: isDarkTheme ? '#1d232a' : '#f5f7fa', // daisyUI dark 底色 / 经典浅底
     icon: path.join(__dirname, '../../assets/icon.png'),
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),

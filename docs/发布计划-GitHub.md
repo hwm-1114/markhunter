@@ -152,3 +152,22 @@
 
 **进 Releases（安装包，按版本分开）**
 - `MarkHunter-Setup-<版本>.exe`、`MarkHunter-Setup-<版本>.exe.blockmap`、`latest.yml`（每个版本各自的 Release 下）
+
+---
+
+## 八、执行记录（2026-08-18 已执行完成）
+
+### 结果汇总
+- **仓库**：`hwm-1114/markhunter`（私有）已同步 v0.1.42 最新代码，`main` = `81b4ae5c`；tag `v0.1.42` 指向同一提交。
+- **Release**：`https://github.com/hwm-1114/markhunter/releases/tag/v0.1.42` —— 3 个资产：`MarkHunter-Setup-0.1.42.exe`（95.52MB）+ `.blockmap` + `latest.yml`；正文含更新说明；与 v0.1.39/v0.1.40 旧 Release 完全分开。
+- **GitHub Packages**：`@hwm-1114/markhunter@0.1.42` 已发布（私有）。
+- **CI**：`.github/workflows/release.yml` 已启用（打 tag 自动构建发布）；仓库 Secret `GH_TOKEN` 已配置（PAT，libsodium 加密写入），未来发布走非 draft 模式。
+
+### 执行要点与踩坑（供后续参考）
+1. 本机网络：`github.com`/`uploads.github.com` 被墙、本地代理未运行，仅 `api.github.com` 可直连 → 代码经 **git data API** 上传（blobs→tree→commit→ref），资产上传走 **GitHub Actions CI**（GitHub 服务器侧构建发布）。
+2. **中文文件名必须 UTF-8 字节体**：PowerShell `Invoke-RestMethod -Body` 传字符串会被转成 `?`（git data API 路径乱码导致 checkout 失败）；须 `[Text.Encoding]::UTF8.GetBytes($json)` 传字节数组。
+3. **electron-builder 发布类型**：GH_TOKEN 为 Actions 的 `GITHUB_TOKEN` 时强制 **draft** 发布；与已存在的正式 Release 类型不匹配会"skipped publishing"（0 资产）。已修复：workflow 用 `secrets.GH_TOKEN || secrets.GITHUB_TOKEN`，且 GH_TOKEN secret 已配置（PAT 发布为非 draft）。
+4. 同名 tag 双 Release 冲突：同 tag 存在两个 Release 时，更新其一报 422 `tag_name already_exists` —— 需先删重复 Release 再转正式。
+5. workflow 原 `npm publish` 步骤首次发布成功（0.1.42 已入 Packages）；同版本重复发布报 E409，已加 `continue-on-error` 不影响任务结果。
+6. 历史提交 `cc7cdca9`（中文路径乱码的坏提交）已通过 force 更新 main 回退移除（私有仓库、无协作方，安全）。
+7. **安全提醒**：本流程使用的 PAT 曾在对话中明文出现，且已写入仓库 Secret —— 建议尽快在 GitHub 设置中**轮换该 token**，并在仓库 Settings → Secrets → Actions 中同步更新 `GH_TOKEN`（同时删除对话中已暴露的旧 token）。

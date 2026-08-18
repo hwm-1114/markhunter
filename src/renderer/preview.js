@@ -21,9 +21,7 @@ mermaid.initialize({
 });
 
 let mermaidSeq = 0;
-let renderToken = 0;
-
-/** 解析 markdown 图片引用为绝对 file:// URL（支持 Windows 反斜杠路径与 ./ ../） */
+let renderToken = 0;/** 解析 markdown 图片引用为绝对 file:// URL（支持 Windows 反斜杠路径与 ./ ../） */
 function resolveImgSrc(src, mdPath) {
   const s = String(src).trim();
   if (/^(https?:|data:|file:)/i.test(s)) return s;
@@ -58,7 +56,7 @@ function showImageDetail(img, tab) {
   });
 }
 
-export function createPreview(getEditor, getTab) {
+export function createPreview(getEditor, getTab, getIsDark) {
   const previewHost = $('#preview-host');
   const contentEl = $('#preview-content');
   const editorHost = $('#editor-host');
@@ -77,6 +75,7 @@ export function createPreview(getEditor, getTab) {
         if (token !== renderToken) continue; // 已有更新的渲染，丢弃过期结果
         const wrap = document.createElement('div');
         wrap.className = 'mermaid-wrap';
+        wrap.dataset.mermaidSrc = code.textContent; // 保留源码，主题切换后可按明暗重渲染
         wrap.innerHTML = svg;
         wrap.title = '双击放大查看';
         // 双击 mermaid 图 → 打开查看器
@@ -93,6 +92,39 @@ export function createPreview(getEditor, getTab) {
         pre.replaceWith(div);
       }
     }
+  }
+
+  /** 主题切换后重渲染已渲染的 mermaid 块：仅刷新 .mermaid-wrap 的 SVG 内容（保留滚动位置），
+   *  失败或过期结果由 renderToken 守卫丢弃（与 renderMermaid 同一令牌协议） */
+  async function reRenderMermaid() {
+    const token = ++renderToken;
+    const wraps = contentEl.querySelectorAll('.mermaid-wrap');
+    for (const wrap of Array.from(wraps)) {
+      const src = wrap.dataset.mermaidSrc;
+      if (!src) continue;
+      const id = 'mermaid-' + Date.now() + '-' + ++mermaidSeq;
+      try {
+        const { svg } = await mermaid.render(id, src);
+        if (token !== renderToken) continue;
+        wrap.innerHTML = svg;
+        wrap.title = '双击放大查看';
+      } catch (err) {
+        if (token !== renderToken) continue;
+        wrap.textContent = 'mermaid 渲染失败：' + (err && err.message ? err.message : err);
+      }
+    }
+  }
+
+  /** 按当前主题明暗切换 mermaid 主题（dark → 'dark'，浅色 → 'default'）并重渲染已渲染的图。
+   *  securityLevel:'strict' 保持不变；由 app.js applyTheme 在 boot/设置保存/即时预览时统一调用 */
+  function refreshMermaid() {
+    const dark = getIsDark ? !!getIsDark() : false;
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: dark ? 'dark' : 'default',
+      securityLevel: 'strict',
+    });
+    reRenderMermaid();
   }
 
   function render() {
@@ -181,7 +213,7 @@ export function createPreview(getEditor, getTab) {
   // 双击预览区空白处可临时暂停/恢复同步（图片/mermaid 上的双击会 stopPropagation）
   previewHost.addEventListener('dblclick', () => {
     scrollSync = !scrollSync;
-    previewHost.style.outline = scrollSync ? '' : '2px dashed #93c5fd';
+    previewHost.style.outline = scrollSync ? '' : '2px dashed color-mix(in oklab, var(--mh-accent) 60%, var(--mh-bg-panel))';
     setTimeout(() => { previewHost.style.outline = ''; }, 1200);
   });
 
@@ -239,5 +271,5 @@ export function createPreview(getEditor, getTab) {
     editorHost.style.flex = '';
   });
 
-  return { render, applyMode, cycleMode, setMode, getMode, resetZoom: () => setZoom(1) };
+  return { render, applyMode, cycleMode, setMode, getMode, refreshMermaid, resetZoom: () => setZoom(1) };
 }

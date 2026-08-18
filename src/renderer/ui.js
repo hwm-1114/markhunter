@@ -122,7 +122,7 @@ export function showPrompt(title, label, initial, onOk) {
 /** 提示信息弹窗 */
 export function alertBox(title, message) {
   const p = document.createElement('p');
-  p.style.cssText = 'color:#52606d;line-height:1.7;white-space:pre-wrap;word-break:break-all;';
+  p.style.cssText = 'color:var(--mh-text-2);line-height:1.7;white-space:pre-wrap;word-break:break-all;';
   p.textContent = message;
   openModal({
     title,

@@ -48,6 +48,10 @@
 - OpenAI 兼容接口（DeepSeek 预置），function calling 读取/修改文档、搜索、建文件
 - API Key 经 Windows DPAPI 加密存储
 
+**主题皮肤**
+- **36 款皮肤**一键切换（设置 → 主题）：经典 / 浅色 / 深色 / 彩色分组，切换即整窗即时预览
+- 编辑器与 mermaid 图表随主题同步换肤（深色主题自动切换 mermaid dark 渲染）
+
 **安全加固**
 - 渲染进程沙箱、contextIsolation、CSP、导航防护
 - 文件操作路径校验（防目录穿越）、设置白名单、Python 运行校验

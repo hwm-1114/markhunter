@@ -29,15 +29,15 @@ function langExt(lang) {
   return [];
 }
 
-// 简约清新浅色主题
+// 简约清新浅色主题（表层 var() 化：data-theme 一变即整体换肤，无需 JS 重配）
 const lightTheme = EditorView.theme({
-  '&': { backgroundColor: '#ffffff', color: '#26303e' },
-  '.cm-content': { caretColor: '#3b82f6' },
+  '&': { backgroundColor: 'var(--mh-bg-panel)', color: 'var(--mh-text)' },
+  '.cm-content': { caretColor: 'var(--mh-accent)' },
   '.cm-line': { padding: '0 12px' },
-  '.cm-search-match': { backgroundColor: '#ffe08a', borderRadius: '2px' },
-  '.cm-search-current': { backgroundColor: '#ffb84d', borderRadius: '2px', outline: '1px solid #f59e0b' },
-  '.cm-matchingBracket': { backgroundColor: '#dbeafe', outline: '1px solid #93c5fd' },
-  '.cm-tooltip': { border: '1px solid #e3e8ef', borderRadius: '8px', boxShadow: '0 6px 20px rgba(16,42,84,.12)' },
+  '.cm-search-match': { backgroundColor: 'var(--mh-accent-soft)', borderRadius: '2px' },
+  '.cm-search-current': { backgroundColor: 'var(--mh-accent)', color: 'var(--mh-accent-content)', borderRadius: '2px', outline: '1px solid var(--mh-accent)' },
+  '.cm-matchingBracket': { backgroundColor: 'var(--mh-accent-soft)', outline: '1px solid color-mix(in oklab, var(--mh-accent) 60%, var(--mh-bg-panel))' },
+  '.cm-tooltip': { border: '1px solid var(--mh-border)', borderRadius: '8px', boxShadow: '0 6px 20px rgba(16,42,84,.12)' },
 });
 
 export function createEditor(callbacks) {

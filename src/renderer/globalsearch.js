@@ -61,7 +61,7 @@ export function createGlobalSearch(getRootDir, onOpenFileAt) {
       const name = document.createElement('span');
       name.textContent = baseName(file);
       const dir = document.createElement('span');
-      dir.style.cssText = 'color:#8a94a3;font-weight:400;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      dir.style.cssText = 'color:var(--mh-text-2);font-weight:400;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
       dir.textContent = dirName(file);
       const badge = document.createElement('span');
       badge.className = 'gs-count-badge';
