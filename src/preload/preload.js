@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('api', {
   writeBinary: (p, buf) => ipcRenderer.invoke('fs:write-binary', p, buf),
   stat: (p) => ipcRenderer.invoke('fs:stat', p),
   copyImage: (p) => ipcRenderer.invoke('clipboard:write-image', p),
+  readClipboardText: () => ipcRenderer.invoke('clipboard:read-text'),
   watchFile: (p, mtime) => ipcRenderer.invoke('fs:watch-file', p, mtime),
   unwatchFile: (p) => ipcRenderer.invoke('fs:unwatch-file', p),
   onFileChanged: (cb) => ipcRenderer.on('file-changed', (_e, d) => cb(d)),

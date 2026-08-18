@@ -112,6 +112,9 @@ app.whenReady().then(() => {
     return { width: size.width, height: size.height };
   });
 
+  // 读取剪贴板纯文本（编辑器右键「粘贴为纯文本」用）
+  ipcMain.handle('clipboard:read-text', () => clipboard.readText());
+
   createWindow();
 
   app.on('activate', () => {

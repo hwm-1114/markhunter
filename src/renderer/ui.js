@@ -201,3 +201,59 @@ export function initDragResize(divider, opts) {
     }
   });
 }
+
+// ---------- 通用右键菜单 ----------
+// items 结构与 tree.js 原 renderCtxMenu 相同：
+//   { label, onClick }  普通项（点击后自动隐藏菜单并调用 onClick）
+//   { label, danger, onClick }  危险项（红色样式）
+//   { sep: true }  分隔线
+// 点击页面其它位置 / 按 Esc / 再次右键空白处 都会自动隐藏。
+const ctxMenu = $('#ctx-menu');
+
+let suppressCtxHide = false; // 本次 contextmenu 冒泡到 document 时刚渲染了新菜单 → 不隐藏
+
+/** 在 (x, y) 显示右键菜单（坐标越界时 clamp 到窗口内） */
+export function showContextMenu(x, y, items) {
+  ctxMenu.innerHTML = '';
+  for (const it of items || []) {
+    if (it.sep) {
+      const sep = document.createElement('div');
+      sep.className = 'ctx-sep';
+      ctxMenu.appendChild(sep);
+      continue;
+    }
+    const el = document.createElement('div');
+    el.className = `ctx-item ${it.danger ? 'danger' : ''}`;
+    el.textContent = it.label;
+    el.addEventListener('click', () => {
+      hideContextMenu();
+      if (typeof it.onClick === 'function') it.onClick();
+    });
+    ctxMenu.appendChild(el);
+  }
+  ctxMenu.classList.remove('hidden');
+  const rect = ctxMenu.getBoundingClientRect();
+  ctxMenu.style.left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4)) + 'px';
+  ctxMenu.style.top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4)) + 'px';
+  suppressCtxHide = true;
+  // 若调用方（如树节点）对 contextmenu 做了 stopPropagation，document 监听器不会消费该标记，
+  // 用下一个宏任务自动复位，避免残留导致后续右键空白处无法隐藏菜单
+  setTimeout(() => { suppressCtxHide = false; }, 0);
+}
+
+export function hideContextMenu() {
+  ctxMenu.classList.add('hidden');
+  ctxMenu.innerHTML = '';
+}
+
+document.addEventListener('click', hideContextMenu);
+document.addEventListener('contextmenu', () => {
+  if (suppressCtxHide) {
+    suppressCtxHide = false;
+    return;
+  }
+  hideContextMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') hideContextMenu();
+});

@@ -130,7 +130,7 @@ button { font-family: inherit; }
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
-  border-right: 1px solid var(--border);
+  /* 分隔线由相邻的 #sidebar-divider（.resize-divider::after）绘制，避免双线 */
   min-height: 0;
 }
 
@@ -346,6 +346,20 @@ button { font-family: inherit; }
 .tree-node .node-size { color: var(--text-2); font-size: 11px; flex: none; }
 .tree-children { margin-left: 16px; border-left: 1px dashed var(--border); }
 
+/* 需求1：外部文件区 —— 虚拟根行徽标（外部文件数） */
+.tree-node .ext-badge {
+  flex: none;
+  font-size: 10px;
+  line-height: 15px;
+  min-width: 17px;
+  text-align: center;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid #d5e4fb;
+  border-radius: 9px;
+  padding: 0 5px;
+}
+
 /* 编辑区 */
 #workbench { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
@@ -383,8 +397,24 @@ button { font-family: inherit; }
   color: var(--text);
   font-weight: 600;
 }
+/* 固定（pin）标签：强调色左边框 + 淡蓝渐变底 */
+.tab.pinned {
+  border-left: 2px solid var(--accent);
+  padding-left: 11px;
+  background: linear-gradient(180deg, var(--accent-soft), transparent 55%);
+}
+.tab.pinned.active {
+  background: linear-gradient(180deg, var(--accent-soft), var(--bg) 72%);
+}
 .tab .tab-name { overflow: hidden; text-overflow: ellipsis; }
 .tab .tab-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+.tab .tab-pin {
+  width: 15px; height: 15px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; flex: none;
+  border-radius: 4px;
+}
+.tab .tab-pin:hover { background: var(--bg-active); }
 .tab .tab-close {
   width: 16px; height: 16px;
   display: inline-flex; align-items: center; justify-content: center;

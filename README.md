@@ -2,46 +2,100 @@
 
 > 执笔即江湖，所写皆锋芒。
 
-基于 Electron 的 Windows 桌面 Markdown 编辑器（私有仓库）。
+基于 Electron 的 Windows 桌面 Markdown/文本编辑器（私有仓库，MIT 协议）。
 
-## 功能
+## 功能特性
 
-- 目录树文件管理、收藏目录、多标签编辑
-- .md / .txt / .json / .py 语法高亮、自动保存、大文件保护
-- Markdown 预览：编辑/分屏/仅预览三模式、mermaid 渲染
-- 文件内搜索（Ctrl+F）、全局搜索（Ctrl+Shift+F）
-- 图片查看、Python 运行、设置面板
-- 安全加固：API Key 加密存储、Electron Fuses
+**文件管理**
+- 目录树懒加载浏览（目录/文件图标、大小显示），新建/重命名/删除（带确认）
+- **收藏目录**：工具栏 ⭐ 一键收藏当前工作目录，左侧「📌 收藏目录」列表点击直达
+
+**多标签编辑**
+- `.md / .txt / .json / .py` 自动语法高亮，多标签打开/切换/关闭，未保存圆点标记
+- 自动保存（输入防抖，间隔可在设置调整）；大文件保护（上限可设 1~2048MB）
+- **Tab 键缩进**（默认 4 空格，设置中可调 1~8，Shift+Tab 反向缩进）
+
+**会话保持**
+- 切换工作目录不丢失已打开标签
+- 重启自动恢复上次打开的标签与活动标签（含固定状态）
+
+**Markdown 预览**
+- 编辑 / 分屏 / 仅预览三模式（Ctrl+B），分隔条可拖拽
+- mermaid 图渲染、Ctrl+滚轮缩放（Ctrl+0 重置）
+- **树自动定位**：查看文件时左侧目录树自动展开定位；工作目录外的文件显示在「外部文件」分支，可按真实路径链定位
+
+**搜索**
+- 文件内搜索（Ctrl+F）：底部面板全部匹配、点击跳转、编辑器同步高亮
+- 全局搜索（Ctrl+Shift+F）：左侧栏按文件分组、点击打开定位
+
+**图片**
+- 文件树点击查看图片/PDF，滚轮缩放、左键拖拽平移、一键复制
+- Markdown 中粘贴图片自动保存到同目录并插入引用
+- 双击预览图片/mermaid 打开详情查看器
+
+**标签管理**
+- **固定（Pin）**：右键标签固定/取消固定，📌 一键切换
+- 批量关闭：关闭其它 / 关闭右侧 / 关闭左侧（自动跳过已固定标签）
+
+**右键菜单**
+- 编辑器右键「粘贴为纯文本」：经主进程读取系统剪贴板文本，去除富文本格式
+
+**Python 运行**
+- 运行当前 `.py`，解释器自动检测（PATH/注册表/常见路径）或手动选择
+- 内嵌输出面板（stdout/stderr 分色、退出码、耗时），可终止（含进程树）
+
+**AI 助手**
+- OpenAI 兼容接口（DeepSeek 预置），function calling 读取/修改文档、搜索、建文件
+- API Key 经 Windows DPAPI 加密存储
+
+**安全加固**
+- 渲染进程沙箱、contextIsolation、CSP、导航防护
+- 文件操作路径校验（防目录穿越）、设置白名单、Python 运行校验
+- asar 完整性 + Electron Fuses（runAsNode 禁用等）
+
+## 快捷键
+
+| 快捷键 | 功能 |
+|---|---|
+| Ctrl+O | 选择目录 |
+| Ctrl+S | 保存当前文件 |
+| Ctrl+F | 文件内搜索 |
+| Ctrl+Shift+F | 全局搜索 |
+| Ctrl+B | 预览模式切换（编辑/分屏/仅预览） |
+| Ctrl+0 | 预览缩放重置 |
+| Ctrl+W | 关闭当前标签 |
+| Ctrl+Tab / Ctrl+Shift+Tab | 循环切换标签 |
+| Tab / Shift+Tab | 缩进 / 反向缩进 |
+| Esc | 收起底部面板 / 关闭右键菜单 |
+
+## 安装与下载
+
+- 最新安装包见仓库 **Releases**：`MarkHunter-Setup-<版本>.exe`（Windows x64，可自选安装目录）
+- 未签名应用首次运行可能触发 Windows SmartScreen：点击「更多信息」→「仍要运行」
 
 ## 开发运行
 
 ```bash
-npm install
-npm start
+npm install     # 安装依赖
+npm start       # 启动应用
+npm run smoke   # 端到端冒烟测试（94 项自动化验证）
 ```
 
 ## 构建打包
 
 ```bash
-npm run build      # esbuild 打包渲染进程
-npm run release    # 本地打包 NSIS 安装包
-npm run release -- -Publish   # 打包并自动发布到 GitHub Releases（需 GH_TOKEN）
+npm run build                        # esbuild 打包渲染进程
+npm run release                      # 本地打包 NSIS 安装包
+npm run release -- -Publish          # 打包并自动发布到 GitHub Releases（需 GH_TOKEN）
 ```
 
-## 自动发布（GitHub Actions）
-
-打 tag 后 CI 自动构建并发布：
+打 tag 后 CI 自动构建并发布到 GitHub Releases（见 `.github/workflows/release.yml`）：
 
 ```bash
-git tag v0.1.40
-git push origin v0.1.40
+git tag v0.1.42
+git push origin v0.1.42
 ```
 
-- **GitHub Releases**：Windows 安装包自动上传
-- **GitHub Packages**：`@hwm-1114/markhunter` npm 包自动发布（私有）
+## 更新说明
 
-## 冒烟测试
-
-```bash
-npm run smoke
-```
+各版本变更见 [CHANGELOG.md](CHANGELOG.md)。

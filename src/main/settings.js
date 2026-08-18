@@ -9,6 +9,7 @@ const ALLOWED_KEYS = new Set([
   'autoSaveDelay',
   'wordWrap',
   'scrollbarWidth',
+  'indentSize',
   'lastDirectory',
   'aiBaseUrl',
   'aiModel',
@@ -26,6 +27,7 @@ const DEFAULTS = {
   autoSaveDelay: 800,    // 自动保存防抖（ms）
   wordWrap: true,        // 自动换行
   scrollbarWidth: 10,    // 滚动条滑块宽度（px）
+  indentSize: 4,         // Tab 键插入的空格数（1~8，Shift+Tab 反向缩进）
   lastDirectory: '',     // 上次打开的工作目录
   lastSession: null,     // 上次会话快照（打开过的标签路径 + 活动标签下标；跨重启恢复）
   favoriteDirs: [],      // 收藏的本地目录（最多 50 个，保持添加顺序）

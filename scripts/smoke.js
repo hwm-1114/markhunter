@@ -2,13 +2,24 @@
 // 由主进程在 --smoke 模式下加载
 const fs = require('fs');
 const path = require('path');
-const { app } = require('electron');
+const os = require('os');
+const { app, clipboard } = require('electron');
 
 const TEST_ROOT = path.join(__dirname, '..', '.smoke-test');
+
+// 需求1：外部目录（与 TEST_ROOT 无前缀包含关系）。
+// 注意：不能用 os.tmpdir() 直接拼 —— 本机 os.tmpdir() 返回 8.3 短名
+// （如 C:\Users\ADMINI~1\...），而 readTree/readdir 返回长名（Administrator），
+// 会导致外部链按短名逐级展开时 findNode 失配、树定位中断。
+// 用 os.homedir()（长名）+ AppData/Local/Temp 得到同目录的长拼写。
+const EXT_ROOT = path.join(os.homedir(), 'AppData', 'Local', 'Temp', 'mh-smoke-ext-' + Date.now());
 
 function cleanTestRoot() {
   if (fs.existsSync(TEST_ROOT)) {
     fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+  }
+  if (EXT_ROOT && fs.existsSync(EXT_ROOT)) {
+    fs.rmSync(EXT_ROOT, { recursive: true, force: true });
   }
 }
 
@@ -16,6 +27,7 @@ const RENDERER_TEST = `
 (async () => {
   const api = window.api;
   const root = ${JSON.stringify(TEST_ROOT.replace(/\\\\/g, '/'))};
+  const extRoot = ${JSON.stringify(EXT_ROOT.replace(/\\\\/g, '/'))};
   const results = [];
 
   // 0. 等待应用 boot 完成，并以 .smoke-test 为工作目录
@@ -936,9 +948,626 @@ const RENDERER_TEST = `
     return selected && dirsOk ? true : 'selected=' + selected + ',dirs=' + dirsOk;
   });
 
+  // ---- 需求2：侧栏分隔条位于侧栏与工作区之间（不再被 flex 排到窗口右缘） ----
+  await step('dividerPos', async () => {
+    const div = document.querySelector('#sidebar-divider');
+    const sidebar = document.querySelector('#sidebar');
+    const wb = document.querySelector('#workbench');
+    if (!div || !sidebar || !wb) return 'no els';
+    const dr = div.getBoundingClientRect();
+    const sr = sidebar.getBoundingClientRect();
+    const wr = wb.getBoundingClientRect();
+    const between = dr.left >= sr.right - 10 && dr.right <= wr.left + 10;
+    const notRightEdge = dr.right < window.innerWidth - 30;
+    return between && notRightEdge
+      ? true
+      : 'div=' + Math.round(dr.left) + '-' + Math.round(dr.right) + ',side=' + Math.round(sr.left) + '-' + Math.round(sr.right) + ',wb=' + Math.round(wr.left) + ',win=' + window.innerWidth;
+  });
+
+  // ---- 需求2：拖拽分隔条（+80px）调整侧栏宽度，随后拖回恢复 ----
+  await step('dividerDrag', async () => {
+    const div = document.querySelector('#sidebar-divider');
+    const sidebar = document.querySelector('#sidebar');
+    const dr = div.getBoundingClientRect();
+    const cx = dr.left + dr.width / 2;
+    const cy = dr.top + dr.height / 2;
+    const before = sidebar.offsetWidth;
+    div.dispatchEvent(new MouseEvent('mousedown', { clientX: cx, clientY: cy, bubbles: true, button: 0 }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: cx + 80, clientY: cy, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: cx + 80, clientY: cy, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 60));
+    const after = sidebar.offsetWidth;
+    const grew = after - before;
+    // 拖回原位恢复现场
+    div.dispatchEvent(new MouseEvent('mousedown', { clientX: cx + 80, clientY: cy, bubbles: true, button: 0 }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: cx, clientY: cy, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: cx, clientY: cy, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 60));
+    const restored = sidebar.offsetWidth;
+    return grew >= 70 && grew <= 90 && after >= 200 && after <= 520 && Math.abs(restored - before) <= 6
+      ? true
+      : 'grew=' + grew + ',after=' + after + ',restored=' + restored;
+  });
+
+  // ---- 需求2：双击分隔条恢复默认宽度（style.width 清空） ----
+  await step('dividerDblclick', async () => {
+    const div = document.querySelector('#sidebar-divider');
+    const sidebar = document.querySelector('#sidebar');
+    const dr = div.getBoundingClientRect();
+    const cx = dr.left + dr.width / 2;
+    const cy = dr.top + dr.height / 2;
+    div.dispatchEvent(new MouseEvent('mousedown', { clientX: cx, clientY: cy, bubbles: true, button: 0 }));
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: cx + 80, clientY: cy, bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mouseup', { clientX: cx + 80, clientY: cy, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 60));
+    const wide = sidebar.offsetWidth;
+    div.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 60));
+    const reset = sidebar.style.width === '';
+    return wide > 320 && reset ? true : 'wide=' + wide + ',reset=' + reset + ',style=' + sidebar.style.width;
+  });
+
+  // ---- 需求3：编辑器右键菜单显示（含「粘贴为纯文本」项） ----
+  await step('menuShow', async () => {
+    app.preview.setMode('edit');
+    await api.writeFile(root + '/ctx.md', '# 右键菜单测试\\n内容');
+    await app.editor.openFile(root + '/ctx.md');
+    await new Promise((r) => setTimeout(r, 150));
+    const cm = document.querySelector('.cm-content');
+    if (!cm) return 'no cm';
+    cm.dispatchEvent(new MouseEvent('contextmenu', { clientX: 300, clientY: 200, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 50));
+    const menu = document.querySelector('#ctx-menu');
+    const visible = !menu.classList.contains('hidden');
+    const items = Array.from(menu.querySelectorAll('.ctx-item')).map((el) => el.textContent);
+    const hasItem = items.some((t) => t.includes('粘贴为纯文本'));
+    return visible && hasItem ? true : 'vis=' + visible + ',items=' + items.join('|');
+  });
+
+  // ---- 需求3：菜单点击其它区域 / Esc 自动隐藏 ----
+  await step('menuHide', async () => {
+    document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 40));
+    const h1 = document.querySelector('#ctx-menu').classList.contains('hidden');
+    // 重新打开 → Esc 隐藏
+    const cm = document.querySelector('.cm-content');
+    cm.dispatchEvent(new MouseEvent('contextmenu', { clientX: 300, clientY: 200, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 40));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 40));
+    const h2 = document.querySelector('#ctx-menu').classList.contains('hidden');
+    return h1 && h2 ? true : 'h1=' + h1 + ',h2=' + h2;
+  });
+
+  // ---- 需求3：树节点右键菜单无回归（打开/重命名/删除项仍存在） ----
+  await step('ctxTreeRegress', async () => {
+    app.state.rootDir = root;
+    app.tree.setRoot(root);
+    await new Promise((r) => setTimeout(r, 300));
+    const fileNode = Array.from(document.querySelectorAll('#file-tree .tree-node')).find(
+      (n) => n.querySelector('.name').textContent === 'ctx.md'
+    );
+    if (!fileNode) return 'no node';
+    fileNode.dispatchEvent(new MouseEvent('contextmenu', { clientX: 120, clientY: 120, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 50));
+    const items = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).map((el) => el.textContent);
+    const vis = !document.querySelector('#ctx-menu').classList.contains('hidden');
+    const hasOpen = items.some((t) => t.includes('打开'));
+    const hasRename = items.some((t) => t.includes('重命名'));
+    const hasDelete = items.some((t) => t.includes('删除文件'));
+    document.body.dispatchEvent(new MouseEvent('click', { bubbles: true })); // 关闭菜单，避免干扰后续用例
+    return vis && hasOpen && hasRename && hasDelete ? true : 'vis=' + vis + ',items=' + items.join('|');
+  });
+
+  // ---- 需求5：Tab 键缩进（默认 4 空格） ----
+  // 注意：必须派发在 view.contentDOM（.cm-content）上——CM6 的 keydown 监听器挂在 contentDOM，
+  // 且 eventBelongsToEditor 要求事件 target 位于 contentDOM 内部（沿父链上溯须到达 contentDOM）。
+  // 派发在 view.dom（.cm-editor 外层，contentDOM 的祖先）上事件不会下行到 contentDOM，keymap 不会执行。
+  const pressTab = (view, shift) =>
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Tab', shiftKey: !!shift, bubbles: true, cancelable: true })
+    );
+
+  await step('tabIndentDefault', async () => {
+    await api.writeFile(root + '/indent.md', 'hello\\nworld');
+    await app.editor.openFile(root + '/indent.md');
+    await new Promise((r) => setTimeout(r, 120));
+    const view = app.editor.getView();
+    view.dispatch({ selection: { anchor: 0 } }); // 光标置行首
+    await new Promise((r) => setTimeout(r, 40));
+    pressTab(view, false);
+    await new Promise((r) => setTimeout(r, 60));
+    const doc = view.state.doc.toString();
+    return doc.startsWith('    ') ? true : 'doc=' + JSON.stringify(doc.slice(0, 10));
+  });
+
+  await step('tabIndentMidLine', async () => {
+    const view = app.editor.getView();
+    const before = view.state.doc.toString().split('\\n')[0];
+    view.dispatch({ selection: { anchor: view.state.doc.line(1).to } }); // 第一行行尾（行中）
+    await new Promise((r) => setTimeout(r, 40));
+    pressTab(view, false);
+    await new Promise((r) => setTimeout(r, 60));
+    const line1 = view.state.doc.toString().split('\\n')[0];
+    const cur = view.state.selection.main.head;
+    return line1 === before + '    ' && cur === line1.length
+      ? true
+      : 'line1=' + JSON.stringify(line1) + ',cur=' + cur;
+  });
+
+  await step('shiftTabDedent', async () => {
+    const view = app.editor.getView();
+    // 构造 4 空格前导，光标置于空格之后
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '    abc\\nnext' }, selection: { anchor: 4 } });
+    await new Promise((r) => setTimeout(r, 40));
+    pressTab(view, true);
+    await new Promise((r) => setTimeout(r, 60));
+    const doc = view.state.doc.toString();
+    const dedented = doc.startsWith('abc\\n');
+    // 无空格可删（行首）时不动作
+    view.dispatch({ selection: { anchor: 0 } });
+    const before2 = view.state.doc.toString();
+    pressTab(view, true);
+    await new Promise((r) => setTimeout(r, 40));
+    const after2 = view.state.doc.toString();
+    return dedented && before2 === after2
+      ? true
+      : 'doc=' + JSON.stringify(doc.slice(0, 10)) + ',noop=' + (before2 === after2);
+  });
+
+  await step('tabMultiLine', async () => {
+    const view = app.editor.getView();
+    // selection 是「新文档」坐标：head 用新内容长度（11 字符），不能取旧 doc.length（12）否则越界
+    const newDoc = 'aa\\nbb\\ncc';
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: newDoc },
+      selection: { anchor: 0, head: newDoc.length },
+    });
+    await new Promise((r) => setTimeout(r, 40));
+    pressTab(view, false);
+    await new Promise((r) => setTimeout(r, 60));
+    const lines = view.state.doc.toString().split('\\n');
+    const ok = lines[0].startsWith('    aa') && lines[1].startsWith('    bb') && lines[2].startsWith('    cc');
+    return ok ? true : 'lines=' + JSON.stringify(lines);
+  });
+
+  await step('indentSizeApply', async () => {
+    // 改设置为 2：主进程设置 + 渲染进程状态 + 编辑器立即生效
+    await api.setSettings({ indentSize: 2 });
+    app.state.settings = await api.getSettings();
+    app.editor.setIndentSize(2);
+    // 新开标签：Tab 插 2 空格
+    await api.writeFile(root + '/indent2.md', 'x\\ny');
+    await app.editor.openFile(root + '/indent2.md');
+    await new Promise((r) => setTimeout(r, 120));
+    const view = app.editor.getView();
+    view.dispatch({ selection: { anchor: 0 } });
+    await new Promise((r) => setTimeout(r, 40));
+    pressTab(view, false);
+    await new Promise((r) => setTimeout(r, 60));
+    const docNew = view.state.doc.toString();
+    const newOk = docNew.startsWith('  x');
+    // 已开标签（indent.md）切换回来立即生效：Tab 也插 2 空格
+    await app.editor.openFile(root + '/indent.md');
+    await new Promise((r) => setTimeout(r, 120));
+    const view2 = app.editor.getView();
+    const beforeOld = view2.state.doc.toString();
+    view2.dispatch({ selection: { anchor: 0 } });
+    await new Promise((r) => setTimeout(r, 40));
+    pressTab(view2, false);
+    await new Promise((r) => setTimeout(r, 60));
+    const afterOld = view2.state.doc.toString();
+    const oldOk = afterOld === '  ' + beforeOld;
+    // 收尾恢复 indentSize 4（settings 与编辑器状态都恢复）
+    await api.setSettings({ indentSize: 4 });
+    app.state.settings = await api.getSettings();
+    app.editor.setIndentSize(4);
+    return newOk && oldOk
+      ? true
+      : 'new=' + newOk + ',old=' + oldOk + ',newDoc=' + JSON.stringify(docNew.slice(0, 8)) + ',oldAfter=' + JSON.stringify(afterOld.slice(0, 8));
+  });
+
+  await step('cycleTabRegress', async () => {
+    // Ctrl+Tab 切换标签不受 Tab 缩进 keymap 影响
+    await app.editor.openFile(root + '/indent.md');
+    await app.editor.openFile(root + '/indent2.md');
+    await new Promise((r) => setTimeout(r, 80));
+    const before = app.editor.getActiveTab();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', ctrlKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 100));
+    const t1 = app.editor.getActiveTab();
+    return !!before && !!t1 && t1 !== before
+      ? true
+      : 'before=' + (before && before.name) + ',t1=' + (t1 && t1.name);
+  });
+
+  await step('indentSizeWhitelist', async () => {
+    // 越界值 99：编辑器 clamp 到 8（Tab 插 8 空格），随后恢复
+    await api.setSettings({ indentSize: 99 });
+    app.state.settings = await api.getSettings();
+    app.editor.setIndentSize(99);
+    const view = app.editor.getView();
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: 'zz' }, selection: { anchor: 0 } });
+    await new Promise((r) => setTimeout(r, 40));
+    pressTab(view, false);
+    await new Promise((r) => setTimeout(r, 60));
+    const doc = view.state.doc.toString();
+    const clamped8 = doc.startsWith('        zz');
+    await api.setSettings({ indentSize: 4 });
+    app.state.settings = await api.getSettings();
+    app.editor.setIndentSize(4);
+    return clamped8 ? true : 'doc=' + JSON.stringify(doc.slice(0, 12));
+  });
+
+  // ================= 需求4：标签 Pin（固定）与批量关闭 =================
+  const waitFor = async (fn, ms) => {
+    const t0 = Date.now();
+    const limit = ms || 6000;
+    while (Date.now() - t0 < limit) {
+      if (fn()) return true;
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    return false;
+  };
+  // 路径归一化比较（readTree 返回反斜杠真实路径，extRoot 注入为正斜杠）
+  // 注意：此处位于模板字符串内，正则须用 \\\\ 才能在注入代码中得到 /\\/g（匹配单个反斜杠）
+  const normP = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+  const pinA = root + '/pin-a.md';
+  const pinB = root + '/pin-b.md';
+  const pinC = root + '/pin-c.md';
+  const pinD = root + '/pin-d.md';
+  const pin1 = root + '/pin-s1.md';
+  const pin2 = root + '/pin-s2.md';
+  const lastSessionOrig = (await api.getSettings()).lastSession; // 收尾恢复现场
+
+  await step('pinToggle', async () => {
+    await app.editor.closeAll();
+    await api.writeFile(pinA, 'a');
+    await api.writeFile(pinB, 'b');
+    await api.writeFile(pinC, 'c');
+    await app.editor.openFile(pinA);
+    await app.editor.openFile(pinB);
+    await app.editor.openFile(pinC);
+    app.editor.setPinned(app.editor.findTabByPath(pinB), true);
+    await new Promise((r) => setTimeout(r, 80));
+    const pinnedCount = document.querySelectorAll('.tab.pinned').length;
+    const bEl = Array.from(document.querySelectorAll('.tab')).find((t) => t.querySelector('.tab-name').textContent === 'pin-b.md');
+    return pinnedCount === 1 && !!bEl && !!bEl.querySelector('.tab-pin')
+      ? true
+      : 'pinned=' + pinnedCount + ',pin=' + (bEl ? !!bEl.querySelector('.tab-pin') : 'no-el');
+  });
+
+  await step('pinMenuUI', async () => {
+    const bEl = Array.from(document.querySelectorAll('.tab')).find((t) => t.querySelector('.tab-name').textContent === 'pin-b.md');
+    if (!bEl) return 'no pin-b tab';
+    bEl.dispatchEvent(new MouseEvent('contextmenu', { clientX: 200, clientY: 120, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 60));
+    const items1 = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).map((el) => el.textContent);
+    const vis1 = !document.querySelector('#ctx-menu').classList.contains('hidden');
+    const hasUnpin = items1.some((t) => t.indexOf('取消固定') >= 0);
+    document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 40));
+    const aEl = Array.from(document.querySelectorAll('.tab')).find((t) => t.querySelector('.tab-name').textContent === 'pin-a.md');
+    if (!aEl) return 'no pin-a tab';
+    aEl.dispatchEvent(new MouseEvent('contextmenu', { clientX: 200, clientY: 120, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 60));
+    const items2 = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).map((el) => el.textContent);
+    const hasPin = items2.some((t) => t.indexOf('固定标签') >= 0);
+    document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return vis1 && hasUnpin && hasPin
+      ? true
+      : 'vis=' + vis1 + ',unpin=' + hasUnpin + ',pin=' + hasPin + ',i1=' + items1.join('|') + ',i2=' + items2.join('|');
+  });
+
+  await step('pinCloseOthers', async () => {
+    await app.editor.closeAll();
+    await app.editor.openFile(pinA);
+    await app.editor.openFile(pinB);
+    await app.editor.openFile(pinC);
+    app.editor.setPinned(app.editor.findTabByPath(pinB), true);
+    await new Promise((r) => setTimeout(r, 60));
+    app.editor.closeOthers(app.editor.findTabByPath(pinC));
+    await new Promise((r) => setTimeout(r, 100));
+    const names = Array.from(document.querySelectorAll('.tab .tab-name')).map((n) => n.textContent);
+    const act = app.editor.getActiveTab();
+    // 需求4：closeOthers(锚) 关闭「其它」标签 —— 锚定标签 C 与 pinned 的 B 均保留，活动切到锚 C
+    return names.indexOf('pin-b.md') >= 0 && names.indexOf('pin-a.md') < 0 && names.indexOf('pin-c.md') >= 0 && !!act && act.path === pinC
+      ? true
+      : 'names=' + names.join(',') + ',act=' + (act && act.path);
+  });
+
+  await step('pinCloseLeft', async () => {
+    await app.editor.closeAll();
+    await app.editor.openFile(pinA);
+    await app.editor.openFile(pinB);
+    await app.editor.openFile(pinC);
+    const tb = app.editor.findTabByPath(pinB);
+    app.editor.setPinned(tb, true);
+    await new Promise((r) => setTimeout(r, 60));
+    app.editor.closeLeft(app.editor.findTabByPath(pinC));
+    await new Promise((r) => setTimeout(r, 100));
+    const names1 = Array.from(document.querySelectorAll('.tab .tab-name')).map((n) => n.textContent);
+    const ok1 = names1.indexOf('pin-b.md') >= 0 && names1.indexOf('pin-a.md') < 0;
+    app.editor.setPinned(tb, false);
+    await new Promise((r) => setTimeout(r, 60));
+    app.editor.closeLeft(app.editor.findTabByPath(pinC));
+    await new Promise((r) => setTimeout(r, 100));
+    const names2 = Array.from(document.querySelectorAll('.tab .tab-name')).map((n) => n.textContent);
+    const ok2 = names2.indexOf('pin-b.md') < 0;
+    return ok1 && ok2
+      ? true
+      : 'ok1=' + ok1 + '(' + names1.join(',') + '),ok2=' + ok2 + '(' + names2.join(',') + ')';
+  });
+
+  await step('pinCloseRight', async () => {
+    await app.editor.closeAll();
+    await api.writeFile(pinD, 'd');
+    await app.editor.openFile(pinA);
+    await app.editor.openFile(pinB);
+    await app.editor.openFile(pinC);
+    await app.editor.openFile(pinD);
+    app.editor.setPinned(app.editor.findTabByPath(pinB), true);
+    await new Promise((r) => setTimeout(r, 60));
+    app.editor.closeRight(app.editor.findTabByPath(pinB));
+    await new Promise((r) => setTimeout(r, 100));
+    const names = Array.from(document.querySelectorAll('.tab .tab-name')).map((n) => n.textContent);
+    const act = app.editor.getActiveTab();
+    return names.indexOf('pin-a.md') >= 0 && names.indexOf('pin-b.md') >= 0 && names.indexOf('pin-c.md') < 0 && names.indexOf('pin-d.md') < 0 && !!act && act.path === pinB
+      ? true
+      : 'names=' + names.join(',') + ',act=' + (act && act.path);
+  });
+
+  await step('pinCtrlW', async () => {
+    await app.editor.closeAll();
+    await app.editor.openFile(pinA);
+    app.editor.setPinned(app.editor.findTabByPath(pinA), true);
+    await new Promise((r) => setTimeout(r, 60));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 100));
+    return !app.editor.findTabByPath(pinA) ? true : 'still open';
+  });
+
+  await step('pinDeletePath', async () => {
+    await app.editor.closeAll();
+    await app.editor.openFile(pinA);
+    app.editor.setPinned(app.editor.findTabByPath(pinA), true);
+    await new Promise((r) => setTimeout(r, 60));
+    app.editor.closeByPath(pinA, false);
+    await new Promise((r) => setTimeout(r, 100));
+    return !app.editor.findTabByPath(pinA) ? true : 'still open';
+  });
+
+  await step('pinSessionPersist', async () => {
+    await app.editor.closeAll();
+    await api.writeFile(pin1, '1');
+    await api.writeFile(pin2, '2');
+    await app.editor.openFile(pin1);
+    await app.editor.openFile(pin2);
+    app.editor.setPinned(app.editor.findTabByPath(pin2), true);
+    await new Promise((r) => setTimeout(r, 80));
+    await window.__app.session.save();
+    app.state.settings = await api.getSettings();
+    const ls = (await api.getSettings()).lastSession;
+    const pinnedOk = !!ls && Array.isArray(ls.pinned) && ls.pinned.length === 1 && ls.pinned[0] === 1;
+    await app.editor.closeAll();
+    await window.__app.session.restore();
+    await new Promise((r) => setTimeout(r, 300));
+    const pinnedCount = document.querySelectorAll('.tab.pinned').length;
+    const act = app.editor.getActiveTab();
+    return pinnedOk && pinnedCount === 1 && !!act && act.path === pin2
+      ? true
+      : 'saved=' + JSON.stringify(ls) + ',count=' + pinnedCount + ',act=' + (act && act.path);
+  });
+
+  await step('pinSessionBackCompat', async () => {
+    // 旧数据无 pinned 字段 → 视为 []：restore 不崩溃、无 pin
+    await app.editor.closeAll();
+    await api.setSettings({ lastSession: { paths: [pin1, pin2], active: 0 } });
+    app.state.settings = await api.getSettings();
+    await window.__app.session.restore();
+    await new Promise((r) => setTimeout(r, 300));
+    const pinnedCount = document.querySelectorAll('.tab.pinned').length;
+    const tabCount = document.querySelectorAll('.tab').length;
+    const act = app.editor.getActiveTab();
+    return pinnedCount === 0 && tabCount === 2 && !!act && act.path === pin1
+      ? true
+      : 'pinned=' + pinnedCount + ',tabs=' + tabCount + ',act=' + (act && act.path);
+  });
+
+  // ================= 需求1：跨目录树定位（外部文件虚拟分支） =================
+  await step('extReveal', async () => {
+    await app.editor.closeAll();
+    await app.openDirFromPath(root);
+    const extFile = extRoot + '/note.md';
+    await app.editor.openFile(extFile);
+    const nodeFound = await waitFor(() =>
+      !!Array.from(document.querySelectorAll('#file-tree .tree-node')).find((n) => normP(n.dataset.path) === normP(extFile))
+    );
+    const rows = Array.from(document.querySelectorAll('#file-tree .tree-node'));
+    const extRow = rows.find((n) => n.querySelector('.name').textContent === '外部文件');
+    const node = rows.find((n) => normP(n.dataset.path) === normP(extFile));
+    const selected = !!node && node.classList.contains('selected');
+    const dirName = extRoot.split(/[\\\\/]/).pop();
+    const dirRow = rows.find((n) => n.querySelector('.name').textContent === dirName);
+    const dirOpen = !!dirRow && dirRow.querySelector('.caret').classList.contains('open');
+    return nodeFound && !!extRow && !!node && selected && dirOpen
+      ? true
+      : 'found=' + nodeFound + ',ext=' + !!extRow + ',sel=' + selected + ',dirOpen=' + dirOpen;
+  });
+
+  await step('extRootUnchanged', async () => {
+    const rootDirBefore = app.state.rootDir;
+    const labelBefore = document.querySelector('#dir-label').textContent;
+    const favBefore = document.querySelector('#btn-toggle-fav').textContent;
+    await app.editor.openFile(extRoot + '/note.md');
+    await new Promise((r) => setTimeout(r, 300));
+    return app.state.rootDir === rootDirBefore && document.querySelector('#dir-label').textContent === labelBefore && document.querySelector('#btn-toggle-fav').textContent === favBefore
+      ? true
+      : 'root=' + app.state.rootDir + ',label=' + document.querySelector('#dir-label').textContent + ',fav=' + document.querySelector('#btn-toggle-fav').textContent;
+  });
+
+  await step('extPrune', async () => {
+    const t = app.editor.findTabByPath(extRoot + '/note.md');
+    if (t) app.editor.closeTab(t);
+    const gone = await waitFor(() =>
+      !Array.from(document.querySelectorAll('#file-tree .tree-node')).some((n) => n.querySelector('.name').textContent === '外部文件')
+    );
+    return gone ? true : 'ext area still visible';
+  });
+
+  await step('extWriteRun', async () => {
+    const extPy = extRoot + '/run.py';
+    await app.editor.openFile(extPy); // readFile 成功 → approvedSet（保存/运行仍可用）
+    await api.writeFile(extPy, 'print("EXT_RUN_OK")\\n');
+    const rb = await api.readFile(extPy);
+    const writeOk = rb.content.indexOf('EXT_RUN_OK') >= 0;
+    const pys = await api.detectPython();
+    let runOk = false;
+    if (pys.length > 0) {
+      const pyExe = pys.find((p) => /\.exe$/i.test(p)) || pys[0];
+      const r = await new Promise((resolve) => {
+        let out = '';
+        let done = false;
+        const onOut = (d) => { out += d.data; };
+        const onExit = (d) => {
+          if (done) return;
+          done = true;
+          resolve({ ok: out.indexOf('EXT_RUN_OK') >= 0, code: d.code });
+        };
+        api.onPythonOutput(onOut);
+        api.onPythonExit(onExit);
+        api.runPython(extPy, pyExe);
+        setTimeout(() => { if (!done) { done = true; resolve({ ok: false, code: null, timeout: true }); } }, 15000);
+      });
+      runOk = r.ok;
+    }
+    return writeOk && runOk ? true : 'write=' + writeOk + ',run=' + runOk;
+  });
+
+  await step('extCreateRejected', async () => {
+    // 外部目录从未被 approve → 新建被拒（S1 保持）
+    let rejected = false;
+    try {
+      await api.create(extRoot, 'x.md', 'file');
+    } catch (e) {
+      rejected = String(e.message).indexOf('不在当前工作目录内') >= 0;
+    }
+    return rejected;
+  });
+
+  await step('extSwitchRoot', async () => {
+    await app.editor.openFile(extRoot + '/note.md');
+    await new Promise((r) => setTimeout(r, 300));
+    await app.openDirFromPath(extRoot); // 外部变内部
+    await new Promise((r) => setTimeout(r, 600));
+    const label = document.querySelector('#dir-label').textContent;
+    const tabOk = !!app.editor.findTabByPath(extRoot + '/note.md');
+    const node = Array.from(document.querySelectorAll('#file-tree .tree-node')).find((n) => normP(n.dataset.path) === normP(extRoot + '/note.md'));
+    const selected = !!node && node.classList.contains('selected');
+    const extGone = !Array.from(document.querySelectorAll('#file-tree .tree-node')).some((n) => n.querySelector('.name').textContent === '外部文件');
+    await app.openDirFromPath(root); // 切回：外部区恢复
+    await new Promise((r) => setTimeout(r, 600));
+    const tabStill = !!app.editor.findTabByPath(extRoot + '/note.md');
+    const extBack = Array.from(document.querySelectorAll('#file-tree .tree-node')).some((n) => n.querySelector('.name').textContent === '外部文件');
+    return label === extRoot && tabOk && selected && extGone && tabStill && extBack
+      ? true
+      : 'label=' + label + ',tab=' + tabOk + ',sel=' + selected + ',gone=' + extGone + ',still=' + tabStill + ',back=' + extBack;
+  });
+
+  await step('extSessionRestore', async () => {
+    await app.editor.closeAll();
+    await app.openDirFromPath(root);
+    await app.editor.openFile(extRoot + '/note.md');
+    await new Promise((r) => setTimeout(r, 300));
+    await window.__app.session.save();
+    app.state.settings = await api.getSettings();
+    await app.editor.closeAll();
+    await window.__app.session.restore();
+    const extShown = await waitFor(() =>
+      Array.from(document.querySelectorAll('#file-tree .tree-node')).some((n) => n.querySelector('.name').textContent === '外部文件')
+    );
+    const tabOk = !!app.editor.findTabByPath(extRoot + '/note.md');
+    return extShown && tabOk ? true : 'ext=' + extShown + ',tab=' + tabOk;
+  });
+
+  await step('extCtxMenu', async () => {
+    await app.editor.openFile(extRoot + '/note.md');
+    await new Promise((r) => setTimeout(r, 400));
+    const fileNode = Array.from(document.querySelectorAll('#file-tree .tree-node')).find((n) => normP(n.dataset.path) === normP(extRoot + '/note.md'));
+    if (!fileNode) return 'no file node';
+    fileNode.dispatchEvent(new MouseEvent('contextmenu', { clientX: 120, clientY: 120, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 60));
+    const items1 = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).map((el) => el.textContent);
+    const fOk = items1.some((t) => t.indexOf('打开') >= 0) && items1.some((t) => t.indexOf('重命名') >= 0) && items1.some((t) => t.indexOf('删除') >= 0) && !items1.some((t) => t.indexOf('新建') >= 0);
+    document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 40));
+    const dirName = extRoot.split(/[\\\\/]/).pop();
+    const dirNode = Array.from(document.querySelectorAll('#file-tree .tree-node')).find((n) => n.querySelector('.name').textContent === dirName);
+    if (!dirNode) return 'no dir node';
+    dirNode.dispatchEvent(new MouseEvent('contextmenu', { clientX: 120, clientY: 120, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 60));
+    const items2 = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).map((el) => el.textContent);
+    const dOk = items2.some((t) => t.indexOf('切换工作目录') >= 0) && items2.some((t) => t.indexOf('刷新') >= 0) && !items2.some((t) => t.indexOf('新建') >= 0);
+    document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await api.setSettings({ lastSession: lastSessionOrig }); // 收尾恢复现场
+    app.state.settings = await api.getSettings();
+    return fOk && dOk ? true : 'f=' + items1.join('|') + ',d=' + items2.join('|');
+  });
+
   return results;
 })()
 `;
+
+// 需求3：右键菜单「粘贴为纯文本」—— 剪贴板由主进程控制（smoke 在 main 进程直接读写 clipboard）
+// phase: 'text'（剪贴板含文本 → 断言插入） / 'empty'（剪贴板为空 → 断言 toast 且文档不变）
+function menuClipboardSnippet(phase) {
+  const pasteLabel = phase === 'text' ? 'menuPaste' : 'menuPasteEmpty';
+  const assertBody =
+    phase === 'text'
+      ? `const doc = view.state.doc.toString();
+         const cur = view.state.selection.main.head;
+         const ok = visible && !!item && doc.startsWith('纯文本测试 123') && cur === '纯文本测试 123'.length;
+         return ok ? true : 'vis=' + visible + ',item=' + !!item + ',doc=' + JSON.stringify(doc.slice(0, 24)) + ',cur=' + cur;`
+      : `const doc = view.state.doc.toString();
+         const toastEl = Array.from(document.querySelectorAll('.toast')).pop();
+         const toastText = toastEl ? toastEl.textContent : '';
+         const ok = visible && !!item && toastText.includes('剪贴板为空') && doc === '第一行内容\\n第二行内容';
+         return ok ? true : 'vis=' + visible + ',item=' + !!item + ',toast=' + toastText + ',doc=' + JSON.stringify(doc);`;
+  return `(async () => {
+  const api = window.api;
+  const app = window.__app;
+  const root = ${JSON.stringify(TEST_ROOT.replace(/\\\\/g, '/'))};
+  const results = [];
+  const step = async (name, fn) => {
+    try {
+      const r = await fn();
+      results.push([name, r === true ? true : r]);
+    } catch (err) {
+      results.push([name, 'ERR: ' + (err && err.stack ? err.stack.split('\\n').slice(0, 4).join(' // ') : err)]);
+    }
+  };
+  await step('${pasteLabel}', async () => {
+    app.preview.setMode('edit');
+    const f = root + '/menu-clip.md';
+    await api.writeFile(f, '第一行内容\\n第二行内容');
+    await app.editor.openFile(f);
+    await new Promise((r) => setTimeout(r, 150));
+    const view = app.editor.getView();
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '第一行内容\\n第二行内容' }, selection: { anchor: 0 } });
+    await new Promise((r) => setTimeout(r, 50));
+    const cm = document.querySelector('.cm-content');
+    cm.dispatchEvent(new MouseEvent('contextmenu', { clientX: 300, clientY: 200, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 50));
+    const menu = document.querySelector('#ctx-menu');
+    const visible = !menu.classList.contains('hidden');
+    const item = Array.from(menu.querySelectorAll('.ctx-item')).find((el) => el.textContent.includes('粘贴为纯文本'));
+    if (item) item.click();
+    await new Promise((r) => setTimeout(r, 200));
+    ${assertBody}
+  });
+  return results;
+})()`;
+}
 
 async function runSmoke(win) {
   win.webContents.on('console-message', (event) => {
@@ -948,7 +1577,17 @@ async function runSmoke(win) {
     try {
       cleanTestRoot();
       fs.mkdirSync(TEST_ROOT, { recursive: true });
+      // 需求1：预建外部目录（与 TEST_ROOT 无前缀包含关系）及文件，供外部区用例使用
+      fs.mkdirSync(EXT_ROOT, { recursive: true });
+      fs.writeFileSync(path.join(EXT_ROOT, 'note.md'), '# 外部笔记\n内容', 'utf8');
+      fs.writeFileSync(path.join(EXT_ROOT, 'run.py'), 'print("EXT_RUN_OK")', 'utf8');
       const results = await win.webContents.executeJavaScript(RENDERER_TEST);
+      // 需求3：剪贴板读写由主进程控制（渲染进程仅经 window.api.readClipboardText 读取）
+      clipboard.writeText('纯文本测试 123');
+      const r1 = await win.webContents.executeJavaScript(menuClipboardSnippet('text'));
+      clipboard.writeText(''); // 清空剪贴板
+      const r2 = await win.webContents.executeJavaScript(menuClipboardSnippet('empty'));
+      results.push(...r1, ...r2);
       console.log('E2E_RESULTS');
       for (const r of results) {
         console.log('  -', r.join(' | '));

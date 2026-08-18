@@ -1,11 +1,11 @@
 // 多标签 + CodeMirror 编辑器核心
 import { EditorView, basicSetup } from 'codemirror';
-import { EditorState, Compartment, StateEffect, StateField } from '@codemirror/state';
-import { Decoration } from '@codemirror/view';
+import { EditorState, EditorSelection, Compartment, StateEffect, StateField, Prec } from '@codemirror/state';
+import { Decoration, keymap } from '@codemirror/view';
 import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
-import { langFor, baseName, escapeHtml } from './ui.js';
+import { langFor, baseName, escapeHtml, showContextMenu, hideContextMenu } from './ui.js';
 import { pathToFileUrl } from './viewer.js';
 
 // ---------- 匹配高亮（文件内搜索用） ----------
@@ -43,15 +43,121 @@ const lightTheme = EditorView.theme({
 export function createEditor(callbacks) {
   const host = document.getElementById('editor-host');
   const tabsEl = document.getElementById('tabs');
-  const { onDocChanged, onTabSwitch, onRequestClose, getWordWrap, onSaveStatus, onSessionChange } = callbacks;
+  const { onDocChanged, onTabSwitch, onRequestClose, getWordWrap, onSaveStatus, onSessionChange, getIndentSize } = callbacks;
 
   const tabs = []; // { id, path, name, lang, state, dirty, saveTimer, savedContent }
   let activeTab = null;
   let idSeq = 0;
   let wordWrapOn = getWordWrap();
 
+  // ---------- 缩进设置（Tab 键插入的空格数，1~8） ----------
+  function clampIndent(n) {
+    const v = parseInt(n, 10);
+    if (!Number.isFinite(v)) return 4;
+    return Math.min(8, Math.max(1, v));
+  }
+
+  let indentSize = clampIndent(getIndentSize ? getIndentSize() : 4);
+  let composing = false; // 输入法组合期间 Tab 不触发缩进
+
   const langCompartment = new Compartment();
   const wrapCompartment = new Compartment();
+  const indentCompartment = new Compartment();
+
+  function trailingSpaces(text, max) {
+    let n = 0;
+    for (let i = text.length - 1; n < max && i >= 0 && text[i] === ' '; i--) n++;
+    return n;
+  }
+
+  function leadingSpaces(text, max) {
+    let n = 0;
+    while (n < max && n < text.length && text[n] === ' ') n++;
+    return n;
+  }
+
+  /** Tab：光标处插入 indentSize 个空格（行首/行中一致）；有选区时对选区每行行首插入。
+   *  用 changeByRange 逐范围处理：光标/选区经 mapPos(assoc=1) 映射到插入内容之后（与 CM 自带 indentMore 一致）。 */
+  function indentMore(view) {
+    if (composing) return false;
+    const size = indentSize;
+    const { state } = view;
+    if (state.readOnly) return false;
+    const spec = state.changeByRange((range) => {
+      const changes = [];
+      if (range.empty) {
+        changes.push({ from: range.head, insert: ' '.repeat(size) });
+      } else {
+        let pos = range.from;
+        while (pos <= range.to) {
+          const line = state.doc.lineAt(pos);
+          changes.push({ from: line.from, insert: ' '.repeat(size) });
+          pos = line.to + 1;
+        }
+      }
+      const cs = state.changes(changes);
+      return {
+        changes,
+        range: EditorSelection.range(cs.mapPos(range.anchor, 1), cs.mapPos(range.head, 1)),
+      };
+    });
+    view.dispatch(spec);
+    return true;
+  }
+
+  /** Shift+Tab：删除光标前（或选中行行首）最多 indentSize 个连续空格；无空格可删时不动作 */
+  function indentLess(view) {
+    if (composing) return false;
+    const size = indentSize;
+    const { state } = view;
+    if (state.readOnly) return false;
+    let updated = false;
+    const spec = state.changeByRange((range) => {
+      const changes = [];
+      if (range.empty) {
+        const line = state.doc.lineAt(range.head);
+        const before = state.doc.sliceString(Math.max(line.from, range.head - size), range.head);
+        const n = trailingSpaces(before, size);
+        if (n > 0) {
+          changes.push({ from: range.head - n, to: range.head, insert: '' });
+          updated = true;
+        }
+      } else {
+        let pos = range.from;
+        while (pos <= range.to) {
+          const line = state.doc.lineAt(pos);
+          const head = state.doc.sliceString(line.from, Math.min(line.to + 1, line.from + size));
+          const n = leadingSpaces(head, size);
+          if (n > 0) {
+            changes.push({ from: line.from, to: line.from + n, insert: '' });
+            updated = true;
+          }
+          pos = line.to + 1;
+        }
+      }
+      const cs = state.changes(changes);
+      return {
+        changes,
+        range: EditorSelection.range(cs.mapPos(range.anchor, 1), cs.mapPos(range.head, 1)),
+      };
+    });
+    if (!updated) return false;
+    view.dispatch(spec);
+    return true;
+  }
+
+  /** 缩进相关扩展：tabSize 同步 + 高优先级 Tab/Shift+Tab keymap（覆盖默认 keymap） */
+  function indentExtensions(size) {
+    return [
+      EditorState.tabSize.of(size),
+      Prec.highest(
+        keymap.of([
+          { key: 'Tab', run: indentMore },
+          { key: 'Shift-Tab', run: indentLess },
+        ])
+      ),
+    ];
+  }
 
   function makeState(doc, lang) {
     return EditorState.create({
@@ -61,6 +167,7 @@ export function createEditor(callbacks) {
         lightTheme,
         langCompartment.of(langExt(lang)),
         wrapCompartment.of(wordWrapOn ? EditorView.lineWrapping : []),
+        indentCompartment.of(indentExtensions(indentSize)),
         matchField,
         EditorView.updateListener.of((u) => {
           if (u.docChanged && activeTab) {
@@ -85,6 +192,10 @@ export function createEditor(callbacks) {
     parent: host,
     state: makeState('', 'text'),
   });
+
+  // 输入法组合开始/结束：期间 Tab 不触发缩进插入
+  view.dom.addEventListener('compositionstart', () => { composing = true; });
+  view.dom.addEventListener('compositionend', () => { composing = false; });
 
   // 等宽字体加载完成后强制重新测量：防止字体未就绪导致字符宽度缓存错误
   // （会造成同一行内鼠标选择的坐标映射异常，而跨行选择不受影响）
@@ -135,6 +246,7 @@ export function createEditor(callbacks) {
       state: null,
       dirty: false,
       saveTimer: null,
+      pinned: false,
     };
     tab.state = makeState(data.content, tab.lang);
     tabs.push(tab);
@@ -160,6 +272,7 @@ export function createEditor(callbacks) {
       state: null,
       dirty: false,
       saveTimer: null,
+      pinned: false,
     };
     tabs.push(tab);
     switchTab(tab);
@@ -178,6 +291,8 @@ export function createEditor(callbacks) {
       // 对齐换行设置
       wordWrapOn = getWordWrap();
       view.dispatch({ effects: wrapCompartment.reconfigure(wordWrapOn ? EditorView.lineWrapping : []) });
+      // 对齐缩进设置（设置变更后，已开标签切换时也按当前 indentSize 生效）
+      view.dispatch({ effects: indentCompartment.reconfigure(indentExtensions(indentSize)) });
       tab.state = view.state;
     }
     renderTabs();
@@ -314,16 +429,88 @@ export function createEditor(callbacks) {
     for (const t of [...tabs]) closeTab(t);
   }
 
+  // ---------- 标签 Pin（固定）与批量关闭 ----------
+  function togglePinned(tab) {
+    setPinned(tab, !tab.pinned);
+  }
+
+  /** 设置固定状态：改 pinned → 重绘标签栏 + 会话持久化（pin 随 lastSession.pinned 持久化） */
+  function setPinned(tab, v) {
+    if (!tab) return;
+    tab.pinned = !!v;
+    renderTabs();
+    if (onSessionChange) onSessionChange();
+  }
+
+  /** 标签右键菜单：固定/取消固定 → 批量关闭 → 关闭当前（复用 ui.js 单例 #ctx-menu） */
+  function showTabCtx(x, y, tab) {
+    const items = [
+      { label: tab.pinned ? '📌 取消固定' : '📌 固定标签', onClick: () => togglePinned(tab) },
+      { sep: true },
+      { label: '关闭其它标签', onClick: () => closeOthers(tab) },
+      { label: '关闭右侧标签', onClick: () => closeRight(tab) },
+      { label: '关闭左侧标签', onClick: () => closeLeft(tab) },
+      { sep: true },
+      { label: '✕ 关闭标签', onClick: () => onRequestClose(tab) },
+    ];
+    showContextMenu(x, y, items);
+  }
+
+  /** 批量关闭：对快照迭代，保留「锚定标签 + 范围内 pinned 标签」，末尾激活锚定标签 */
+  function closeOthers(anchor) {
+    if (!anchor || tabs.length < 2) return;
+    for (const t of [...tabs]) {
+      if (t === anchor || t.pinned) continue;
+      closeTab(t);
+    }
+    switchTab(anchor);
+  }
+
+  function closeLeft(anchor) {
+    if (!anchor) return;
+    const ai = tabs.indexOf(anchor);
+    if (ai < 0) return;
+    for (const t of [...tabs].slice(0, ai)) {
+      if (t.pinned) continue;
+      closeTab(t);
+    }
+    switchTab(anchor);
+  }
+
+  function closeRight(anchor) {
+    if (!anchor) return;
+    const ai = tabs.indexOf(anchor);
+    if (ai < 0) return;
+    for (const t of [...tabs].slice(ai + 1)) {
+      if (t.pinned) continue;
+      closeTab(t);
+    }
+    switchTab(anchor);
+  }
+
   function renderTabs() {
+    hideContextMenu(); // 高频重建时避免悬空菜单
     tabsEl.innerHTML = '';
     for (const tab of tabs) {
       const el = document.createElement('div');
-      el.className = `tab ${tab === activeTab ? 'active' : ''}`;
+      el.className = `tab ${tab === activeTab ? 'active' : ''} ${tab.pinned ? 'pinned' : ''}`;
       el.title = tab.path;
       const name = document.createElement('span');
       name.className = 'tab-name';
       name.textContent = tab.name;
       el.appendChild(name);
+      if (tab.pinned) {
+        // 📌 固定标记：点击切换 pin 状态（stopPropagation 防误触发 switchTab）
+        const pin = document.createElement('span');
+        pin.className = 'tab-pin';
+        pin.textContent = '📌';
+        pin.title = '取消固定';
+        pin.addEventListener('click', (e) => {
+          e.stopPropagation();
+          togglePinned(tab);
+        });
+        el.appendChild(pin);
+      }
       if (tab.dirty) {
         const dot = document.createElement('span');
         dot.className = 'tab-dot';
@@ -338,6 +525,12 @@ export function createEditor(callbacks) {
       });
       el.appendChild(close);
       el.addEventListener('click', () => switchTab(tab));
+      // 标签右键菜单：preventDefault + stopPropagation（与树菜单共用单例 #ctx-menu）
+      el.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showTabCtx(e.clientX, e.clientY, tab);
+      });
       tabsEl.appendChild(el);
     }
     updateEmpty();
@@ -371,13 +564,26 @@ export function createEditor(callbacks) {
     }
   }
 
+  /** 设置缩进宽度（空格数，clamp 1~8）：新开标签（makeState）与活动标签（reconfigure）立即生效 */
+  function setIndentSize(n) {
+    indentSize = clampIndent(n);
+    if (activeTab && !activeTab.kind) {
+      view.dispatch({ effects: indentCompartment.reconfigure(indentExtensions(indentSize)) });
+      activeTab.state = view.state;
+    }
+  }
+
   function getActiveTab() {
     return activeTab;
   }
 
-  /** 会话快照：所有标签路径（含图片/PDF，保持顺序）+ 活动标签下标 */
+  /** 会话快照：所有标签路径（含图片/PDF，保持顺序）+ 活动标签下标 + pinned 下标数组 */
   function getSession() {
-    return { paths: tabs.map((t) => t.path), active: tabs.indexOf(activeTab) };
+    return {
+      paths: tabs.map((t) => t.path),
+      active: tabs.indexOf(activeTab),
+      pinned: tabs.map((t, i) => (t.pinned ? i : -1)).filter((i) => i >= 0),
+    };
   }
 
   /** 若该路径标签已存在则激活并返回 true（会话恢复用），否则 false */
@@ -431,6 +637,27 @@ export function createEditor(callbacks) {
     if (images.length === 0) return;
     e.preventDefault();
     pasteImages(images);
+  });
+
+  // ---------- 编辑器右键菜单：粘贴为纯文本（v1 不剥离 Markdown 符号，原样插入系统 text/plain） ----------
+  view.dom.addEventListener('contextmenu', (e) => {
+    // 仅文本编辑区生效：图片标签页（编辑区隐藏）不弹该菜单
+    if (!activeTab || activeTab.kind === 'image') return;
+    e.preventDefault();
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: '📋 粘贴为纯文本',
+        onClick: async () => {
+          const t = await window.api.readClipboardText();
+          if (!t) {
+            const { toast } = await import('./ui.js');
+            toast('剪贴板为空或不是文本');
+            return;
+          }
+          insertAtCursor(t);
+        },
+      },
+    ]);
   });
 
   function dirOf(p) {
@@ -559,5 +786,5 @@ export function createEditor(callbacks) {
     toast(`已从外部重新加载 ${tab.name}`);
   });
 
-  return { openFile, closeTab, closeAll, saveNow, setWordWrap, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath };
+  return { openFile, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight };
 }

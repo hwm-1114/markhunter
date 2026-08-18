@@ -39,6 +39,7 @@ async function boot() {
   // ---------- 初始化各模块 ----------
   editor = createEditor({
     getWordWrap: () => state.settings.wordWrap,
+    getIndentSize: () => state.settings.indentSize,
     onSaveStatus: (msg) => {
       $('#save-status').textContent = msg;
     },
@@ -60,7 +61,12 @@ async function boot() {
       if (tab) {
         $('#save-status').textContent = tab.dirty ? '未保存…' : '';
         if (findQuery()) find.runSearch();
-        tree.reveal(tab.path).catch(() => {}); // 树跟随定位（文件不在当前工作目录内时自动 no-op）
+        tree.reveal(tab.path).catch(() => {}); // 树跟随定位（工作目录内走真实树；外部文件走「外部文件」分支）
+        // 需求1：外部文件被定位到「外部文件」分支时提示（同一路径去重，不刷屏）
+        if (tab.path && !tree.isInsideRoot(tab.path) && tab.path !== lastExtToastPath) {
+          lastExtToastPath = tab.path;
+          toast('文件不在当前工作目录，已在「外部文件」分支定位');
+        }
       } else {
         $('#save-status').textContent = '';
         find.clearSearch();
@@ -70,7 +76,10 @@ async function boot() {
       if (tab.dirty) editor.saveNow(tab);
       editor.closeTab(tab);
     },
-    onSessionChange: () => persistSession(),
+    onSessionChange: () => {
+      persistSession();
+      syncExternalTree(); // 需求1：标签增删/切换后同步外部文件分支
+    },
   });
 
   preview = createPreview(() => editor, getActiveTab);
@@ -223,6 +232,7 @@ async function boot() {
 
   // ---------- 会话保持：标签快照持久化（防抖 600ms） + 跨重启恢复 ----------
   let sessionTimer = null;
+  let lastExtToastPath = null; // 需求1：外部文件 toast 去重（同一路径只提示一次）
 
   /** 将当前打开标签快照写入设置；force=true 立即落盘，否则 600ms 防抖合并 */
   function persistSession(force = false) {
@@ -235,7 +245,7 @@ async function boot() {
     if (!s.paths.length) {
       window.api.setSettings({ lastSession: null });
     } else {
-      window.api.setSettings({ lastSession: { paths: s.paths, active: s.active } });
+      window.api.setSettings({ lastSession: { paths: s.paths, active: s.active, pinned: s.pinned } });
     }
   }
 
@@ -259,6 +269,27 @@ async function boot() {
         console.warn('[session] 激活标签失败:', paths[active], err && err.message ? err.message : err);
       }
     }
+    // 恢复 pinned：按下标 Set 还原（越界下标忽略；旧数据无 pinned → 视为 []）
+    if (Array.isArray(ls.pinned)) {
+      const pinSet = new Set(ls.pinned.filter((i) => Number.isInteger(i) && i >= 0 && i < paths.length));
+      for (const idx of pinSet) {
+        const t = editor.findTabByPath(paths[idx]);
+        if (t) editor.setPinned(t, true);
+      }
+      editor.renderTabs(); // 一次重绘，保证 pin 标记同步
+    }
+    syncExternalTree(); // 需求1：外部文件虚拟分支重渲染（幂等）
+    persistSession(true); // 强制落盘：确保最终快照包含 pinned
+  }
+
+  /** 需求1：同步「外部文件」虚拟分支 —— 取所有打开标签中 rootDir 外的文件路径。
+   *  返回 setExternalFiles 的 Promise（可能触发全量 render），供 openDirFromPath 等调用方 await。 */
+  function syncExternalTree() {
+    const paths = editor.getSession().paths || [];
+    if (!state.rootDir) {
+      return tree.setExternalFiles([]);
+    }
+    return tree.setExternalFiles(paths.filter((p) => !tree.isInsideRoot(p)));
   }
 
   // ---------- 树回调 ----------
@@ -269,6 +300,7 @@ async function boot() {
       tree.reveal(p).catch(() => {}); // 树定位到该文件
     },
     onOpenDir: () => {},
+    onSwitchRoot: (dir) => openDirFromPath(dir), // 需求1：外部区目录行「切换工作目录到此目录」
     onClosePath: (p, newPath) => {
       const tab = editor.findTabByPath(p);
       if (tab) {
@@ -284,6 +316,7 @@ async function boot() {
               if (st && st.isFile) window.api.watchFile(newPath, st.mtime);
             })
             .catch(() => {});
+          syncExternalTree(); // 外部文件重命名后同步外部区（原路径移除、新路径加入）
         } else {
           editor.closeByPath(p, false);
         }
@@ -306,10 +339,16 @@ async function boot() {
         $('#dir-label').title = dir;
         return tree.setRoot(dir);
       })
-      .then(() => {
+      .then(async () => {
         window.api.setSettings({ lastDirectory: dir });
         window.api.setRootDir(dir); // S1：通知主进程当前工作目录（路径校验基准）
         favorites.syncState(); // 收藏按钮文案 / 列表高亮跟随当前工作目录
+        // 需求1：目录切换后外部文件集合变化 → 重建外部分支（幂等）。
+        // 必须 await：setExternalFiles 可能触发全量 render()，未等待会导致
+        // 调用方在 render 中途检查 DOM（树被清空重建）得到不一致结果。
+        await syncExternalTree();
+        const act = editor.getActiveTab();
+        if (act) await tree.reveal(act.path).catch(() => {}); // 切换目录后树定位活动标签（外部变内部/内部变外部）
         return true;
       })
       .catch(() => false);
@@ -480,6 +519,22 @@ async function boot() {
     sbHint.textContent = `调整横向/纵向滚动条滑块的粗细（可调整范围 6 ~ ${MAX_SB_WIDTH} 像素）`;
     sbField.append(sbLabel, sbInput, sbHint);
 
+    // 缩进宽度（1 ~ 8 个空格）
+    const MAX_INDENT = 8;
+    const indentField = document.createElement('div');
+    indentField.className = 'field';
+    const indentLabel = document.createElement('label');
+    indentLabel.textContent = '缩进宽度（空格，1~8）';
+    const indentInput = document.createElement('input');
+    indentInput.type = 'number';
+    indentInput.min = 1;
+    indentInput.max = MAX_INDENT;
+    indentInput.value = s.indentSize || 4;
+    const indentHint = document.createElement('div');
+    indentHint.className = 'hint';
+    indentHint.textContent = `Tab 键插入的空格数，Shift+Tab 反向缩进（可调整范围 1 ~ ${MAX_INDENT} 个空格）`;
+    indentField.append(indentLabel, indentInput, indentHint);
+
     // AI 大模型配置
     const aiField = document.createElement('div');
     aiField.className = 'field';
@@ -558,7 +613,7 @@ async function boot() {
     wrapText.textContent = '自动换行';
     wrapRow.append(wrapInput, wrapText);
 
-    body.append(pyField, sizeField, saveField, sbField, aiField, wrapRow);
+    body.append(pyField, sizeField, saveField, sbField, indentField, aiField, wrapRow);
 
     openModal({
       title: '设置',
@@ -574,6 +629,7 @@ async function boot() {
               maxFileSizeMB: Math.min(2048, Math.max(1, parseInt(sizeInput.value, 10) || 50)),
               autoSaveDelay: Math.max(100, parseInt(saveInput.value, 10) || 800),
               scrollbarWidth: Math.min(40, Math.max(6, parseInt(sbInput.value, 10) || 10)),
+              indentSize: Math.min(8, Math.max(1, parseInt(indentInput.value, 10) || 4)),
               wordWrap: wrapInput.checked,
               aiApiKey: aiKeyInput.value.trim(),
               ...(aiKeyClear ? { aiApiKeyClear: true } : {}),
@@ -584,6 +640,7 @@ async function boot() {
             };
             state.settings = await window.api.setSettings(patch);
             editor.setWordWrap(patch.wordWrap);
+            editor.setIndentSize(patch.indentSize);
             applyScrollbarWidth(patch.scrollbarWidth);
             closeModal();
             toast('设置已保存');
@@ -723,11 +780,12 @@ async function boot() {
     await openDirFromPath(state.settings.lastDirectory);
   }
   await restoreSession(); // 恢复上次会话（先恢复目录，再恢复标签，保证树定位可用）
+  syncExternalTree(); // 需求1：启动后同步一次外部文件分支（幂等，兜底 restoreSession 提前返回的场景）
 
   updateRunButton();
   // S10：window.__app 仅开发环境暴露（冒烟/扩展测试在 dev 下运行，不受影响；打包版无此接口）
   if (!(await window.api.isPackaged())) {
-    window.__app = { state, editor, tree, preview, find, globalSearch, python, openDirFromPath, aiPanel, executeAiTool, favorites, session: { save: () => persistSession(true), restore: restoreSession } };
+    window.__app = { state, editor, tree, preview, find, globalSearch, python, openDirFromPath, aiPanel, executeAiTool, favorites, syncExternalTree, session: { save: () => persistSession(true), restore: restoreSession } };
   }
 }
 
