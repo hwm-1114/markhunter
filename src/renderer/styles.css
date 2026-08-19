@@ -96,7 +96,8 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .tbtn.accent:hover { filter: brightness(1.06); }
 .tbtn.small { padding: 3px 8px; font-size: 11.5px; border-radius: 6px; }
 .tbtn.danger { color: var(--mh-danger); border-color: #f3c1c3; }
-.tbtn.danger:hover { background: #fdf0f0; }
+/* v0.1.45（小项）：原 #fdf0f0 为暗色主题下刺眼的浅色硬编码 hover 底，改由主题令牌推导（danger 12% 混面板色） */
+.tbtn.danger:hover { background: color-mix(in oklab, var(--mh-danger) 12%, var(--mh-bg-panel)); }
 .tbtn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .dir-label {
@@ -363,12 +364,18 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   background: var(--mh-bg-panel);
   border-bottom: 1px solid var(--mh-border);
   overflow-x: auto;
-  scrollbar-width: thin;
+  scrollbar-width: auto; /* v0.1.44（SB）：thin 会二次劫持 webkit 宽度（探针实证 thin+修复A→10px），改 auto */
   flex-wrap: nowrap; /* 压过 daisyUI .tabs 组件类的 flex-wrap:wrap（撞名泄漏），保持单行横向滚动 */
 }
 .tab {
   display: inline-flex;
   align-items: center;
+  /* L2（v0.1.44）：对抗 daisyUI .tab 组件类泄漏 —— height 40px / 居中 / 文本居中 / 允许换行
+     均由 daisyUI 注入，这里显式压回应用侧语义（styles.css unlayered 后加载，同值覆盖、缺省补全） */
+  height: auto;
+  justify-content: flex-start;
+  text-align: left;
+  flex-wrap: nowrap;
   gap: 6px;
   padding: 7px 10px 7px 13px;
   max-width: 200px;
@@ -715,15 +722,21 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 }
 .ctx-menu .ctx-item:hover { background: var(--mh-bg-hover); }
 .ctx-menu .ctx-item.danger { color: var(--mh-danger); }
-.ctx-menu .ctx-item.danger:hover { background: #fdf0f0; }
+/* v0.1.45（小项）：同 .tbtn.danger:hover —— 去掉浅色硬编码 #fdf0f0，按主题令牌推导 */
+.ctx-menu .ctx-item.danger:hover { background: color-mix(in oklab, var(--mh-danger) 12%, var(--mh-bg-panel)); }
 .ctx-menu .ctx-sep { height: 1px; background: var(--mh-border); margin: 4px 6px; }
 
 /* ============ 滚动条（宽度可由设置调整） ============ */
 :root { --scrollbar-width: 10px; }
 ::-webkit-scrollbar { width: var(--scrollbar-width); height: var(--scrollbar-width); }
-::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
-::-webkit-scrollbar-thumb:hover { background: #a9b6c6; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb { background: color-mix(in oklab, var(--mh-text) 35%, transparent); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in oklab, var(--mh-text) 55%, transparent); border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
+/* v0.1.44（SB 修复）：daisyUI 在 tailwind.css 的 :root 注入标准属性
+   scrollbar-color: currentColor transparent（非 auto、可继承）→ Chromium 121+
+   放弃 ::-webkit-scrollbar 渲染路径，宽度设置失效（探针实证声明 30px → 实际渲染 15px）。
+   此处显式还原 auto；styles.css 后加载且 unlayered（无 @layer），层叠可压过 daisyUI 注入。 */
+:root { scrollbar-color: auto; }
 
 /* ============ 提示浮层 ============ */
 .toast {
@@ -780,9 +793,10 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   margin: 0.9em 0;
   padding: 0.3em 1em;
   border-left: 4px solid var(--mh-accent-2);
-  background: #f0fbf9;
+  /* L5（v0.1.44）：原 #f0fbf9/#3d4a5c 为暗色主题下的浅色硬编码块，改由主题令牌推导，暗色自适应 */
+  background: color-mix(in oklab, var(--mh-accent-soft) 55%, var(--mh-bg-hover));
   border-radius: 0 8px 8px 0;
-  color: #3d4a5c;
+  color: var(--mh-text-2);
 }
 .markdown-body code {
   font-family: var(--mono);
@@ -845,9 +859,11 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 }
 .mermaid-wrap svg { max-width: 100%; height: auto; }
 .mermaid-error {
-  background: #fdf0f0;
+  /* L5（v0.1.44）：原 #fdf0f0 底 + 暗色主题下 --mh-danger 浅红字（对比度≈2:1）失效，
+     改由主题令牌推导：底色 = danger 12% 混合面板色，暗色下自适应加深、文字对比度恢复 */
+  background: color-mix(in oklab, var(--mh-danger) 12%, var(--mh-bg-panel));
   color: var(--mh-danger);
-  border: 1px solid #f3c1c3;
+  border: 1px solid color-mix(in oklab, var(--mh-danger) 35%, var(--mh-border));
   border-radius: 10px;
   padding: 12px 16px;
   margin: 1em 0;
@@ -1064,9 +1080,10 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   border: 1px solid var(--mh-border);
 }
 .ai-msg.system .ai-msg-body {
-  background: #fef7e0;
-  border: 1px solid #f3e3b0;
-  color: #8a6d1a;
+  /* L5（v0.1.44）：原 #fef7e0/#f3e3b0/#8a6d1a 为暗色下刺眼浅黄硬编码，改由主题令牌推导，暗色自适应 */
+  background: color-mix(in oklab, var(--mh-accent-soft) 55%, var(--mh-bg-hover));
+  border: 1px solid color-mix(in oklab, var(--mh-accent) 28%, var(--mh-border));
+  color: var(--mh-text-2);
 }
 .ai-msg-body p { margin: 0.3em 0; }
 .ai-msg-body pre {

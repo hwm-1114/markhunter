@@ -4,7 +4,7 @@ const fsp = fs.promises;
 const path = require('path');
 const { getSettings } = require('./settings');
 const { markSelfWrite } = require('./filewatch');
-const { isInside, setRoot, getRoot, approve, requireApproved, realpath } = require('./security');
+const { isInside, setRoot, getRoot, approve, isApproved, requireApproved, realpath, dirHasApprovedFile } = require('./security');
 
 function normalize(p) {
   return path.resolve(p);
@@ -131,9 +131,48 @@ function registerFileIpc(getWindow) {
     return true;
   });
 
+  // P7（v0.1.45）：按 range 分段读取大文件 —— 渲染进程分段注入 CM，避免大文件全量进出内存 + IPC 全量拷贝。
+  // 保留大小上限校验（超限抛 TOO_LARGE，语义与 fs:read-file 一致：tooLarge 冒烟仍过）。
+  // 返回原始字节（ArrayBuffer，结构化克隆）+ 文件元信息；编码检测与流式解码在渲染端完成
+  // （TextDecoder stream:true 可正确处理分块边界截断的多字节字符，如 GBK/UTF-8 尾字节）。
+  ipcMain.handle('fs:read-file-range', async (_e, filePath, start, length) => {
+    const st = await fsp.stat(filePath);
+    if (!st.isFile()) throw new Error('目标不是文件');
+    const maxMB = getSettings().maxFileSizeMB || 50;
+    const maxBytes = maxMB * 1024 * 1024;
+    if (st.size > maxBytes) {
+      const err = new Error(
+        `文件大小 ${(st.size / 1024 / 1024).toFixed(1)} MB 超过上限 ${maxMB} MB，已拒绝打开（可在设置中调整上限）`
+      );
+      err.code = 'TOO_LARGE';
+      err.size = st.size;
+      err.maxBytes = maxBytes;
+      throw err;
+    }
+    const s = Math.max(0, Math.floor(Number(start) || 0));
+    const len = Math.max(0, Math.min(Math.floor(Number(length) || 0), st.size - s));
+    const buf = Buffer.alloc(len);
+    let fh = null;
+    try {
+      fh = await fsp.open(filePath, 'r');
+      await fh.read(buf, 0, len, s);
+    } finally {
+      if (fh) await fh.close().catch(() => {});
+    }
+    // Buffer 底层 ArrayBuffer 视图（精确截取，避免把整个大缓冲传过去）
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    approve(filePath); // P7：记录已成功读取的路径（与 fs:read-file 一致 —— 外部大文件打开后保存/运行仍可用）
+    return { bytes: ab, start: s, end: s + len, size: st.size, mtime: st.mtimeMs };
+  });
+
   // 写二进制文件（粘贴图片用；必须先通过路径校验）
   ipcMain.handle('fs:write-binary', async (_e, filePath, buffer) => {
-    requireApproved(filePath, '路径不在当前工作目录内，操作已拒绝');
+    // M3（v0.1.44）：外部文件粘贴图片放行 —— 目标为「已批准文件所在目录」内即可。
+    // write-binary 仅粘贴图片使用，权限面最窄：不放开 create/delete/rename 等其它写操作；
+    // rootDir 内目录仍由 isInside 覆盖，不放开无关目录（S1 语义保持）。
+    const dir = path.dirname(String(filePath));
+    const ok = isApproved(filePath) || isApproved(dir) || dirHasApprovedFile(dir);
+    if (!ok) throw new Error('路径不在当前工作目录内，操作已拒绝');
     const ext = path.extname(filePath).toLowerCase();
     const okExt = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico'];
     if (!okExt.includes(ext)) throw new Error('不支持的图片格式：' + ext);
@@ -188,13 +227,15 @@ function registerFileIpc(getWindow) {
     return target;
   });
 
-  // 模拟外部修改（测试用）：仅开发环境注册；打包版无此能力（preload 保留但无 handler）
-  if (!app.isPackaged) {
-    ipcMain.handle('fs:write-external', async (_e, filePath, content) => {
-      await fsp.writeFile(filePath, content, 'utf8');
-      return true;
-    });
-  }
+  // 模拟外部修改（测试用）：L9（v0.1.44）收敛 —— 无条件注册（preload 保留 API，冒烟 dev 下仍可用），
+  // 打包模式（app.isPackaged）抛明确错误：测试接口在正式版不可用（收敛为明确行为，而非调用即 404 类异常）
+  ipcMain.handle('fs:write-external', async (_e, filePath, content) => {
+    if (app.isPackaged) {
+      throw new Error('测试接口在正式版不可用（fs:write-external 仅限开发环境）');
+    }
+    await fsp.writeFile(filePath, content, 'utf8');
+    return true;
+  });
 }
 
 module.exports = { registerFileIpc, isInside };

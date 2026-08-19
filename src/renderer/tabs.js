@@ -5,8 +5,46 @@ import { Decoration, keymap } from '@codemirror/view';
 import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
-import { langFor, baseName, escapeHtml, showContextMenu, hideContextMenu } from './ui.js';
+import { langFor, baseName, escapeHtml, showContextMenu, hideContextMenu, formatSize, stripChunkMarkers, CHUNK_MARKER_RE } from './ui.js';
 import { pathToFileUrl } from './viewer.js';
+
+// ---------- P7：大文件分段模式 ----------
+// 超过 CHUNK_THRESHOLD 的文件走「分段模式」：先读首段（CHUNK_SIZE）进 CM，
+// 文档末尾以占位标记告知未完；滚动接近底部时自动预读下一段并追加（dispatch 增量，不整体重建）；
+// 保存前若未读完先补齐剩余分段，再整篇 toString 写（写路径本身不改，仍全量写）。
+export const CHUNK_THRESHOLD = 4 * 1024 * 1024;      // 超过 4MB 走分段模式
+const CHUNK_SIZE = 2 * 1024 * 1024;                  // 每段 2MB
+const CHUNK_PREFETCH_MARGIN = 256 * 1024;            // 距底部 <256px 触发预读
+const CHUNK_MAX_BLOCKS = 4096;                       // 单文件最多分段数兜底（4096×2MB = 8GB）
+
+function chunkMarker(tab) {
+  const c = tab && tab.chunk;
+  if (!c || c.complete) return '';
+  return `\n<!-- MH-CHUNKED 已加载 ${formatSize(c.loaded)} / ${formatSize(c.size)}，滚动到底部自动加载更多 -->\n`;
+}
+
+/** 字节编码检测（与主进程 detectEncoding 同序：UTF-8 → GBK → windows-1252） */
+function detectEncodingBytes(bytes) {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return 'utf-8';
+  } catch {
+    try {
+      new TextDecoder('gbk').decode(bytes);
+      return 'gbk';
+    } catch {
+      return 'windows-1252';
+    }
+  }
+}
+
+/** 首段解码：检测编码并建立流式解码器（后续段用同一 decoder，正确处理分块边界截断的多字节字符） */
+function decodeFirstChunk(bytes, tab) {
+  const enc = detectEncodingBytes(bytes);
+  tab.chunk.encoding = enc;
+  tab.chunk.decoder = new TextDecoder(enc, { stream: true });
+  return tab.chunk.decoder.decode(bytes, { stream: true });
+}
 
 // ---------- 匹配高亮（文件内搜索用） ----------
 export const matchEffect = StateEffect.define();
@@ -205,11 +243,21 @@ export function createEditor(callbacks) {
     });
   }
 
+  // P7：分段模式预读 —— 活动标签滚动接近底部时自动加载下一段（dispatch 追加，保持光标/滚动）
+  view.scrollDOM.addEventListener(
+    'scroll',
+    () => {
+      if (activeTab && activeTab.kind === 'chunked') maybeAutoLoad(activeTab);
+    },
+    { passive: true }
+  );
+
   const imageHost = document.getElementById('image-host');
   const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'pdf'];
 
   // ---------- 打开 / 切换 / 关闭 ----------
-  async function openFile(path) {
+  /** 打开文件。opts.silent=true 时（会话恢复等批量路径）失败不弹 alertBox，仅 console.warn（L6）。 */
+  async function openFile(path, opts = {}) {
     const existing = tabs.find((t) => t.path === path);
     if (existing) {
       switchTab(existing);
@@ -220,11 +268,30 @@ export function createEditor(callbacks) {
     if (IMAGE_EXTS.includes(ext)) {
       return openImageTab(path);
     }
+    // P7：先 stat 判断大小 —— 超过阈值走分段模式；小文件路径与原先完全一致（readFile 全量）
+    let st;
+    try {
+      st = await window.api.stat(path);
+    } catch (err) {
+      if (opts.silent) {
+        console.warn('[openFile] 打开失败（已静默跳过）:', path, err && err.message ? err.message : err);
+      } else {
+        const { alertBox } = await import('./ui.js');
+        alertBox('打开文件失败', String(err.message || err));
+      }
+      return null;
+    }
+    if (st.size > CHUNK_THRESHOLD) {
+      return openChunkedTab(path, st, opts);
+    }
     let data;
     try {
       data = await window.api.readFile(path);
     } catch (err) {
-      if (err && err.code === 'TOO_LARGE') {
+      if (opts.silent) {
+        // L6：静默跳过（恢复流程不被逐个弹窗打断），保留 console.warn 供排查
+        console.warn('[openFile] 打开失败（已静默跳过）:', path, err && err.message ? err.message : err);
+      } else if (err && err.code === 'TOO_LARGE') {
         const { alertBox } = await import('./ui.js');
         alertBox('文件过大，未打开', err.message);
       } else {
@@ -254,6 +321,157 @@ export function createEditor(callbacks) {
     window.api.watchFile(path, data.mtime); // 监听外部修改
     if (onSessionChange) onSessionChange();
     return tab;
+  }
+
+  // ---------- P7：大文件分段模式 ----------
+  /** 分段打开：先读首段（约 2MB）进 CM（文档末尾带占位标记告知未完），滚动接近底部自动续读 */
+  async function openChunkedTab(path, st, opts) {
+    const tab = {
+      id: ++idSeq,
+      path,
+      name: baseName(path),
+      lang: langFor(path),
+      kind: 'chunked',
+      state: null,
+      dirty: false,
+      saveTimer: null,
+      pinned: false,
+      chunk: { size: st.size, loaded: 0, complete: false, inflight: false, decoder: null, encoding: null },
+    };
+    let c0;
+    try {
+      c0 = await window.api.readFileRange(path, 0, CHUNK_SIZE);
+    } catch (err) {
+      if (opts.silent) {
+        console.warn('[openFile] 打开失败（已静默跳过）:', path, err && err.message ? err.message : err);
+      } else if (err && err.code === 'TOO_LARGE') {
+        const { alertBox } = await import('./ui.js');
+        alertBox('文件过大，未打开', err.message);
+      } else {
+        const { alertBox } = await import('./ui.js');
+        alertBox('打开文件失败', String(err.message || err));
+      }
+      return null;
+    }
+    const text0 = decodeFirstChunk(c0.bytes, tab);
+    tab.chunk.loaded = c0.end;
+    tab.chunk.complete = c0.end >= c0.size;
+    tab.state = makeState(text0 + chunkMarker(tab), tab.lang);
+    tabs.push(tab);
+    switchTab(tab);
+    // 打开路径的 setState 不视为用户编辑：清脏标记与自动保存定时器（避免刚打开就被自动保存截断内容）
+    tab.dirty = false;
+    clearTimeout(tab.saveTimer);
+    window.api.watchFile(path, c0.mtime);
+    if (onSessionChange) onSessionChange();
+    return tab;
+  }
+
+  /** 加载下一段并追加到文档（dispatch 增量，不整体重建；非活动标签用 state.update 保持光标） */
+  async function loadNextChunk(tab) {
+    const c = tab && tab.chunk;
+    if (!c || c.complete || c.inflight || !tab.state) return;
+    c.inflight = true;
+    try {
+      const start = c.loaded;
+      const len = Math.min(CHUNK_SIZE, c.size - start);
+      if (len <= 0) {
+        c.complete = true; // 无剩余内容：仅移除占位标记
+        appendChunkText(tab, '');
+        return;
+      }
+      const r = await window.api.readFileRange(tab.path, start, len);
+      let text = '';
+      if (c.decoder) {
+        text = c.decoder.decode(r.bytes, { stream: true });
+        if (r.end >= c.size) text += c.decoder.decode(); // 末段 flush 残余多字节序列
+      } else {
+        text = new TextDecoder(c.encoding || detectEncodingBytes(r.bytes)).decode(r.bytes);
+      }
+      c.loaded = r.end;
+      if (r.end >= c.size) c.complete = true;
+      appendChunkText(tab, text);
+    } catch (err) {
+      console.warn('[chunked] 分段读取失败:', tab.path, err && err.message ? err.message : err);
+    } finally {
+      c.inflight = false;
+      maybeAutoLoad(tab); // 若用户仍停在底部附近，继续预读
+    }
+  }
+
+  /** 追加分段文本：先移除已有占位标记（可能在末尾，也可能因用户编辑漂移），再在文末追加内容 + 新标记 */
+  function appendChunkText(tab, text) {
+    const marker = chunkMarker(tab); // complete 后返回 ''（即移除占位）
+    const isActive = activeTab === tab;
+    const state = isActive ? view.state : tab.state;
+    const docStr = state.doc.toString();
+    const changes = [];
+    const re = new RegExp(CHUNK_MARKER_RE.source, 'g');
+    let m;
+    while ((m = re.exec(docStr))) changes.push({ from: m.index, to: m.index + m[0].length, insert: '' });
+    changes.push({ from: docStr.length, to: docStr.length, insert: text + (marker || '') });
+    if (isActive) {
+      view.dispatch({ changes });
+      tab.state = view.state;
+    } else {
+      // 非活动标签：EditorState.update（selection 自动经 changes 映射，光标语义保持）
+      tab.state = state.update({ changes });
+    }
+    // 分段追加不是用户编辑：不触发自动保存 / 脏标记（updateListener 已标脏，这里复位）
+    tab.dirty = false;
+    clearTimeout(tab.saveTimer);
+    if (isActive) {
+      const ss = document.getElementById('save-status');
+      if (ss && !tab.dirty) ss.textContent = '';
+    }
+    if (onSessionChange) onSessionChange();
+  }
+
+  /** 活动标签滚动接近底部时触发预读（scroll 监听 + 加载完成后链式调用） */
+  function maybeAutoLoad(tab) {
+    if (!tab || tab.kind !== 'chunked' || !tab.chunk || tab.chunk.complete || tab.chunk.inflight) return;
+    if (activeTab !== tab) return; // 仅活动标签按滚动预读
+    const el = view.scrollDOM;
+    if (!el) return;
+    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (remaining < CHUNK_PREFETCH_MARGIN) loadNextChunk(tab);
+  }
+
+  /** 补齐剩余分段（保存前调用，防止写盘截断） */
+  async function ensureFullyLoaded(tab) {
+    const c = tab && tab.chunk;
+    if (!c || c.complete) return;
+    let guard = 0;
+    while (!c.complete && guard < CHUNK_MAX_BLOCKS) {
+      await loadNextChunk(tab);
+      guard++;
+    }
+  }
+
+  /** 补齐到指定行号（全局搜索跳转定位用；行号超出已加载范围时先续读） */
+  async function ensureLineLoaded(tab, line) {
+    let guard = 0;
+    while (!tab.chunk.complete && view.state.doc.lines < line && guard < CHUNK_MAX_BLOCKS) {
+      await loadNextChunk(tab);
+      guard++;
+    }
+  }
+
+  /** 外部修改后重载分段标签：重置解码器并重读首段（保留 kind/chunk 结构） */
+  async function reloadChunked(tab) {
+    const c0 = await window.api.readFileRange(tab.path, 0, CHUNK_SIZE);
+    tab.chunk = { size: c0.size, loaded: c0.end, complete: c0.end >= c0.size, inflight: false, decoder: null, encoding: null };
+    const text0 = decodeFirstChunk(c0.bytes, tab);
+    const insert = text0 + chunkMarker(tab);
+    if (activeTab === tab) {
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert } });
+      tab.state = view.state;
+    } else {
+      tab.state = tab.state.update({ changes: { from: 0, to: tab.state.doc.length, insert } });
+    }
+    tab.dirty = false;
+    clearTimeout(tab.saveTimer);
+    if (!tab.chunk.complete) loadNextChunk(tab); // 续读后续段
   }
 
   /** 以图片标签页打开图片文件 */
@@ -545,7 +763,10 @@ export function createEditor(callbacks) {
   async function saveNow(tab) {
     const t = tab || activeTab;
     if (!t || !t.dirty) return;
-    const content = t.state.doc.toString();
+    if (t.kind === 'chunked' && !t.chunk.complete) {
+      await ensureFullyLoaded(t); // P7：先补齐剩余分段再写盘，防止只写已加载部分造成截断
+    }
+    const content = stripChunkMarkers(t.state.doc.toString()); // 剥离占位标记，不污染文件内容
     try {
       await window.api.writeFile(t.path, content);
       t.dirty = false;
@@ -603,18 +824,40 @@ export function createEditor(callbacks) {
   /** 定位到指定行（从 1 开始），用于搜索结果跳转 */
   function jumpToLine(tab, line) {
     switchTab(tab);
-    const maxLine = view.state.doc.lines;
-    const l = Math.max(1, Math.min(line || 1, maxLine));
-    const pos = view.state.doc.line(l).from;
-    view.dispatch({
-      selection: { anchor: pos },
-      effects: EditorView.scrollIntoView(pos, { y: 'center' }),
-    });
-    view.focus();
+    const doJump = () => {
+      const maxLine = view.state.doc.lines;
+      const l = Math.max(1, Math.min(line || 1, maxLine));
+      const pos = view.state.doc.line(l).from;
+      view.dispatch({
+        selection: { anchor: pos },
+        effects: EditorView.scrollIntoView(pos, { y: 'center' }),
+      });
+      view.focus();
+    };
+    // P7：分段模式下行号超出已加载范围 → 先续读到该行再定位
+    if (tab.kind === 'chunked' && !tab.chunk.complete && line > view.state.doc.lines) {
+      ensureLineLoaded(tab, line).then(doJump);
+    } else {
+      doJump();
+    }
   }
 
   function findTabByPath(p) {
     return tabs.find((t) => t.path === p) || null;
+  }
+
+  /** P9（v0.1.45）：按给定路径顺序重排标签数组（会话恢复并行打开完成后调用，
+   *  保证标签栏顺序 = 会话顺序，pinned/active 下标语义不变）；
+   *  不在 orderPaths 中的标签保持原相对顺序追加到末尾；随后重绘一次。 */
+  function reorderTabs(orderPaths) {
+    const indexOf = new Map(orderPaths.map((p, i) => [p, i]));
+    const orig = new Map(tabs.map((t, i) => [t, i]));
+    tabs.sort((a, b) => {
+      const ia = indexOf.has(a.path) ? indexOf.get(a.path) : orig.size + orig.get(a);
+      const ib = indexOf.has(b.path) ? indexOf.get(b.path) : orig.size + orig.get(b);
+      return ia - ib;
+    });
+    renderTabs();
   }
 
   /** 关闭路径匹配（自身或在目录内）的所有标签 */
@@ -675,12 +918,20 @@ export function createEditor(callbacks) {
       return;
     }
     const dir = dirOf(tab.path);
+    // L7（v0.1.44）：剪贴板 MIME → 扩展名白名单归一化（image/svg+xml → svg；image/jpeg → jpg；
+    // 未知 MIME 回退 png，由主进程 write-binary 扩展名校验兜底）
+    const IMAGE_EXT_MAP = {
+      png: 'png', jpeg: 'jpg', jpg: 'jpg', gif: 'gif', webp: 'webp',
+      bmp: 'bmp', 'svg+xml': 'svg', svg: 'svg', ico: 'ico',
+    };
     for (const item of items) {
       const file = item.getAsFile();
       if (!file) continue;
       try {
         const buf = await file.arrayBuffer();
-        const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+        const mime = (file.type || '').split(';')[0].trim().toLowerCase();
+        const sub = (mime.split('/')[1] || '').toLowerCase();
+        const ext = IMAGE_EXT_MAP[sub] || 'png';
         const name = `image-${Date.now()}-${++imgSeq}.${ext}`;
         const fullPath = (dir ? dir + '\\' : '') + name;
         await window.api.writeBinary(fullPath, buf);
@@ -704,9 +955,13 @@ export function createEditor(callbacks) {
   }
 
   /** AI 内容写入文档：mode = replace(替换选中) / insert(插入光标) / full(替换全文) */
-  function applySnippet(text, mode, from, to) {
+  async function applySnippet(text, mode, from, to) {
     const tab = activeTab;
     if (!tab || tab.kind === 'image') return false;
+    if (mode === 'full' && tab.kind === 'chunked' && !tab.chunk.complete) {
+      // P7：全文替换前补齐剩余分段，避免只替换已加载部分造成内容丢失
+      await ensureFullyLoaded(tab);
+    }
     let change;
     if (mode === 'replace') change = { from, to, insert: text };
     else if (mode === 'insert') change = { from, insert: text };
@@ -739,14 +994,9 @@ export function createEditor(callbacks) {
 
   // ---------- 外部修改检测：自动重载（有未保存修改时询问） ----------
   window.api.onFileChanged(async ({ path: changedPath }) => {
-    const tab = tabs.find((t) => t.path === changedPath && !t.kind);
+    // 普通文本标签（kind 未定义）+ 分段标签（kind='chunked'）参与外部修改同步；图片标签（kind='image'）不参与
+    const tab = tabs.find((t) => t.path === changedPath && (!t.kind || t.kind === 'chunked'));
     if (!tab) return;
-    let data;
-    try {
-      data = await window.api.readFile(changedPath);
-    } catch {
-      return; // 文件不可读，忽略
-    }
     if (tab.dirty) {
       // 有未保存的本地修改：询问是否丢弃并重新加载
       const { confirmDialog } = await import('./ui.js');
@@ -755,6 +1005,27 @@ export function createEditor(callbacks) {
         '文件已在外部更改'
       );
       if (!ok) return;
+    }
+    // P7：分段标签走分段重载（重置解码器重读首段 + 续读），避免全量 readFile 触碰大文件上限
+    if (tab.kind === 'chunked') {
+      try {
+        await reloadChunked(tab);
+      } catch (err) {
+        console.warn('[chunked] 外部修改重载失败:', changedPath, err && err.message ? err.message : err);
+        return;
+      }
+      tab.dirty = false;
+      if (activeTab === tab) onTabSwitch(tab); // 刷新预览等
+      renderTabs();
+      const { toast } = await import('./ui.js');
+      toast(`已从外部重新加载 ${tab.name}`);
+      return;
+    }
+    let data;
+    try {
+      data = await window.api.readFile(changedPath);
+    } catch {
+      return; // 文件不可读，忽略
     }
     // 记录重载前的光标与滚动位置，重载后恢复（避免跳回顶部）
     const selPos = activeTab === tab ? view.state.selection.main.head : null;
@@ -786,5 +1057,5 @@ export function createEditor(callbacks) {
     toast(`已从外部重新加载 ${tab.name}`);
   });
 
-  return { openFile, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight };
+  return { openFile, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs };
 }

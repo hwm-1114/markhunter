@@ -63,4 +63,21 @@ function requireApproved(p, message) {
   return true;
 }
 
-module.exports = { isInside, setRoot, getRoot, approve, isApproved, requireApproved, realpath };
+/** 目录内是否存在已批准的文件（M3：粘贴图片允许写入「已打开外部文件」的同级目录）。
+ *  S1 语义保持：rootDir 内目录仍由 isInside 覆盖；本函数只放行「确实打开过其中文件」的目录，
+ *  不放开无关目录（create/delete/rename 等其它写操作仍要求目标本身或父目录已批准）。 */
+function dirHasApprovedFile(dir) {
+  let targetDir;
+  try {
+    targetDir = realpath(dir);
+  } catch {
+    targetDir = normalize(dir);
+  }
+  const same = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+  for (const p of approvedSet) {
+    if (same(path.dirname(p), targetDir)) return true;
+  }
+  return false;
+}
+
+module.exports = { isInside, setRoot, getRoot, approve, isApproved, requireApproved, realpath, dirHasApprovedFile };

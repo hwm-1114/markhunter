@@ -7,6 +7,47 @@ const { isApproved } = require('./security');
 let currentProc = null;
 let currentStartTime = 0;
 
+// P4（v0.1.45）：输出背压 —— stdout/stderr 按「~60ms 或 ~4KB（先到者）」聚合后统一经
+// 'python:output' 通道发送，避免每 chunk 一条 IPC（实测 2000 行 ≈ 数千条 IPC 拖垮渲染线程）。
+// 退出时 flush 残余；wire 格式保持 { stream, data } 不变（渲染端与冒烟监听兼容）。
+const BATCH_INTERVAL_MS = 60; // ~50-100ms 窗口内取 60ms（D7：4KB 或 50ms 先到者，此处 60ms 量级一致）
+const BATCH_MAX_BYTES = 4096;
+
+function createOutputBatcher(getWin) {
+  const buf = { stdout: '', stderr: '' };
+  let total = 0;       // 当前批累计字节数（utf8 近似按字符数计，量级足够）
+  let timer = null;
+
+  function flush() {
+    timer = null;
+    if (total === 0) return;
+    // 注意：必须先取走字符串再清空缓冲 —— out 若直接引用 buf，清空会把待发送内容一并清掉
+    const outStdout = buf.stdout;
+    const outStderr = buf.stderr;
+    buf.stdout = '';
+    buf.stderr = '';
+    total = 0;
+    let win = null;
+    try { win = getWin(); } catch { /* 窗口查询失败视为不可用 */ }
+    if (!win || win.isDestroyed()) return; // 窗口已销毁：丢弃残余（进程退出中，无接收方）
+    // 按流各发一条（≤2 条/批）：保持 { stream, data } 协议不变，渲染端逐流追加
+    if (outStdout) win.webContents.send('python:output', { stream: 'stdout', data: outStdout });
+    if (outStderr) win.webContents.send('python:output', { stream: 'stderr', data: outStderr });
+  }
+
+  function push(stream, data) {
+    buf[stream] += data;
+    total += data.length;
+    if (total >= BATCH_MAX_BYTES) { // 字节阈值先到：立即发
+      flush();
+      return;
+    }
+    if (!timer) timer = setTimeout(flush, BATCH_INTERVAL_MS); // 时间阈值先到：定时发
+  }
+
+  return { push, flush };
+}
+
 /** 探测某个命令是否可用（如 python / py） */
 function probeExecutable(cmd) {
   return new Promise((resolve) => {
@@ -169,7 +210,10 @@ function registerPythonIpc(getWindow) {
       currentProc = null;
     }
     const win = getWindow();
+    if (!win) throw new Error('窗口不可用');
     currentStartTime = Date.now();
+    // P4：输出聚合器（stdout/stderr 合批发送，退出时 flush 残余）
+    const batcher = createOutputBatcher(getWindow);
     // 使用 ['--', filePath]：避免以 '-' 开头的文件名被解释为解释器选项
     const child = spawn(interpreter, ['--', filePath], {
       cwd: path.dirname(filePath),
@@ -180,26 +224,29 @@ function registerPythonIpc(getWindow) {
     win.webContents.send('python:start', { interpreter, file: filePath });
 
     child.stdout.on('data', (d) => {
-      win.webContents.send('python:output', { stream: 'stdout', data: d.toString('utf8') });
+      batcher.push('stdout', d.toString('utf8'));
     });
     child.stderr.on('data', (d) => {
-      win.webContents.send('python:output', { stream: 'stderr', data: d.toString('utf8') });
+      batcher.push('stderr', d.toString('utf8'));
     });
+    let settled = false; // 防双发：spawn 失败时 error 与 close 都会触发
+    const sendExit = (payload) => {
+      if (settled) return;
+      settled = true;
+      batcher.flush(); // P4：退出时 flush 残余，保证输出完整、退出码后到
+      win.webContents.send('python:exit', payload);
+      currentProc = null;
+    };
     child.on('error', (err) => {
-      win.webContents.send('python:exit', {
+      sendExit({
         code: null,
         duration: Date.now() - currentStartTime,
         error: `无法启动解释器 ${interpreter}: ${err.message}`,
       });
-      currentProc = null;
     });
-    child.on('exit', (code, signal) => {
-      win.webContents.send('python:exit', {
-        code,
-        signal,
-        duration: Date.now() - currentStartTime,
-      });
-      currentProc = null;
+    // 用 close 而非 exit：close 保证 stdio 全部排空后才触发，此时 flush 残余不会遗漏晚到的 data 事件
+    child.on('close', (code, signal) => {
+      sendExit({ code, signal, duration: Date.now() - currentStartTime });
     });
     return true;
   });

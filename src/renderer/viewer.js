@@ -190,13 +190,11 @@ export function openViewer({ kind, src, svgHtml, filePath, title }) {
 
   body.append(stage, info, bar);
 
-  // 弹窗加宽，关闭时恢复
+  // 弹窗加宽（M2：关闭时的宽度清理统一由 ui.js closeModal 负责 —— 清空 #modal-box 内联宽，
+  // 遮罩/「关闭」按钮两条路径均收敛到 closeModal，不再残留 860px 撑宽后续弹窗）
   const modalBox = document.getElementById('modal-box');
   modalBox.style.width = 'min(860px, calc(100vw - 48px))';
-  const restore = () => {
-    modalBox.style.width = '';
-    closeModal();
-  };
+  const restore = () => closeModal();
 
   openModal({
     title: title || (kind === 'image' ? '图片查看' : 'mermaid 图查看'),

@@ -12,6 +12,13 @@ export function createFind(getEditor, getTab) {
   let matches = [];      // 全部匹配 {line, from, to, text}
   let current = -1;      // 当前选中匹配下标
   let query = '';
+  // P10（v0.1.45）：结果 DOM 优化 —— 行元素数组 + 上次渲染快照（state/query/len 三者恒等 → 跳过重建）。
+  // CodeMirror EditorState 不可变：tab.state 引用不变 ⇒ 文档内容未变 ⇒ 同 query 下 matches 必然一致，
+  // 因此 jumpTo / 重复触发等路径可只切 current 高亮，避免 2000 行每击键全量重建（实测 11.5ms/次）。
+  let rowEls = [];
+  let lastState = null;
+  let lastQuery = '';
+  let lastLen = -1;
 
   function getView() {
     return getEditor().getView();
@@ -44,8 +51,26 @@ export function createFind(getEditor, getTab) {
     view.dispatch({ effects: matchEffect.of(Decoration.set(ranges, true)) });
   }
 
+  /** 仅同步 current 高亮与滚动（跳转/Enter 导航路径，不重建列表） */
+  function syncCurrentClass() {
+    rowEls.forEach((row, i) => row.classList.toggle('current', i === current));
+    const cur = resultsEl.querySelector('.current');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+
   function renderResults() {
-    resultsEl.innerHTML = '';
+    const tab = getTab();
+    // P10：文档内容未变（state 引用恒等）且 query/匹配数一致 → 结果行必然一致，跳过全量重建
+    const unchanged = query === lastQuery && lastLen === matches.length && !!tab && tab.state === lastState;
+    if (unchanged) {
+      syncCurrentClass();
+      return;
+    }
+    resultsEl.textContent = '';
+    rowEls = [];
+    lastState = null;
+    lastQuery = '';
+    lastLen = -1;
     if (!query) {
       resultsEl.innerHTML = '<div class="find-empty">输入关键词开始搜索（不区分大小写，展示全部匹配）</div>';
       return;
@@ -54,9 +79,13 @@ export function createFind(getEditor, getTab) {
       resultsEl.innerHTML = '<div class="find-empty">没有找到匹配项</div>';
       return;
     }
+    // P10：DocumentFragment 批量构建（一次 append，避免 2000 行逐行 append 触发布局）；
+    // 行点击走容器级事件委托（dataset.index），不再每行一个 listener
+    const frag = document.createDocumentFragment();
     matches.forEach((m, i) => {
       const row = document.createElement('div');
-      row.className = `find-result ${i === current ? 'current' : ''}`;
+      row.className = 'find-result' + (i === current ? ' current' : '');
+      row.dataset.index = i;
       const lineNo = document.createElement('span');
       lineNo.className = 'r-line';
       lineNo.textContent = m.line;
@@ -64,9 +93,13 @@ export function createFind(getEditor, getTab) {
       text.className = 'r-text';
       text.innerHTML = highlightText(m.text, query);
       row.append(lineNo, text);
-      row.addEventListener('click', () => jumpTo(i));
-      resultsEl.appendChild(row);
+      frag.appendChild(row);
+      rowEls.push(row);
     });
+    resultsEl.appendChild(frag);
+    lastState = tab ? tab.state : null;
+    lastQuery = query;
+    lastLen = matches.length;
     // 当前项滚入视野
     const cur = resultsEl.querySelector('.current');
     if (cur) cur.scrollIntoView({ block: 'nearest' });
@@ -98,7 +131,7 @@ export function createFind(getEditor, getTab) {
       effects: EditorView.scrollIntoView(m.from, { y: 'center' }),
     });
     applyHighlights();
-    renderResults();
+    syncCurrentClass(); // P10：仅切 current 高亮 + 滚入视野，不重建结果列表
   }
 
   function runSearch(noJump = false) {
@@ -140,6 +173,13 @@ export function createFind(getEditor, getTab) {
       const step = e.shiftKey ? -1 : 1;
       jumpTo((current + step + matches.length) % matches.length);
     }
+  });
+  // P10：结果行点击 → 容器级事件委托（行内不再挂 listener，2000 行也只有一个监听器）
+  resultsEl.addEventListener('click', (e) => {
+    const row = e.target.closest('.find-result');
+    if (!row) return;
+    const idx = parseInt(row.dataset.index, 10);
+    if (Number.isInteger(idx) && idx >= 0 && idx < matches.length) jumpTo(idx);
   });
 
   return { runSearch, setQuery, clearSearch, focus: () => { panel.classList.remove('hidden'); input.focus(); input.select(); } };

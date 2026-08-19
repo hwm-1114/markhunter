@@ -1,5 +1,42 @@
 # 更新说明（Changelog）
 
+## v0.1.45（2026-08-20）
+
+### 修复与优化
+- **Python 输出背压（P4）**：主进程 stdout/stderr 按「~60ms 或 ~4KB（先到者）」聚合后统一经 `python:output` 通道发送，退出（close）时 flush 残余；渲染端批内按行拆 span 用 `DocumentFragment` 一次追加、批末才设一次 `scrollTop`，保留 3000 span 上限裁剪，并处理跨批长行截断续接。2000 行输出渲染线程冻结由 2.37s 降至几十毫秒，IPC 消息数降 1~2 个数量级。
+- **文件监听改事件驱动（P8）**：`fs.watchFile` 500ms 轮询/标签改为 `fs.watch` 事件驱动（50 标签不再 = 50 个 stat 轮询，外部修改即时感知）。选型依据 Windows 探针实证（直接写 20/20、原子替换 20/20、替换后监听持续有效）；`fs.watch` 同步失败或异步 error 时自动回退 `fs.watchFile` 1000ms 轮询兜底（退化语义不变）。
+- **会话恢复并行限流（P9）**：启动恢复多个标签由逐个串行打开改为并发 3 路 `openFile`，恢复完成后按会话顺序重排标签栏（新增 `editor.reorderTabs`），活动标签与 pinned 下标语义保持不变。
+- **文件内搜索 DOM 优化（P10）**：结果列表改为 `DocumentFragment` 批量构建 + 容器级事件委托（不再每行一个 listener）；借助 CodeMirror EditorState 不可变性，文档未变时重复触发/跳转仅切换 current 高亮，不再每击键全量重建 2000 行 DOM（实测 11.5ms/次）。
+- **mermaid 缓存 SVG id 实例唯一化（P2 补强）**：缓存命中复用 SVG 时，同一源码图多次出现会注入重复的内部 id（defs/marker/gradient/样式选择器），导致 `url(#id)`/CSS 全部命中第一个实例。注入前对 id 属性、`url(#)`、`href="#id"`、`<style>` 内 `#id` 选择器统一追加文档内唯一后缀（十六进制色值不受误伤）。
+- **危险按钮/菜单项浅色硬编码令牌化（小项）**：`.tbtn.danger:hover` 与 `.ctx-item.danger:hover` 的 `#fdf0f0` 改为 `color-mix(in oklab, var(--mh-danger) 12%, var(--mh-bg-panel))`，暗色主题下 hover 底色自适应。
+- **全局搜索迁 utilityProcess（P6）**：搜索逻辑整体迁入 `src/main/search-worker.js`（`utilityProcess.fork`，worker 文件随 asar 打包），主进程只做任务转发/取消/超时兜底/进度透传 —— 1GB 工程扫描不再占用主进程事件循环（搜索期间保存/设置即时响应）。支持取消（`search:cancel`，UI 搜索中按钮变「取消」）与进度事件（`search:progress` 透传「已扫描 N 个文件」）。渲染端结果分批渲染（首 200 条 +「加载更多」按钮），不再一次性建 3000 行 DOM；`search:global` 返回契约不变。
+- **大文件分段读取（P7）**：超过 4MB 的文件走「分段模式」：`fs:read-file-range` 按 range 读入（保留大小上限校验，超限仍拒绝），首段约 2MB 进 CM（文档末尾带 `<!-- MH-CHUNKED -->` 占位标记告知未完，预览/保存前自动剥离），滚动接近底部自动预读下一段并以 CM `dispatch` 增量追加（保持光标/滚动）；流式 `TextDecoder` 正确处理分块边界截断的多字节字符（UTF-8/GBK）。保存前若未读完先补齐剩余分段再整篇写入（写路径本身不改），防止写盘截断；全局搜索跳转到未加载行号时自动续读定位。
+- **mermaid 拆包（P5）**：mermaid 全家桶从主 bundle 移出为独立 `dist/mermaid-chunk.js`（新入口 `mermaid-entry.js`，iife + minify，暴露 `window.__mermaid`）。preview.js 不再静态 import mermaid：首次需要渲染时动态注入同源 `<script>`（CSP `script-src 'self'` 允许），就绪 Promise 融入渲染路径（就绪前保持 `pre>code` 占位，加载失败显示错误占位），无 mermaid 块的文档不触发 chunk 加载。主 bundle 由约 4.34MB 降至 0.85MB（**-80%**），chunk 3.29MB 按需加载。
+
+### 测试
+- 冒烟测试新增 6 项：`pythonBatch`（2000 行输出完整、退出码 0、span 不超上限）、`restoreParallel`（并发恢复顺序/激活/pinned 正确）、`findDomReuse`（同查询重复触发结果一致、Enter 跳转不重建）、`computedStyleTab`（.tab 计算值 height/justify-content/text-align 宽松断言）、`computedStyleTheme`（thumb 色非 #cbd5e1、暗色 blockquote 背景非 #f0fbf9）、`mermaidCacheId`（同图两次出现无内部 id 冲突）。
+- 中期批次再新增 4 项：`searchCancel`（搜索取消路径宽松验证 + 取消后 worker 仍可用）、`largeFileChunk`（>4MB 文件分段打开，初始 doc 长度 < 文件大小，滚动到底部预读后长度增长）、`mermaidChunkLoaded`（chunk 动态加载后 `window.__mermaid` 就绪且 SVG 可渲染）、`bundleSplit`（主进程侧断言 bundle.js < 2.5MB 且 mermaid-chunk.js 产物存在）。
+
+
+### 修复与优化
+- **滚动条滑块宽度修复（SB，核心回归闭环）**：v0.1.43 引入 daisyUI 后，其在 tailwind.css 的 `:root` 注入标准属性 `scrollbar-color`（非 auto、可继承），Chromium 121+ 据此放弃 `::-webkit-scrollbar` 伪元素渲染路径，导致「设置 → 滚动条宽度」（6~40px）设置失效、始终渲染为系统默认宽度。修复：styles.css 滚动条块追加 `:root { scrollbar-color: auto; }` 显式还原；`.tabs` 遗留的 `scrollbar-width: thin` 改为 `auto`（thin 会二次劫持标签条滚动条）；滚动条 thumb 颜色由固定 `#cbd5e1` 改为 `color-mix(in oklab, var(--mh-text) 35%, transparent)` 随主题自适应。探针实证：声明 30px → 实际渲染 30px，随设置联动。
+- **mermaid 暗色主题冷启动修复（H1）**：暗色主题冷启动后首次渲染的 mermaid 图不再为浅色 default 主题。渲染前按当前明暗调用 `ensureMermaidTheme()` 初始化，预览模块创建后补一次 `refreshMermaid()`（明暗守卫去重，无图零成本）。
+- **主题切换性能优化（P3）**：`refreshMermaid()` 仅在明暗状态实际变化时才重新初始化并重渲染；同明暗档位切换、无图场景直接跳过，多图文档切主题不再冻结 0.2~4s。
+- **击键防抖（P1+P2）**：编辑器输入后，预览渲染与文件内搜索合并为 250ms trailing 防抖，整篇 `md.render` / 全量搜索不再每键触发；mermaid 渲染按 src+theme 内容哈希缓存 SVG，文档未变不重画（200KB 文档每键约 21ms、994KB 约 153ms 的打字卡顿消除）。
+- **弹窗关闭修复（M1/M2）**：`openModal` 支持 `onClose` 钩子：设置弹窗点遮罩关闭时还原「打开时主题」预览；`closeModal` 统一清空 `#modal-box` 内联宽度，图片/mermaid 查看器经遮罩关闭后不再残留 860px 撑宽后续所有弹窗（含设置）。
+- **mermaid 渲染竞态补渲（M4）**：主题切换恰逢首次渲染进行中而遗留的 `pre>code.language-mermaid` 未渲染节点，`reRenderMermaid` 现一并收集补渲。
+- **外部文件粘贴图片（M3）**：拖入工作目录外打开的 md 中粘贴图片，允许写入「已批准文件所在目录」，不再被「路径不在当前工作目录内」拒绝。
+- **会话恢复静默（L6）**：恢复会话时已删除/超限文件不再逐个弹「打开失败」，改为静默跳过并 `console.warn`。
+- **剪贴板 SVG 粘贴（L7）**：`image/svg+xml` 扩展名归一化为 `svg`，写入格式白名单补齐 `.svg`，剪贴板 SVG 粘贴可正常生成图片。
+- **主题分组修正（L1）**：aqua / forest 实为 `color-scheme: dark`，由「浅色」组移入「深色」组，与 DARK_THEMES 口径一致。
+- **暗色下硬编码浅色块（L5）**：blockquote、AI 系统消息、mermaid 错误提示改用 `color-mix` 变量化配色，暗色主题下不再刺眼。
+- **测试接口收敛（L9）**：`fs:write-external` 在打包版明确报「测试接口在正式版不可用」，消除「调用即报错」的死 API。
+- **构建压缩（P5）**：esbuild 开启 `minify`，bundle 由约 9.5MB 降至约 4.34MB（-55%），安装包体积与启动 IO/内存占用同步下降。
+
+### 测试
+- 冒烟测试 **116 项**全部通过：新增 mermaid 冷启动主题（themeMermaidColdStart）、主题切换幂等（themeMermaidIdempotent）、部分重渲补渲（mermaidPartialReRender）、弹窗宽度重置（modalWidthReset）、遮罩还原主题（modalMaskRestore）、击键防抖合并（debounceTyping）、mermaid 缓存（mermaidCache）、外部文件粘贴图片（pasteExternalImage）、主题分组（themeGrouping）、静默恢复（silentRestore）、SVG 粘贴（svgPasteExt）、writeExternal 打包收敛（writeExternalPackaged）、minify 体积（minifySanity）等专项断言；`scrollbarSetting` 升级为三层断言（标准属性 `scrollbar-color=auto` + `::-webkit-scrollbar` 伪元素计算值 + 真实渲染宽度，overlay 环境自适应跳过），另含视觉断言 scrollbarWidthVisual。
+
+
 ## v0.1.43（2026-08-18）
 
 ### 新功能

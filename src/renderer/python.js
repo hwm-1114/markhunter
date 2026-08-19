@@ -15,15 +15,38 @@ export function createPythonPanel(getTab, getSettings) {
     status.className = `py-status ${cls}`;
   }
 
+  // P4（v0.1.45）：批渲染 —— 主进程已按 ~60ms/4KB 聚合输出（每条 IPC 含多行），
+  // 渲染端批内按行拆 span 用 DocumentFragment 一次追加，批末才设一次 scrollTop
+  // （避免旧逻辑每 chunk 一次强制回流，实测 2000 chunk ≈ 2.37s 渲染线程冻结）；
+  // 保留 3000 span 上限裁剪（先裁旧再追加）。
+  let lastLineOpen = false; // 上一批以不完整行（无 \n 结尾）结束 → 本批首行需续接
+
   function append(text, cls = '') {
-    if (output.childElementCount > 3000) {
-      output.removeChild(output.firstChild);
+    if (!text) return;
+    const frag = document.createDocumentFragment();
+    const lines = String(text).split('\n');
+    // Python stdout 是块缓冲：跨批可能截断长行 —— 上一批未完结时首行并入最后一个 span，保持渲染与逐 chunk 追加一致
+    if (lastLineOpen && output.lastChild) {
+      output.lastChild.textContent += lines[0];
+      lines.shift();
     }
-    const span = document.createElement('span');
-    if (cls) span.className = cls;
-    span.textContent = text;
-    output.appendChild(span);
-    output.scrollTop = output.scrollHeight;
+    lastLineOpen = !String(text).endsWith('\n');
+    // span 为内联元素，行间需显式 \n 文本节点（.py-output 为 pre-wrap，渲染为换行）
+    for (let i = 0; i < lines.length; i++) {
+      const span = document.createElement('span');
+      if (cls) span.className = cls;
+      span.textContent = lines[i];
+      frag.appendChild(span);
+      if (i < lines.length - 1) frag.appendChild(document.createTextNode('\n'));
+    }
+    if (frag.childElementCount === 0) return; // 纯续接、无新行
+    let excess = output.childElementCount + frag.childElementCount - 3000;
+    while (excess > 0) {
+      output.removeChild(output.firstChild);
+      excess--;
+    }
+    output.appendChild(frag);
+    output.scrollTop = output.scrollHeight; // 批末一次（整批内仅一次强制 layout）
   }
 
   window.api.onPythonStart(({ interpreter, file }) => {

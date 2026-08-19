@@ -1,7 +1,11 @@
 // Markdown 预览（含 mermaid 渲染、图片路径解析与双击详情）
+// P5（v0.1.45）：mermaid 拆包 —— 主 bundle 不再静态引入 mermaid（原占 ~74%）。
+// 首次需要渲染时动态注入同源 <script src="dist/mermaid-chunk.js">（CSP script-src 'self' 允许；
+// file:// 下同源经典 script 注入可行，跨文件 ESM import 有 CORS 限制故不用 import()）。
+// chunk 内 iife 将 mermaid 实例暴露到 window.__mermaid；就绪前 mermaid 块保持 pre>code 占位，
+// 失败时显示错误占位。异步就绪已融入渲染路径（renderMermaid 内部 await），冒烟用例等待即可。
 import MarkdownIt from 'markdown-it';
-import mermaid from 'mermaid';
-import { $, isMarkdown } from './ui.js';
+import { $, isMarkdown, stripChunkMarkers } from './ui.js';
 import { openViewer } from './viewer.js';
 
 const md = new MarkdownIt({
@@ -14,14 +18,79 @@ const md = new MarkdownIt({
 md.renderer.rules.table_open = () => '<div class="table-wrap"><table>';
 md.renderer.rules.table_close = () => '</table></div>';
 
-mermaid.initialize({
-  startOnLoad: false,
-  theme: 'default',
-  securityLevel: 'strict',
-});
+// ---------- P5：mermaid 惰性加载（chunk 就绪 Promise） ----------
+let mermaidChunkPromise = null;
+function loadMermaid() {
+  if (window.__mermaid) return Promise.resolve(window.__mermaid);
+  if (mermaidChunkPromise) return mermaidChunkPromise;
+  mermaidChunkPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'dist/mermaid-chunk.js';
+    s.onload = () => {
+      if (window.__mermaid) resolve(window.__mermaid);
+      else reject(new Error('mermaid chunk 加载完成但未暴露 window.__mermaid'));
+    };
+    s.onerror = () => reject(new Error('mermaid 组件加载失败（dist/mermaid-chunk.js 缺失）'));
+    document.head.appendChild(s);
+  });
+  return mermaidChunkPromise;
+}
+
+/** chunk 加载失败兜底：所有 mermaid 块替换为错误占位（防止无限等待/空白） */
+function failAllMermaidBlocks(contentEl, err) {
+  const blocks = contentEl ? contentEl.querySelectorAll('pre > code.language-mermaid') : [];
+  for (const code of Array.from(blocks)) {
+    const div = document.createElement('div');
+    div.className = 'mermaid-error';
+    div.textContent = 'mermaid 渲染失败：' + (err && err.message ? err.message : err);
+    code.parentElement.replaceWith(div);
+  }
+}
 
 let mermaidSeq = 0;
-let renderToken = 0;/** 解析 markdown 图片引用为绝对 file:// URL（支持 Windows 反斜杠路径与 ./ ../） */
+let renderToken = 0;
+
+// P2（v0.1.44）：mermaid SVG 内容哈希缓存 —— key = 明暗 + 源码。
+// 同一（源码 src + 明暗主题）重复渲染直接复用 SVG，跳过 mermaid.render（击键防抖合并后的整篇重渲染不再重画图）。
+// 仅 renderMermaid（打字/文档重渲染路径）使用；reRenderMermaid（主题切换路径）不缓存，
+// 由 P3 明暗守卫 + renderToken 协议保证「明暗跨界恰好重渲一次」的既有语义。
+const mermaidSvgCache = new Map();
+const MERMAID_CACHE_MAX = 64;
+function mermaidCacheKey(dark, src) {
+  return (dark ? 'dark:' : 'light:') + src;
+}
+function mermaidCacheGet(key) {
+  return mermaidSvgCache.get(key) || null;
+}
+function mermaidCacheSet(key, svg) {
+  if (mermaidSvgCache.size >= MERMAID_CACHE_MAX) {
+    mermaidSvgCache.delete(mermaidSvgCache.keys().next().value); // 简单 FIFO 淘汰，防止无界增长
+  }
+  mermaidSvgCache.set(key, svg);
+}
+
+/** P2 补强（v0.1.45）：SVG 实例内 id 唯一化 —— 缓存命中等场景下同一源码的 SVG 会以多实例
+ *  注入同一文档（同图多次出现），内部 id（defs/marker/gradient/样式选择器）重复会让浏览器
+ *  url(#id)/CSS 选择器全部命中第一个实例，产生渲染错乱。注入前对 id 属性与引用统一追加
+ *  文档内唯一后缀（缓存里仍存原始 SVG，后缀只加在注入实例上，重复渲染幂等）。 */
+let mermaidInstanceSeq = 0;
+function uniquifySvg(svg, suffix) {
+  if (typeof svg !== 'string' || svg.indexOf('id=') < 0) return svg;
+  const sfx = '-' + String(suffix);
+  // 1) id="..." 属性
+  svg = svg.replace(/(\bid\s*=\s*["'])([^"']+)(["'])/g, (m, a, id, b) => a + id + sfx + b);
+  // 2) url(#id) 引用（含 url("#id") 引号变体）
+  svg = svg.replace(/(url\(\s*["']?#)([^"')]+)(["']?\))/g, (m, a, id, b) => a + id + sfx + b);
+  // 3) href="#id" / xlink:href="#id"
+  svg = svg.replace(/((?:xlink:)?href\s*=\s*["']#)([^"']+)(["'])/g, (m, a, id, b) => a + id + sfx + b);
+  // 4) <style> 内 #id 选择器（mermaid 以 #生成的id .class{...} 定位节点样式）。
+  //    仅当 #id 后跟空白或 {（选择器位置）才改写，避免误伤十六进制色值（fill:#ECECFF; 等）
+  svg = svg.replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/g, (m, open, css, close) =>
+    open + css.replace(/#([A-Za-z_][\w.-]*)(?=[\s{])/g, (mm, id) => '#' + id + sfx) + close
+  );
+  return svg;
+}
+/** 解析 markdown 图片引用为绝对 file:// URL（支持 Windows 反斜杠路径与 ./ ../） */
 function resolveImgSrc(src, mdPath) {
   const s = String(src).trim();
   if (/^(https?:|data:|file:)/i.test(s)) return s;
@@ -64,18 +133,60 @@ export function createPreview(getEditor, getTab, getIsDark) {
 
   let mode = 'split'; // edit | split | preview
 
+  // ---------- mermaid 主题状态（P3 瘦身守卫 + H1 冷启动防御 + M4 补渲；P5 改为实例就绪后按需初始化） ----------
+  let lastMermaidDark = null;   // 上次 mermaid.initialize 时的明暗状态（null = 尚未初始化）
+  let mermaidThemeDirty = false; // 明暗已变化但尚未执行 initialize（mermaid 未加载时先记录，渲染路径补做）
+  let mermaidRenderCount = 0;   // 实际 mermaid.render 调用次数（冒烟断言用）
+  let renderCount = 0;          // preview.render 调用次数（P1 防抖冒烟断言用）
+
+  /** 按当前明暗初始化 mermaid（需要已加载的实例 m）。
+   *  明暗未变化且已初始化时返回 false 并跳过（P3：避免每次 applyTheme 全量重初始化）；
+   *  返回 true 表示本次发生了初始化。 */
+  function ensureMermaidTheme(m) {
+    const dark = !!(getIsDark && getIsDark());
+    if (lastMermaidDark === dark && !mermaidThemeDirty) return false;
+    lastMermaidDark = dark;
+    mermaidThemeDirty = false;
+    m.initialize({
+      startOnLoad: false,
+      theme: dark ? 'dark' : 'default',
+      securityLevel: 'strict',
+    });
+    return true;
+  }
+
   async function renderMermaid() {
+    let m;
+    try {
+      m = await loadMermaid();
+    } catch (err) {
+      failAllMermaidBlocks(contentEl, err);
+      return;
+    }
+    ensureMermaidTheme(m); // H1 防御：首次渲染前按当前明暗初始化（与 refreshMermaid 共用 lastMermaidDark 去重）
     const token = ++renderToken;
+    const dark = !!(getIsDark && getIsDark());
     const blocks = contentEl.querySelectorAll('pre > code.language-mermaid');
     for (const code of Array.from(blocks)) {
       const pre = code.parentElement;
       const id = 'mermaid-' + Date.now() + '-' + ++mermaidSeq;
+      const src = code.textContent;
+      const key = mermaidCacheKey(dark, src);
+      const cached = mermaidCacheGet(key); // P2：同内容（src + 明暗）缓存命中 → 复用 SVG，跳过 mermaid.render
       try {
-        const { svg } = await mermaid.render(id, code.textContent);
-        if (token !== renderToken) continue; // 已有更新的渲染，丢弃过期结果
+        let svg = cached;
+        if (svg === null) {
+          mermaidRenderCount++; // 冒烟口径：mermaidRenderCount = 实际 mermaid.render 调用次数
+          ({ svg } = await m.render(id, src));
+          if (token !== renderToken) continue; // 已有更新的渲染，丢弃过期结果（不落缓存）
+          mermaidCacheSet(key, svg);
+        }
+        if (token !== renderToken) continue;
         const wrap = document.createElement('div');
         wrap.className = 'mermaid-wrap';
-        wrap.dataset.mermaidSrc = code.textContent; // 保留源码，主题切换后可按明暗重渲染
+        wrap.dataset.mermaidSrc = src; // 保留源码，主题切换后可按明暗重渲染
+        // P2 补强：实例内 id 唯一化（缓存命中复用 SVG 时，同图多实例的 defs/id/样式选择器不冲突）
+        svg = uniquifySvg(svg, 'mh' + ++mermaidInstanceSeq);
         wrap.innerHTML = svg;
         wrap.title = '双击放大查看';
         // 双击 mermaid 图 → 打开查看器
@@ -95,45 +206,89 @@ export function createPreview(getEditor, getTab, getIsDark) {
   }
 
   /** 主题切换后重渲染已渲染的 mermaid 块：仅刷新 .mermaid-wrap 的 SVG 内容（保留滚动位置），
+   *  并补渲 M4 竞态残留的 pre > code.language-mermaid（主题切换恰逢首次渲染进行中时遗留）。
    *  失败或过期结果由 renderToken 守卫丢弃（与 renderMermaid 同一令牌协议） */
   async function reRenderMermaid() {
+    let m;
+    try {
+      m = await loadMermaid();
+    } catch (err) {
+      failAllMermaidBlocks(contentEl, err);
+      return;
+    }
+    ensureMermaidTheme(m); // P3：明暗跨界时按当前明暗重新初始化
     const token = ++renderToken;
-    const wraps = contentEl.querySelectorAll('.mermaid-wrap');
-    for (const wrap of Array.from(wraps)) {
+    // M4：除已渲染的 .mermaid-wrap 外，另收集未渲染的 pre>code.language-mermaid 残留容器
+    const items = [];
+    contentEl.querySelectorAll('.mermaid-wrap').forEach((wrap) => {
       const src = wrap.dataset.mermaidSrc;
-      if (!src) continue;
+      if (src) items.push({ container: wrap, src, isWrap: true });
+    });
+    contentEl.querySelectorAll('pre > code.language-mermaid').forEach((code) => {
+      items.push({ container: code.parentElement, src: code.textContent, isWrap: false });
+    });
+    if (items.length === 0) return;
+    for (const it of items) {
       const id = 'mermaid-' + Date.now() + '-' + ++mermaidSeq;
       try {
-        const { svg } = await mermaid.render(id, src);
+        mermaidRenderCount++;
+        const { svg } = await m.render(id, it.src);
         if (token !== renderToken) continue;
-        wrap.innerHTML = svg;
-        wrap.title = '双击放大查看';
+        const uniqueSvg = uniquifySvg(svg, 'mh' + ++mermaidInstanceSeq); // 实例 id 唯一化（同源多实例/主题往返）
+        if (it.isWrap) {
+          const wrap = it.container;
+          wrap.innerHTML = uniqueSvg;
+          wrap.title = '双击放大查看';
+        } else {
+          // 残留 pre 补渲 → 替换为 .mermaid-wrap（与 renderMermaid 同构）
+          const wrap = document.createElement('div');
+          wrap.className = 'mermaid-wrap';
+          wrap.dataset.mermaidSrc = it.src;
+          wrap.innerHTML = uniqueSvg;
+          wrap.title = '双击放大查看';
+          wrap.addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+            openViewer({ kind: 'svg', svgHtml: wrap.innerHTML, title: 'mermaid 图' });
+          });
+          it.container.replaceWith(wrap);
+        }
       } catch (err) {
         if (token !== renderToken) continue;
-        wrap.textContent = 'mermaid 渲染失败：' + (err && err.message ? err.message : err);
+        if (it.isWrap) {
+          it.container.textContent = 'mermaid 渲染失败：' + (err && err.message ? err.message : err);
+        } else {
+          const div = document.createElement('div');
+          div.className = 'mermaid-error';
+          div.textContent = 'mermaid 渲染失败：' + (err && err.message ? err.message : err);
+          it.container.replaceWith(div);
+        }
       }
     }
   }
 
-  /** 按当前主题明暗切换 mermaid 主题（dark → 'dark'，浅色 → 'default'）并重渲染已渲染的图。
-   *  securityLevel:'strict' 保持不变；由 app.js applyTheme 在 boot/设置保存/即时预览时统一调用 */
+  /** 主题切换入口：由 app.js applyTheme 在 boot/设置保存/即时预览时统一调用。
+   *  P3 瘦身：仅当明暗状态实际变化时才标记重渲（mermaidThemeDirty），渲染路径执行 initialize；
+   *  无图（无 .mermaid-wrap 且无 pre>code.language-mermaid）直接跳过；
+   *  M4：存在残留未渲染块时即使明暗未变也补渲。securityLevel:'strict' 保持不变。 */
   function refreshMermaid() {
-    const dark = getIsDark ? !!getIsDark() : false;
-    mermaid.initialize({
-      startOnLoad: false,
-      theme: dark ? 'dark' : 'default',
-      securityLevel: 'strict',
-    });
-    reRenderMermaid();
+    const dark = !!(getIsDark && getIsDark());
+    if (lastMermaidDark !== dark) mermaidThemeDirty = true; // 明暗变化：记录，渲染路径按需 initialize
+    const wraps = contentEl.querySelectorAll('.mermaid-wrap');
+    const leftovers = contentEl.querySelectorAll('pre > code.language-mermaid');
+    if (wraps.length === 0 && leftovers.length === 0) return; // 无图：跳过
+    if (!mermaidThemeDirty && leftovers.length === 0) return; // 明暗未变且无残留：跳过重渲（P3，下拉连点同明暗不重画）
+    reRenderMermaid(); // renderToken 协议自动丢弃过期结果（下拉连点竞态）
   }
 
   function render() {
+    renderCount++;
     const tab = getTab();
     if (!tab || !isMarkdown(tab.name)) {
       contentEl.innerHTML = '';
       return;
     }
-    const html = md.render(tab.state.doc.toString());
+    // P7：分段模式文档含占位标记（HTML 注释形态），渲染前剥离，预览不可见
+    const html = md.render(stripChunkMarkers(tab.state.doc.toString()));
     contentEl.innerHTML = html;
     // 外链新窗口打开
     contentEl.querySelectorAll('a[href]').forEach((a) => {
@@ -154,8 +309,10 @@ export function createPreview(getEditor, getTab, getIsDark) {
         showImageDetail(img, tab);
       });
     });
-    // mermaid 图
-    renderMermaid();
+    // mermaid 图（P5：仅当文档实际含 mermaid 块才触发惰性加载，避免无图文档白加载 3MB chunk）
+    if (contentEl.querySelector('pre > code.language-mermaid')) {
+      renderMermaid();
+    }
   }
 
   function applyMode() {
@@ -271,5 +428,11 @@ export function createPreview(getEditor, getTab, getIsDark) {
     editorHost.style.flex = '';
   });
 
-  return { render, applyMode, cycleMode, setMode, getMode, refreshMermaid, resetZoom: () => setZoom(1) };
+  return {
+    render, applyMode, cycleMode, setMode, getMode, refreshMermaid, resetZoom: () => setZoom(1),
+    // 冒烟断言用：实际 mermaid.render 调用计数（P3 明暗守卫 / M4 补渲 / P2 缓存验证）
+    get mermaidRenderCount() { return mermaidRenderCount; },
+    // 冒烟断言用：preview.render 调用计数（P1 击键防抖验证）
+    get renderCount() { return renderCount; },
+  };
 }

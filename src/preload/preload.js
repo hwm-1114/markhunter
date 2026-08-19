@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('api', {
   // 文件系统
   readTree: (dir) => ipcRenderer.invoke('fs:read-tree', dir),
   readFile: (p) => ipcRenderer.invoke('fs:read-file', p),
+  // P7：按 range 分段读取大文件（返回 { bytes: ArrayBuffer, start, end, size, mtime }，渲染端流式解码）
+  readFileRange: (p, start, length) => ipcRenderer.invoke('fs:read-file-range', p, start, length),
   setRootDir: (dir) => ipcRenderer.invoke('fs:set-root', dir),
   writeFile: (p, c) => ipcRenderer.invoke('fs:write-file', p, c),
   writeExternal: (p, c) => ipcRenderer.invoke('fs:write-external', p, c), // 测试用
@@ -30,8 +32,14 @@ contextBridge.exposeInMainWorld('api', {
   // 运行环境（打包版不暴露 window.__app 测试接口）
   isPackaged: () => ipcRenderer.invoke('app:is-packaged'),
 
-  // 全局搜索
+  // 全局搜索（P6：主进程转发 utilityProcess worker；支持取消与进度订阅）
   globalSearch: (dir, query) => ipcRenderer.invoke('search:global', { dir, query }),
+  globalSearchCancel: () => ipcRenderer.invoke('search:cancel'),
+  onGlobalSearchProgress: (cb) => {
+    const wrapped = (_e, d) => cb(d);
+    ipcRenderer.on('search:progress', wrapped);
+    return () => ipcRenderer.removeListener('search:progress', wrapped); // 返回退订函数
+  },
 
   // Python
   detectPython: () => ipcRenderer.invoke('python:detect'),

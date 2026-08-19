@@ -11,6 +11,24 @@ export function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+/** 通用 trailing 防抖（P1：击键等高频事件合并为一次执行）。
+ *  delay 毫秒内连续调用只执行最后一次；返回的包装函数自带 cancel() 可取消未触发的调用。 */
+export function debounce(fn, delay = 250) {
+  let timer = null;
+  const wrapped = (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      fn(...args);
+    }, delay);
+  };
+  wrapped.cancel = () => {
+    clearTimeout(timer);
+    timer = null;
+  };
+  return wrapped;
+}
+
 export function formatSize(n) {
   if (n < 0) return '';
   if (n < 1024) return `${n} B`;
@@ -48,11 +66,20 @@ export function dirName(p) {
   return parts.join('/');
 }
 
+// ---------- P7：大文件分段模式占位标记 ----------
+// 分段打开（>4MB）时文档末尾追加该占位标记告知「未完」，滚动/保存前按需续读；
+// 标记是 HTML 注释形态（markdown 预览剥离后不可见），保存与预览前统一剥离，防止污染文件内容。
+export const CHUNK_MARKER_RE = /\n?<!-- MH-CHUNKED[^\n]*-->\n?/g;
+export function stripChunkMarkers(text) {
+  return String(text).replace(CHUNK_MARKER_RE, '');
+}
+
 // ---------- 弹窗 ----------
 const mask = $('#modal-mask');
 const box = $('#modal-box');
+let modalOnClose = null; // M1：当前弹窗的关闭钩子（遮罩 / 取消 / 按钮关闭统一在 closeModal 触发，一次性）
 
-export function openModal({ title, body, actions }) {
+export function openModal({ title, body, actions, onClose }) {
   $('#modal-title').textContent = title;
   const bodyEl = $('#modal-body');
   bodyEl.innerHTML = '';
@@ -66,16 +93,30 @@ export function openModal({ title, body, actions }) {
     btn.onclick = () => a.onClick(btn);
     actEl.appendChild(btn);
   }
+  // M1：登记关闭钩子（如设置弹窗的「还原打开时主题预览」）；closeModal 统一触发
+  modalOnClose = typeof onClose === 'function' ? onClose : null;
   mask.classList.remove('hidden');
   const firstInput = bodyEl.querySelector('input');
   if (firstInput) setTimeout(() => firstInput.focus(), 30);
 }
 
-export function closeModal() {
+/** 关闭弹窗。skipOnClose=true 时跳过关闭钩子（如设置「保存」路径——已落盘并应用新值，不应还原预览）。 */
+export function closeModal(skipOnClose) {
+  // M2：统一清空 #modal-box 内联宽度 —— 查看器等加宽弹窗经遮罩关闭后不再残留 860px，
+  // 避免此后所有弹窗（含设置）被撑宽（viewer.js 的 restore 亦依赖此处统一清理）
+  if (box) box.style.width = '';
   mask.classList.add('hidden');
+  if (skipOnClose) {
+    modalOnClose = null;
+    return;
+  }
+  const cb = modalOnClose;
+  modalOnClose = null;
+  if (typeof cb === 'function') cb();
 }
 
 mask.addEventListener('mousedown', (e) => {
+  // M1：点遮罩关闭也走 closeModal → 触发 onClose 钩子（还原主题预览等）
   if (e.target === mask) closeModal();
 });
 

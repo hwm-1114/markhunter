@@ -1,5 +1,5 @@
 // 应用入口：组装各模块
-import { $, $$, showPrompt, alertBox, toast, closeModal, openModal, confirmDialog, initDragResize, escapeHtml } from './ui.js';
+import { $, $$, showPrompt, alertBox, toast, closeModal, openModal, confirmDialog, initDragResize, escapeHtml, debounce } from './ui.js';
 import { createTree } from './tree.js';
 import { createEditor } from './tabs.js';
 import { createFind } from './find.js';
@@ -83,8 +83,6 @@ async function boot() {
         { name: 'winter', label: 'winter · 冬日' },
         { name: 'caramellatte', label: 'caramellatte · 焦糖拿铁' },
         { name: 'silk', label: 'silk · 丝绸' },
-        { name: 'aqua', label: 'aqua · 水蓝' },
-        { name: 'forest', label: 'forest · 森林' },
       ],
     },
     {
@@ -97,6 +95,9 @@ async function boot() {
         { name: 'dim', label: 'dim · 朦胧' },
         { name: 'sunset', label: 'sunset · 落日' },
         { name: 'abyss', label: 'abyss · 深渊' },
+        // L1（v0.1.44）：aqua/forest 实为 color-scheme:dark（DARK_THEMES 已含），自浅色组移入深色组
+        { name: 'aqua', label: 'aqua · 水蓝' },
+        { name: 'forest', label: 'forest · 森林' },
       ],
     },
   ];
@@ -116,6 +117,19 @@ async function boot() {
   const getActiveTab = () => editor.getActiveTab();
   const findQuery = () => $('#find-input').value.trim();
 
+  // P1（v0.1.44）：击键防抖 —— 打字突发只触发一次整篇 md.render + find 全扫。
+  // trailing 250ms，与自动保存 800ms 节奏协调（互不干扰）；
+  // onTabSwitch / 外部重载 / 主题切换等路径不走 onDocChanged，仍即时渲染，不受本防抖影响。
+  const debouncedPreviewRender = debounce((tab) => {
+    // 触发时重新校验：期间可能已切换标签 / 改模式 / 变文件类型
+    if (getActiveTab() === tab && isMarkdown(tab.name) && preview.getMode() !== 'edit') {
+      preview.render();
+    }
+  }, 250);
+  const debouncedFindSearch = debounce(() => {
+    if (findQuery()) find.runSearch(true);
+  }, 250);
+
   // ---------- 初始化各模块 ----------
   editor = createEditor({
     getWordWrap: () => state.settings.wordWrap,
@@ -128,12 +142,12 @@ async function boot() {
       clearTimeout(tab.saveTimer);
       tab.saveTimer = setTimeout(() => editor.saveNow(tab), state.settings.autoSaveDelay);
       $('#save-status').textContent = '未保存…';
-      // 实时更新预览
+      // 实时更新预览（P1：250ms trailing 防抖合并击键；onTabSwitch/外部重载等仍即时渲染）
       if (getActiveTab() === tab && isMarkdown(tab.name) && preview.getMode() !== 'edit') {
-        preview.render();
+        debouncedPreviewRender(tab);
       }
-      // 文件内搜索实时刷新（不抢占光标，避免打字时光标被拽走）
-      if (findQuery()) find.runSearch(true);
+      // 文件内搜索实时刷新（P1：同样防抖，不抢占光标，避免打字时光标被拽走）
+      if (findQuery()) debouncedFindSearch();
     },
     onTabSwitch: (tab) => {
       preview.applyMode();
@@ -165,6 +179,9 @@ async function boot() {
   preview = createPreview(() => editor, getActiveTab, () =>
     DARK_THEMES.includes(document.documentElement.getAttribute('data-theme'))
   );
+  // H1：boot 时 applyTheme（上方 L114 附近）先于 preview 创建，mermaid 仍停留在模块级 default（浅色）。
+  // 此处补一次 refreshMermaid，按当前持久化主题的明暗初始化 mermaid（明暗守卫去重，无图零成本）。
+  preview.refreshMermaid();
   find = createFind(() => editor, getActiveTab);
   globalSearch = createGlobalSearch(() => state.rootDir, openFileAt);
   python = createPythonPanel(getActiveTab, () => state.settings);
@@ -188,19 +205,19 @@ async function boot() {
         const sel = view.state.selection.main;
         if (sel.from === sel.to) throw new Error('未选中文字');
         await maybeConfirm(`替换选中的 ${sel.to - sel.from} 个字符？`, args.text);
-        editor.applySnippet(String(args.text || ''), 'replace', sel.from, sel.to);
+        await editor.applySnippet(String(args.text || ''), 'replace', sel.from, sel.to);
         return '已替换选中文字';
       }
       case 'insert_text': {
         if (!tab || !tab.state) throw new Error('当前无可编辑的文本文档');
         await maybeConfirm('在光标处插入文字？', args.text);
-        editor.applySnippet(String(args.text || ''), 'insert', view.state.selection.main.head);
+        await editor.applySnippet(String(args.text || ''), 'insert', view.state.selection.main.head);
         return '已插入文字';
       }
       case 'replace_document': {
         if (!tab || !tab.state) throw new Error('当前无可编辑的文本文档');
         await maybeConfirm('替换整个文档内容？', args.text);
-        editor.applySnippet(String(args.text || ''), 'full');
+        await editor.applySnippet(String(args.text || ''), 'full');
         return '已替换全文';
       }
       case 'search_documents': {
@@ -331,22 +348,33 @@ async function boot() {
     }
   }
 
-  /** 启动时恢复上次会话：逐个重新打开标签（失败静默跳过，仅 console.warn），最多 50 个，最后激活活动标签 */
+  /** 启动时恢复上次会话：并行恢复标签（P9：并发 3 个 openFile，串行逐个打开在大会话下拖慢启动），
+   *  失败静默跳过（仅 console.warn），最多 50 个；恢复完成后按会话顺序重排标签栏，最后激活活动标签 */
   async function restoreSession() {
     const ls = state.settings.lastSession;
     if (!ls || !Array.isArray(ls.paths) || ls.paths.length === 0) return;
     const paths = ls.paths.slice(0, 50);
-    for (const p of paths) {
-      try {
-        await editor.openFile(p);
-      } catch (err) {
-        console.warn('[session] 恢复标签失败（已跳过）:', p, err && err.message ? err.message : err);
+    // P9：固定并发 3 的限流池 —— 每个 openFile 各自 readFile（IPC）为主，CPU 侧轻；
+    // 并发过多会让大量 readFile 同时排队抢占主进程 IPC，3 路是启动速度与平稳性的折中。
+    const CONCURRENCY = 3;
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(CONCURRENCY, paths.length) }, async () => {
+      while (cursor < paths.length) {
+        const p = paths[cursor++];
+        try {
+          await editor.openFile(p, { silent: true }); // L6：恢复失败静默（不弹 alertBox）
+        } catch (err) {
+          console.warn('[session] 恢复标签失败（已跳过）:', p, err && err.message ? err.message : err);
+        }
       }
-    }
+    });
+    await Promise.all(workers);
+    // 并行打开完成顺序 ≠ 会话顺序：按 paths 顺序重排标签栏，保证 pinned/active 下标语义一致
+    if (paths.length > 1) editor.reorderTabs(paths);
     const active = typeof ls.active === 'number' && ls.active >= 0 && ls.active < paths.length ? ls.active : -1;
     if (active >= 0) {
       try {
-        await editor.openFile(paths[active]); // openFile 对已存在标签会 switchTab 激活
+        await editor.openFile(paths[active], { silent: true }); // openFile 对已存在标签会 switchTab 激活
       } catch (err) {
         console.warn('[session] 激活标签失败:', paths[active], err && err.message ? err.message : err);
       }
@@ -622,7 +650,9 @@ async function boot() {
     sbInput.value = s.scrollbarWidth || 10;
     const sbHint = document.createElement('div');
     sbHint.className = 'hint';
-    sbHint.textContent = `调整横向/纵向滚动条滑块的粗细（可调整范围 6 ~ ${MAX_SB_WIDTH} 像素）`;
+    // D10（v0.1.44）：注明平台限制 —— Win11「设置→辅助功能→视觉效果→自动隐藏滚动条」开启时
+    // Chromium 使用 overlay 滚动条，任何 CSS 都无法改变其宽度（冒烟 scrollbarWidthVisual 自动跳过该层断言）
+    sbHint.textContent = `调整横向/纵向滚动条滑块的粗细（可调整范围 6 ~ ${MAX_SB_WIDTH} 像素）；系统开启「自动隐藏滚动条」时宽度不可自定义`;
     sbField.append(sbLabel, sbInput, sbHint);
 
     // 缩进宽度（1 ~ 8 个空格）
@@ -724,13 +754,12 @@ async function boot() {
     openModal({
       title: '设置',
       body,
+      // M1：遮罩 / 取消 / 关闭 都还原打开时的主题预览（保存路径用 closeModal(true) 跳过本钩子）
+      onClose: () => applyTheme(openedTheme),
       actions: [
         {
           label: '取消',
-          onClick: () => {
-            applyTheme(openedTheme); // 还原打开时的主题（即时预览不落盘）
-            closeModal();
-          },
+          onClick: () => closeModal(), // 还原由 onClose 钩子统一处理
         },
         {
           label: '保存',
@@ -756,7 +785,7 @@ async function boot() {
             editor.setWordWrap(patch.wordWrap);
             editor.setIndentSize(patch.indentSize);
             applyScrollbarWidth(patch.scrollbarWidth);
-            closeModal();
+            closeModal(true); // 已保存：跳过 onClose 的「还原打开时主题」钩子
             toast('设置已保存');
           },
         },

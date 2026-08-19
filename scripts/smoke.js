@@ -170,7 +170,8 @@ const RENDERER_TEST = `
     const mmContent = '# M\\n\\n' + fence + 'mermaid\\ngraph TD\\n  A-->B\\n' + fence + '\\n';
     await api.writeFile(root + '/mm.md', mmContent);
     await app.editor.openFile(root + '/mm.md');
-    await new Promise((r) => setTimeout(r, 1200)); // mermaid 异步渲染
+    // P5：首次渲染需动态加载 mermaid chunk（file:// 本地 + 解析），放宽等待；后续用例已命中缓存
+    await new Promise((r) => setTimeout(r, 3000));
     const svg = document.querySelector('#preview-content .mermaid-wrap svg');
     const err = document.querySelector('#preview-content .mermaid-error');
     return svg && !err ? true : err ? 'err=' + err.textContent : 'no svg';
@@ -472,7 +473,8 @@ const RENDERER_TEST = `
     gi.value = '树测试';
     await app.globalSearch.run();
     await new Promise((r) => setTimeout(r, 200));
-    const groups = document.querySelectorAll('#gs-results .gs-group').length;
+    // P6（v0.1.45）：结果改为「按文件分组表头（.gs-file）+ 匹配行」扁平结构，断言跟随新 DOM 契约
+    const groups = document.querySelectorAll('#gs-results .gs-file').length;
     const rows = document.querySelectorAll('#gs-results .find-result').length;
     return groups === 1 && rows === 1 ? true : 'groups=' + groups + ',rows=' + rows;
   });
@@ -614,6 +616,34 @@ const RENDERER_TEST = `
     return s.scrollbarWidth === 16 && varNum >= 6 && varNum <= 40
       ? true
       : 'saved=' + s.scrollbarWidth + ',var=' + varVal;
+  });
+
+  // scrollbarWidthVisual（SB 三层视觉断言，计划 §4.2）：
+  // ① 劫持守卫：:root 标准 scrollbar-color 必须为 auto（daisyUI 注入 non-auto 会劫持 webkit 路径）
+  // ② ::-webkit-scrollbar 伪元素计算宽度 === 设置值
+  // ③ 真实渲染宽度 offsetWidth-clientWidth === 设置值（overlay 自动隐藏滚动条机器自适应跳过）
+  await step('scrollbarWidthVisual', async () => {
+    await api.setSettings({ scrollbarWidth: 30 });
+    // ① 劫持守卫（本次 bug 的直接断言：daisyUI scrollbar-color 注入后 Chromium 忽略 webkit 宽度）
+    const sc = getComputedStyle(document.documentElement).scrollbarColor;
+    const el = document.querySelector('#file-tree');
+    // 变量按 applyScrollbarWidth 同路径注入，保证本次设置即时生效（API 直改不触发 UI 应用）；
+    // 必须先注入再读伪元素宽，否则读到的是 boot/上次持久化的旧值（v0.1.44 修正测试时序）
+    document.documentElement.style.setProperty('--scrollbar-width', '30px');
+    await new Promise((r) => setTimeout(r, 100));
+    // ② 规则计算值：伪元素宽度应等于设置值
+    const pw = el ? getComputedStyle(el, '::-webkit-scrollbar').width : '';
+    // ③ 真实渲染宽度：仅经典滚动条机器断言（overlay 下 offsetWidth-clientWidth 恒 0，跳过）
+    const det = document.createElement('div');
+    det.style.cssText = 'position:absolute;width:50px;height:50px;overflow:scroll;visibility:hidden';
+    document.body.appendChild(det);
+    const overlay = det.offsetWidth - det.clientWidth === 0;
+    det.remove();
+    const layoutW = el ? el.offsetWidth - el.clientWidth : -1;
+    const layoutOk = overlay || !el ? true : layoutW === 30;
+    return sc === 'auto' && pw === '30px' && layoutOk
+      ? true
+      : 'sc=' + sc + ',pw=' + pw + ',layout=' + layoutW + ',overlay=' + overlay;
   });
 
   // ---- 选中文件后新建，树应自动刷新显示新条目 ----
@@ -1636,6 +1666,469 @@ const RENDERER_TEST = `
       : 'ul=' + (uls[0] ? getComputedStyle(uls[0]).listStyleType : 'none') + ',ol=' + (ols[0] ? getComputedStyle(ols[0]).listStyleType : 'none');
   });
 
+  // ================= v0.1.44 立即批次冒烟（H1/P3/M1/M2/M4） =================
+  // 局部助手：读当前 mermaid 首图 node 的填充色（default 浅色 ≈ rgb(236,236,255)，dark ≈ rgb(31,32,32)）
+  const nodeFill = () => {
+    const node = document.querySelector('#preview-content .mermaid-wrap svg .node');
+    if (!node) return '';
+    const sh = node.querySelector('rect, polygon, circle, path') || node;
+    return getComputedStyle(sh).fill;
+  };
+  const mmFence = () => {
+    const BT = String.fromCharCode(96); // 反引号（避免与外层模板字符串冲突）
+    return BT + BT + BT;
+  };
+
+  // themeMermaidColdStart（H1）：浅色渲染 → 切暗色 → 节点应重渲为暗色（fill 变化即主题联动生效）
+  await step('themeMermaidColdStart', async () => {
+    await setTheme('markhunter-classic'); // 浅色基线
+    const fence = mmFence();
+    await api.writeFile(root + '/mm-theme.md', '# MT\\n\\n' + fence + 'mermaid\\ngraph TD\\n  A-->B\\n' + fence + '\\n');
+    await app.editor.openFile(root + '/mm-theme.md');
+    app.preview.setMode('split');
+    await new Promise((r) => setTimeout(r, 1200)); // 等 mermaid 异步渲染
+    const lightFill = nodeFill();
+    app.applyTheme('night'); // 暗色 → refreshMermaid 重渲（H1 链路：渲染前已按明暗初始化）
+    await new Promise((r) => setTimeout(r, 1200));
+    const darkFill = nodeFill();
+    await setTheme('markhunter-classic');
+    return lightFill && darkFill && lightFill !== darkFill
+      ? true
+      : 'light=' + lightFill + ',dark=' + darkFill;
+  });
+
+  // themeMermaidIdempotent（P3）：同明暗重复 applyTheme 不重渲；明暗跨界恰好 1 次重渲
+  await step('themeMermaidIdempotent', async () => {
+    const before = app.preview.mermaidRenderCount;
+    app.applyTheme('light');               // 浅色 → 浅色：不重渲
+    app.applyTheme('markhunter-classic');  // 浅色 → 浅色：不重渲
+    await new Promise((r) => setTimeout(r, 400));
+    const mid = app.preview.mermaidRenderCount;
+    app.applyTheme('dark');                // 浅色 → 暗色：应恰好 1 次重渲（跨界）
+    await new Promise((r) => setTimeout(r, 1200));
+    const after = app.preview.mermaidRenderCount;
+    await setTheme('markhunter-classic');  // 恢复（暗 → 浅，会再重渲，无妨）
+    const sameOk = mid === before;
+    const crossOk = after === mid + 1;
+    return sameOk && crossOk
+      ? true
+      : 'before=' + before + ',mid=' + mid + ',after=' + after;
+  });
+
+  // mermaidPartialReRender（M4）：存在未渲染 pre>code.language-mermaid 残留时 refreshMermaid 能补渲
+  await step('mermaidPartialReRender', async () => {
+    await setTheme('markhunter-classic'); // 浅色（同明暗，验证补渲不依赖明暗变化）
+    const content = document.querySelector('#preview-content');
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    code.className = 'language-mermaid';
+    code.textContent = 'graph TD\\n  X-->Y';
+    pre.appendChild(code);
+    content.appendChild(pre); // 手工制造 M4 竞态残留（未渲染 pre>code）
+    const before = content.querySelectorAll('pre > code.language-mermaid').length;
+    app.preview.refreshMermaid(); // 明暗未变但存在残留 → 应补渲
+    await new Promise((r) => setTimeout(r, 1200));
+    const leftover = content.querySelectorAll('pre > code.language-mermaid').length;
+    const wraps = content.querySelectorAll('#preview-content .mermaid-wrap').length;
+    const err = content.querySelector('.mermaid-error');
+    return before === 1 && leftover === 0 && wraps >= 2 && !err
+      ? true
+      : 'before=' + before + ',leftover=' + leftover + ',wraps=' + wraps + ',err=' + (err ? err.textContent : 'none');
+  });
+
+  // modalWidthReset（M2）：查看器打开（modal-box 加宽 860）→ 遮罩关闭 → 内联宽应清空（无残留）
+  await step('modalWidthReset', async () => {
+    const wrap = document.querySelector('#preview-content .mermaid-wrap');
+    if (!wrap) return 'no wrap';
+    wrap.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); // 打开 mermaid 查看器
+    await new Promise((r) => setTimeout(r, 300));
+    const boxEl = document.querySelector('#modal-box');
+    const widened = boxEl && boxEl.style.width !== '';
+    // 遮罩关闭（不走「关闭」按钮的 restore 路径，验证 closeModal 统一清理）
+    document.querySelector('#modal-mask').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 100));
+    const w = boxEl ? boxEl.style.width : 'n/a';
+    return widened && w === ''
+      ? true
+      : 'widened=' + widened + ',w=' + JSON.stringify(w);
+  });
+
+  // modalMaskRestore（M1）：设置弹窗改主题（即时预览）→ 点遮罩关闭 → data-theme 还原打开时主题
+  await step('modalMaskRestore', async () => {
+    await setTheme('markhunter-classic');
+    document.querySelector('#btn-settings').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const sel = document.querySelector('#theme-select');
+    if (!sel) {
+      document.querySelector('#modal-actions .tbtn').click();
+      return 'no theme-select';
+    }
+    sel.value = 'night';
+    sel.dispatchEvent(new Event('change')); // 即时预览 → data-theme=night
+    await new Promise((r) => setTimeout(r, 100));
+    const previewed = document.documentElement.getAttribute('data-theme') === 'night';
+    // 点遮罩（mask）关闭 → onClose 钩子还原主题
+    document.querySelector('#modal-mask').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 100));
+    const closed = document.querySelector('#modal-mask').classList.contains('hidden');
+    const restored = document.documentElement.getAttribute('data-theme') === 'markhunter-classic';
+    return previewed && closed && restored
+      ? true
+      : 'previewed=' + previewed + ',closed=' + closed + ',restored=' + restored;
+  });
+
+  // ================= v0.1.44 短期批次冒烟（P1+P2/M3/L1/L6/L7/L9/P5） =================
+
+  // debounceTyping（P1）：快速三次输入 → 250ms 防抖窗口内 preview.render 只合并为 1 次
+  await step('debounceTyping', async () => {
+    await api.writeFile(root + '/debounce.md', '# 防抖\\n初始内容\\n');
+    await app.editor.openFile(root + '/debounce.md');
+    app.preview.setMode('split');
+    await new Promise((r) => setTimeout(r, 400));
+    const r0 = app.preview.renderCount;
+    const view = app.editor.getView();
+    view.dispatch({ changes: { from: view.state.doc.length, insert: 'a' } });
+    view.dispatch({ changes: { from: view.state.doc.length, insert: 'b' } });
+    view.dispatch({ changes: { from: view.state.doc.length, insert: 'c' } });
+    await new Promise((r) => setTimeout(r, 900)); // 超过 250ms 防抖窗口
+    const r1 = app.preview.renderCount;
+    return r1 === r0 + 1 ? true : 'r0=' + r0 + ',r1=' + r1;
+  });
+
+  // mermaidCache（P2）：同内容（源码 + 明暗）重复整篇渲染 → 实际 mermaid.render 计数不增；改内容 → +1
+  await step('mermaidCache', async () => {
+    const fence = mmFence();
+    await api.writeFile(root + '/mm-cache.md', '# C\\n\\n' + fence + 'mermaid\\ngraph TD\\n  C1-->C2\\n' + fence + '\\n');
+    await app.editor.openFile(root + '/mm-cache.md');
+    app.preview.setMode('split');
+    await new Promise((r) => setTimeout(r, 1300)); // 首次渲染：缓存未命中，+1
+    const c0 = app.preview.mermaidRenderCount;
+    app.preview.render(); // 同内容重渲染（防抖合并后的整篇路径）→ 缓存命中，不再调 mermaid.render
+    await new Promise((r) => setTimeout(r, 500));
+    const c1 = app.preview.mermaidRenderCount;
+    const view = app.editor.getView();
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '# C2\\n\\n' + fence + 'mermaid\\ngraph TD\\n  C1-->C3\\n' + fence + '\\n' } });
+    await new Promise((r) => setTimeout(r, 1300)); // 防抖(250ms) + mermaid 异步：新源码 → 缓存未命中 +1
+    const c2 = app.preview.mermaidRenderCount;
+    return c1 === c0 && c2 === c0 + 1 ? true : 'c0=' + c0 + ',c1=' + c1 + ',c2=' + c2;
+  });
+
+  // pasteExternalImage（M3）：外部（工作目录外）md 粘贴图片 → write-binary 对「已批准文件所在目录」放行，图片成功生成
+  await step('pasteExternalImage', async () => {
+    await app.editor.openFile(extRoot + '/note.md'); // readFile 成功 → 文件进入批准面（dirHasApprovedFile 据此放行同级写）
+    await new Promise((r) => setTimeout(r, 300));
+    const view = app.editor.getView();
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array([1, 2, 3, 4])], 'pic.png', { type: 'image/png' }));
+    view.dom.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 800));
+    const doc = view.state.doc.toString();
+    const files = await api.readTree(extRoot);
+    const saved = files.some((f) => f.name.startsWith('image-') && f.name.endsWith('.png'));
+    const toasts = Array.from(document.querySelectorAll('.toast')).map((t) => t.textContent);
+    const rejected = toasts.some((t) => t.includes('不在当前工作目录内'));
+    return doc.includes('![image-') && saved && !rejected
+      ? true
+      : 'doc=' + doc.replace(/\\n/g, '|') + ',saved=' + saved + ',rej=' + rejected;
+  });
+
+  // themeGrouping（L1）：aqua/forest 归深色组，浅色组不再含二者；四组共 36 个主题
+  await step('themeGrouping', async () => {
+    document.querySelector('#btn-settings').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const sel = document.querySelector('#theme-select');
+    if (!sel) {
+      const cancelBtn = document.querySelector('#modal-actions .tbtn');
+      if (cancelBtn) cancelBtn.click();
+      return 'no theme-select';
+    }
+    const groups = {};
+    document.querySelectorAll('#theme-select optgroup').forEach((g) => {
+      groups[g.label] = Array.from(g.querySelectorAll('option')).map((o) => o.value);
+    });
+    document.querySelector('#modal-actions .tbtn').click(); // 取消（onClose 钩子还原主题）
+    await new Promise((r) => setTimeout(r, 100));
+    const light = groups['浅色'] || [];
+    const dark = groups['深色'] || [];
+    const total = Object.keys(groups).reduce((n, k) => n + groups[k].length, 0);
+    return !light.includes('aqua') && !light.includes('forest') && dark.includes('aqua') && dark.includes('forest') && total === 36
+      ? true
+      : 'light=' + light.join(',') + ',dark=' + dark.join(',') + ',total=' + total;
+  });
+
+  // silentRestore（L6）：lastSession 含不存在文件 → 恢复不弹 alertBox（modal-mask 保持隐藏），其余文件正常恢复并激活
+  await step('silentRestore', async () => {
+    await app.editor.closeAll();
+    const okPath = root + '/sess-ok.md';
+    await api.writeFile(okPath, '# 会话 OK\\n内容');
+    await api.setSettings({ lastSession: { paths: [root + '/sess-missing1.md', okPath, root + '/sess-missing2.md'], active: 1, pinned: [] } });
+    app.state.settings = await api.getSettings();
+    const mask = document.querySelector('#modal-mask');
+    await window.__app.session.restore();
+    await new Promise((r) => setTimeout(r, 200));
+    const modalGone = mask.classList.contains('hidden');
+    const okTab = !!app.editor.findTabByPath(okPath);
+    const miss1 = !!app.editor.findTabByPath(root + '/sess-missing1.md');
+    const miss2 = !!app.editor.findTabByPath(root + '/sess-missing2.md');
+    const act = app.editor.getActiveTab();
+    // 清理：恢复结束会重写 lastSession 为实际打开的标签，这里还原干净会话状态
+    await app.editor.closeAll();
+    await api.setSettings({ lastSession: null });
+    app.state.settings = await api.getSettings();
+    return modalGone && okTab && !miss1 && !miss2 && !!act && act.path === okPath
+      ? true
+      : 'modal=' + modalGone + ',ok=' + okTab + ',m1=' + miss1 + ',m2=' + miss2 + ',act=' + (act && act.path);
+  });
+
+  // svgPasteExt（L7）：剪贴板 image/svg+xml 粘贴 → 扩展名归一化为 svg（而非 svg+xml），文件成功生成且引用正确
+  await step('svgPasteExt', async () => {
+    await api.writeFile(root + '/svg-paste.md', '# SVG 粘贴\\n');
+    await app.editor.openFile(root + '/svg-paste.md');
+    await new Promise((r) => setTimeout(r, 200));
+    const view = app.editor.getView();
+    const dt = new DataTransfer();
+    dt.items.add(new File(['<svg xmlns="http://www.w3.org/2000/svg"></svg>'], 'pic.svg', { type: 'image/svg+xml' }));
+    view.dom.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 800));
+    const doc = view.state.doc.toString();
+    const files = await api.readTree(root);
+    const svgFile = files.find((f) => f.name.startsWith('image-') && f.name.endsWith('.svg'));
+    const badExt = files.some((f) => f.name.includes('svg+xml'));
+    return doc.includes('![image-') && !!svgFile && !badExt
+      ? true
+      : 'doc=' + doc.replace(/\\n/g, '|') + ',svg=' + !!svgFile + ',bad=' + badExt;
+  });
+
+  // writeExternalPackaged（L9）：dev 模式 writeExternal 仍可用（无条件注册；打包版抛明确错误由打包环境验证）
+  await step('writeExternalPackaged', async () => {
+    const packed = await api.isPackaged();
+    const p = extRoot + '/we-dev.txt';
+    let ok = false;
+    try {
+      await api.writeExternal(p, 'WRITE_EXT_OK');
+      const rb = await api.readFile(p);
+      ok = rb.content.includes('WRITE_EXT_OK');
+    } catch (err) {
+      ok = false;
+    }
+    return !packed && ok ? true : 'packed=' + packed + ',ok=' + ok;
+  });
+
+  // minifySanity（P5）：bundle 可加载、window.__app 与核心接口存在（esbuild minify 不改属性名，接口面应完好）
+  await step('minifySanity', async () => {
+    const a = window.__app;
+    return !!a && typeof a.editor.openFile === 'function' && typeof a.preview.render === 'function' && typeof a.preview.refreshMermaid === 'function' && typeof a.applyTheme === 'function' && !!document.querySelector('#preview-content')
+      ? true
+      : 'app=' + !!a;
+  });
+
+  // ================= v0.1.45 中期批次冒烟（P4/P8/P9/P10/小项） =================
+
+  // pythonBatch（P4）：2000 行输出经主进程聚合（~60ms/4KB）+ 渲染端批渲染 →
+  // 输出完整（B1999 与结束标记均在）、退出码 0、DOM span 数不超 3000 上限
+  await step('pythonBatch', async () => {
+    const pyFile = root + '/py-batch.py';
+    await api.writeFile(pyFile, 'for i in range(2000):\\n    print("B" + str(i))\\nprint("BATCH_END")\\n');
+    const pys = await api.detectPython();
+    const pyExe = pys.find((p) => /\.exe$/i.test(p)) || pys[0];
+    await app.editor.openFile(pyFile);
+    document.querySelector('#py-output').innerHTML = '';
+    const exitInfo = await new Promise((resolve) => {
+      let out = '';
+      let done = false;
+      const onOut = (d) => { out += d.data; };
+      const onExit = (d) => {
+        if (done) return;
+        done = true;
+        resolve({ out, code: d.code });
+      };
+      window.api.onPythonOutput(onOut);
+      window.api.onPythonExit(onExit);
+      window.api.runPython(pyFile, pyExe);
+      setTimeout(() => { if (!done) { done = true; resolve({ out, code: null, timeout: true }); } }, 20000);
+    });
+    const domOut = document.querySelector('#py-output').textContent;
+    const spanCount = document.querySelector('#py-output').childElementCount;
+    const full = exitInfo.out.includes('B1999') && exitInfo.out.includes('BATCH_END') && exitInfo.code === 0;
+    const domFull = domOut.includes('B1999') && domOut.includes('BATCH_END');
+    return full && domFull && spanCount <= 3000
+      ? true
+      : 'code=' + exitInfo.code + ',len=' + exitInfo.out.length + ',spans=' + spanCount + ',dom=' + domFull;
+  });
+
+  // restoreParallel（P9）：6 标签并发 3 路恢复 → 标签顺序 = 会话顺序（reorderTabs 保持）、
+  // 活动标签 = active 下标、pinned 生效
+  await step('restoreParallel', async () => {
+    await app.editor.closeAll();
+    const ps = [];
+    for (let i = 1; i <= 6; i++) {
+      const p = root + '/rp' + i + '.md';
+      await api.writeFile(p, '# RP' + i + '\\n内容' + i);
+      ps.push(p);
+    }
+    await api.setSettings({ lastSession: { paths: ps, active: 4, pinned: [1] } });
+    app.state.settings = await api.getSettings();
+    await window.__app.session.restore();
+    await new Promise((r) => setTimeout(r, 300));
+    const sess = app.editor.getSession();
+    const act = app.editor.getActiveTab();
+    const orderOk = sess.paths.length === 6 && sess.paths.every((p, i) => p === ps[i]);
+    const actOk = !!act && act.path === ps[4];
+    const pinTab = app.editor.findTabByPath(ps[1]);
+    const pinOk = !!pinTab && pinTab.pinned;
+    await app.editor.closeAll();
+    await api.setSettings({ lastSession: null });
+    app.state.settings = await api.getSettings();
+    return orderOk && actOk && pinOk
+      ? true
+      : 'order=' + orderOk + ',act=' + (act && act.path) + ',pin=' + pinOk;
+  });
+
+  // findDomReuse（P10）：同查询重复触发（文档未变）→ 结果行数与首行内容一致；
+  // Enter 跳转路径只切 current 高亮不重建列表（行数不变）
+  await step('findDomReuse', async () => {
+    let content = '';
+    for (let i = 0; i < 50; i++) content += '第' + i + '行 needle 内容\\n';
+    await api.writeFile(root + '/find-dom.md', content);
+    await app.editor.openFile(root + '/find-dom.md');
+    const input = document.querySelector('#find-input');
+    input.value = 'needle';
+    input.dispatchEvent(new Event('input'));
+    await new Promise((r) => setTimeout(r, 150));
+    const rows1 = Array.from(document.querySelectorAll('#find-results .find-result'));
+    const first1 = rows1[0] ? rows1[0].textContent : '';
+    const cnt1 = document.querySelector('#find-count').textContent;
+    input.dispatchEvent(new Event('input')); // 同查询再触发（无文档变更）
+    await new Promise((r) => setTimeout(r, 150));
+    const rows2 = Array.from(document.querySelectorAll('#find-results .find-result'));
+    const first2 = rows2[0] ? rows2[0].textContent : '';
+    // Enter 导航 → jumpTo 只切 current 高亮，不应全量重建列表
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 100));
+    const rows3 = Array.from(document.querySelectorAll('#find-results .find-result'));
+    return rows1.length === 50 && rows2.length === 50 && rows3.length === 50 && first1 === first2 && cnt1.includes('50')
+      ? true
+      : 'r1=' + rows1.length + ',r2=' + rows2.length + ',r3=' + rows3.length + ',f=' + (first1 === first2) + ',cnt=' + cnt1;
+  });
+
+  // computedStyleTab（小项/L2 补断言）：.tab 计算值 —— height 非 daisyUI 泄漏的 40px 固定值、
+  // justify-content flex-start、text-align left（宽松：接受 auto/normal/start 等价写法）
+  await step('computedStyleTab', async () => {
+    await api.writeFile(root + '/cs-tab.md', '# 标签样式\\n内容');
+    await app.editor.openFile(root + '/cs-tab.md');
+    await new Promise((r) => setTimeout(r, 200));
+    const tab = document.querySelector('#tabs .tab');
+    if (!tab) return 'no .tab';
+    const cs = getComputedStyle(tab);
+    const h = cs.height;
+    const jc = cs.justifyContent;
+    const ta = cs.textAlign;
+    // height：auto 语义下 Chromium 可能返回已使用 px —— 断言「非 daisyUI 固定 40px」即可捕获 L2 回归
+    const hOk = h === 'auto' || h === 'normal' || (parseFloat(h) > 0 && parseFloat(h) < 40);
+    const jcOk = jc === 'flex-start' || jc === 'normal' || jc === 'start';
+    const taOk = ta === 'left' || ta === 'start';
+    return hOk && jcOk && taOk ? true : 'h=' + h + ',jc=' + jc + ',ta=' + ta;
+  });
+
+  // computedStyleTheme（小项/L4+L5 补断言）：滚动条 thumb 色非硬编码 #cbd5e1；
+  // 暗色主题下 blockquote 背景非浅色硬编码 #f0fbf9（宽松）
+  await step('computedStyleTheme', async () => {
+    const thumb = getComputedStyle(document.documentElement, '::-webkit-scrollbar-thumb').backgroundColor;
+    const thumbOk = thumb !== 'rgb(203, 213, 225)'; // #cbd5e1 已改 color-mix(in oklab, var(--mh-text) 35%, transparent)
+    await api.writeFile(root + '/cs-theme.md', '# CT\\n\\n> 引用块内容\\n');
+    await app.editor.openFile(root + '/cs-theme.md');
+    app.preview.setMode('split');
+    app.applyTheme('night');
+    await new Promise((r) => setTimeout(r, 600));
+    const bq = document.querySelector('#preview-content .markdown-body blockquote');
+    const bg = bq ? getComputedStyle(bq).backgroundColor : '';
+    const bgOk = bg !== 'rgb(240, 251, 249)'; // #f0fbf9 已改 color-mix 主题令牌（L5）
+    await setTheme('markhunter-classic');
+    return thumbOk && bgOk ? true : 'thumb=' + thumb + ',bg=' + bg;
+  });
+
+  // mermaidCacheId（P2 补强）：同图两次出现（第二次为缓存命中复用 SVG）→ 两实例内部
+  // id（defs/marker/gradient）无冲突（宽松：无 id 可冲突即视为通过）
+  await step('mermaidCacheId', async () => {
+    const fence = mmFence();
+    await api.writeFile(root + '/mm-id.md', '# ID\\n\\n' + fence + 'mermaid\\ngraph TD\\n  I1-->I2\\n' + fence + '\\n\\n' + fence + 'mermaid\\ngraph TD\\n  I1-->I2\\n' + fence + '\\n');
+    await app.editor.openFile(root + '/mm-id.md');
+    app.preview.setMode('split');
+    await new Promise((r) => setTimeout(r, 1400));
+    const wraps = document.querySelectorAll('#preview-content .mermaid-wrap');
+    if (wraps.length < 2) return 'wraps=' + wraps.length;
+    const ids1 = Array.from(wraps[0].querySelectorAll('[id]')).map((el) => el.id);
+    const ids2 = Array.from(wraps[1].querySelectorAll('[id]')).map((el) => el.id);
+    if (ids1.length === 0 && ids2.length === 0) return true; // 无内部 id，无从冲突
+    const dup = ids1.filter((id) => ids2.includes(id));
+    return dup.length === 0 ? true : 'dup=' + dup.slice(0, 6).join(',') + ',total=' + dup.length;
+  });
+
+  // ================= v0.1.45 中期批次冒烟（P6/P7/P5 拆包） =================
+
+  // searchCancel（P6）：立即取消可能先于/后于完成到达，两种结果都接受（宽松）；
+  // 关键断言：取消后 worker 仍可用，下一次搜索正常返回结果（进程未被打死）。
+  // 用独立夹具文件 + 唯一词元（cancelprobe）保证匹配数确定（root 中 'hello' 的匹配源
+  // hello.md 已在前面步骤删除，现存仅 indent.md 1 处，不能作为固定断言基准）
+  await step('searchCancel', async () => {
+    await api.writeFile(root + '/search-cancel.md', 'cancelprobe alpha\\ncancelprobe beta');
+    const p = window.api.globalSearch(root, 'cancelprobe');
+    window.api.globalSearchCancel();
+    let first = 'ok';
+    try {
+      const r = await p;
+      first = Array.isArray(r) ? 'ok' : 'bad';
+    } catch (e) {
+      first = 'cancelled';
+    }
+    const r2 = await window.api.globalSearch(root, 'cancelprobe');
+    const second = Array.isArray(r2) && r2.length === 2;
+    return second && (first === 'ok' || first === 'cancelled')
+      ? true
+      : 'first=' + first + ',second=' + second + ',len=' + (Array.isArray(r2) ? r2.length : 'n/a');
+  });
+
+  // largeFileChunk（P7）：>4MB 文件分段打开 —— 初始 doc 长度 < 文件大小（仅首段 2MB + 占位标记），
+  // 滚动到底部触发预读后 doc 长度增长（可滚动加载后续段）；超上限仍拒绝由 tooLarge 用例覆盖
+  await step('largeFileChunk', async () => {
+    const bigPath = root + '/large-chunk.md';
+    const SIZE = 6 * 1024 * 1024; // 6MB > 4MB 阈值
+    await api.writeFile(bigPath, '# 大文件分段\\n' + 'x'.repeat(SIZE));
+    const st = await api.stat(bigPath);
+    const tab = await app.editor.openFile(bigPath);
+    await new Promise((r) => setTimeout(r, 600));
+    const view = app.editor.getView();
+    const initialLen = view.state.doc.length;
+    const chunked = !!tab && tab.kind === 'chunked' && initialLen < st.size;
+    // 模拟滚动到底部：设置 scrollTop 后派发 scroll 事件触发预读监听
+    view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight;
+    view.scrollDOM.dispatchEvent(new Event('scroll'));
+    await new Promise((r) => setTimeout(r, 1500));
+    const afterLen = view.state.doc.length;
+    const grew = afterLen > initialLen;
+    const tabStill = !!app.editor.findTabByPath(bigPath);
+    if (tabStill) app.editor.closeTab(app.editor.findTabByPath(bigPath));
+    await api.remove(bigPath, false);
+    return chunked && grew
+      ? true
+      : 'chunked=' + chunked + ',init=' + initialLen + ',after=' + afterLen + ',size=' + st.size;
+  });
+
+  // mermaidChunkLoaded（P5）：mermaid 拆包后，含 mermaid 的文档触发 chunk 动态加载 →
+  // window.__mermaid 已就绪且 SVG 正常渲染（chunk 链路可用）
+  await step('mermaidChunkLoaded', async () => {
+    const fence = mmFence();
+    await api.writeFile(root + '/mm-chunk.md', '# MC\\n\\n' + fence + 'mermaid\\ngraph TD\\n  C1-->C2\\n' + fence + '\\n');
+    await app.editor.openFile(root + '/mm-chunk.md');
+    app.preview.setMode('split');
+    await new Promise((r) => setTimeout(r, 2500)); // 等 chunk 动态加载 + 异步渲染
+    const svg = document.querySelector('#preview-content .mermaid-wrap svg');
+    const err = document.querySelector('#preview-content .mermaid-error');
+    return typeof window.__mermaid === 'object' && !!svg && !err
+      ? true
+      : 'mermaid=' + (typeof window.__mermaid) + ',svg=' + !!svg + ',err=' + (err ? err.textContent : 'none');
+  });
+
   return results;
 })()
 `;
@@ -1710,6 +2203,20 @@ async function runSmoke(win) {
       clipboard.writeText(''); // 清空剪贴板
       const r2 = await win.webContents.executeJavaScript(menuClipboardSnippet('empty'));
       results.push(...r1, ...r2);
+      // bundleSplit（P5）：主 bundle 显著小于拆包前（4.34MB 基准 → 应 < 2.5MB），mermaid chunk 产物存在。
+      // 主进程侧断言构建产物体积（渲染进程无文件系统访问）。
+      const bundlePath = path.join(__dirname, '..', 'src', 'renderer', 'dist', 'bundle.js');
+      const chunkPath = path.join(__dirname, '..', 'src', 'renderer', 'dist', 'mermaid-chunk.js');
+      let bundleSize = -1;
+      let chunkSize = -1;
+      try { bundleSize = fs.statSync(bundlePath).size; } catch { /* 缺失 */ }
+      try { chunkSize = fs.statSync(chunkPath).size; } catch { /* 缺失 */ }
+      results.push([
+        'bundleSplit',
+        bundleSize > 0 && bundleSize < 2.5 * 1024 * 1024 && chunkSize > 0,
+        'bundle=' + (bundleSize >= 0 ? (bundleSize / 1024 / 1024).toFixed(2) + 'MB' : 'missing') +
+          ',chunk=' + (chunkSize >= 0 ? (chunkSize / 1024 / 1024).toFixed(2) + 'MB' : 'missing'),
+      ]);
       console.log('E2E_RESULTS');
       for (const r of results) {
         console.log('  -', r.join(' | '));
