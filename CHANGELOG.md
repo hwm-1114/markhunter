@@ -1,5 +1,20 @@
 # 更新说明（Changelog）
 
+## v0.1.46（2026-08-22）
+
+### 修复（全量审计 13 项）
+
+- **拖拽打开文件全坏（高）**：drop 处理读取 `f.path`，但 Electron 32 起该属性已移除（本项目 43.3.0），真实拖拽拿到 undefined 静默失败；冒烟用 `{path}` 假对象绕过了真实行为，从未发现。修复：preload 暴露 `webUtils.getPathForFile`（解析失败回退旧属性），drop 改用它取路径；新增冒烟断言 `dropPathResolver`。
+- **中文输入法 Enter 误触发（高）**：AI 聊天、文件内搜索、全局搜索、新建/重命名弹窗的 Enter 处理未判 `e.isComposing` —— IME 组合确认键（keyCode 229）会提前发送消息/执行搜索/提交弹窗，对中文用户必现。四处统一加 `isComposing || keyCode === 229` 守卫。
+- **重命名外部文件后自动保存被拒（中）**：`fs:rename` 不 approve 新路径，`fs:write-file` 无同级放行（M3 只加在 write-binary）→ 工作目录外已打开文件重命名后一编辑就报「路径不在当前工作目录内」。修复：`security.js` 新增 `remapApproved`（重命名把批准集合映射到新路径，含目录重命名的子路径）与 `revokeUnder`（删除清理批准集合），`ipc.js` 的 rename/delete 接入；新增冒烟断言 `renameExternalSave`。
+- **运行 Python 污染 >4MB 脚本（中）**：运行面板前置保存直接 `writeFile(doc.toString())`，分段（chunked）文件会把 `MH-CHUNKED` 占位注释写进 .py（SyntaxError）且未加载分段被截断。修复：Python 面板经回调复用 `editor.saveNow`（补齐分段 + 剥离标记），`saveNow` 改为返回成功/失败，保存失败中止运行。
+- **分段保存并发竞态截断（中，验证期新发现）**：`loadNextChunk` 遇 `inflight` 立即 return，`ensureFullyLoaded` 等待循环空转 4096 次守卫后带 `complete=false` 提前退出 —— 并发保存（800ms 自动保存 + 手动/Python 前置保存交错）会把未加载完的内容写盘且返回成功（真实数据截断，冒烟 `chunkedSaveClean` 在负载下复现实测少 1MB）。修复：`loadNextChunk` 并发调用共享进行中的 Promise（等待真实进度）；`saveNow` 全局串行队列合并并发保存。新增冒烟断言 `chunkedSaveClean`。
+- **退出应用不杀 Python 进程（中）**：`will-quit` 经 `disposeCurrentProc` 用 taskkill 回收运行中的进程树；`python:run` 顶掉旧进程同样改进程树终止（原普通 kill 遗留子进程）并先摘旧输出监听防窜批；`python:exit` 发送前加窗口已销毁守卫。
+- **低危 5 项**：① 图片/mermaid 查看器拖拽监听器改为按下挂载/抬起摘除（不再每次打开累积泄漏）；② `fs:read-file-range` 循环读满，按实际读取量返回 `end`（部分读不再补零污染，渲染端自愈续读）；③ `uniquifySvg` id 规则加负向后顾（不再误改 `data-id=`），style 选择器补逗号分组；④ AI 面板「⚠ 未配置」等界面提示不再以 system 角色混入 API 请求；⑤ find/globalsearch 之外的 Enter 一并核对无遗漏。
+
+### 测试
+- 冒烟新增 3 项（共 **129 项** 全部通过）：`dropPathResolver`（preload 暴露 getPathForFile）、`renameExternalSave`（外部重命名后保存放行）、`chunkedSaveClean`（分段标签编辑后保存无标记、无截断）；`largeFileChunk` 等待由固定 1500ms 改为轮询（最长 ~8s），兼容全量负载下首次分段追加延迟。
+
 ## v0.1.45（2026-08-20）
 
 ### 修复与优化

@@ -1,7 +1,9 @@
 // Python 运行面板
 import { $, escapeHtml, toast } from './ui.js';
 
-export function createPythonPanel(getTab, getSettings) {
+/** @param {(tab: object) => Promise<boolean>} [onSave] 运行前保存当前文件的回调（复用 editor.saveNow：
+ *  正确处理大文件分段补读与占位标记剥离）；缺省时退回直接 writeFile（仅小文件安全）。 */
+export function createPythonPanel(getTab, getSettings, onSave) {
   const output = $('#py-output');
   const status = $('#py-status');
   const panel = $('#panel-python');
@@ -89,13 +91,22 @@ export function createPythonPanel(getTab, getSettings) {
       toast('已有程序在运行，请先终止');
       return;
     }
-    // 先保存当前内容再运行
-    try {
-      await window.api.writeFile(tab.path, tab.state.doc.toString());
-      tab.dirty = false;
-    } catch (err) {
-      toast(`保存失败：${err.message || err}`);
-      return;
+    // 先保存当前内容再运行（经 editor.saveNow：chunked 标签先补齐分段并剥离 MH-CHUNKED 占位标记，
+    // 防止标记写入 .py 造成语法错误 / 未加载部分被截断）
+    if (onSave) {
+      const ok = await onSave(tab);
+      if (!ok) {
+        toast('保存失败，已取消运行');
+        return;
+      }
+    } else {
+      try {
+        await window.api.writeFile(tab.path, tab.state.doc.toString());
+        tab.dirty = false;
+      } catch (err) {
+        toast(`保存失败：${err.message || err}`);
+        return;
+      }
     }
     const settings = getSettings();
     const pythonPath = (settings.pythonPath || '').trim();

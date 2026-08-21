@@ -167,7 +167,7 @@ export function createFind(getEditor, getTab) {
 
   input.addEventListener('input', () => runSearch());
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       if (matches.length === 0) return;
       const step = e.shiftKey ? -1 : 1;

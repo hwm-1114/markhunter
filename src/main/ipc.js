@@ -4,7 +4,7 @@ const fsp = fs.promises;
 const path = require('path');
 const { getSettings } = require('./settings');
 const { markSelfWrite } = require('./filewatch');
-const { isInside, setRoot, getRoot, approve, isApproved, requireApproved, realpath, dirHasApprovedFile } = require('./security');
+const { isInside, setRoot, getRoot, approve, isApproved, requireApproved, realpath, dirHasApprovedFile, remapApproved, revokeUnder } = require('./security');
 
 function normalize(p) {
   return path.resolve(p);
@@ -152,17 +152,23 @@ function registerFileIpc(getWindow) {
     const s = Math.max(0, Math.floor(Number(start) || 0));
     const len = Math.max(0, Math.min(Math.floor(Number(length) || 0), st.size - s));
     const buf = Buffer.alloc(len);
+    let read = 0;
     let fh = null;
     try {
       fh = await fsp.open(filePath, 'r');
-      await fh.read(buf, 0, len, s);
+      // 常规文件也可能部分读：读满为止，返回值按实际读取量（渲染端以 end 作下一段起点，可自愈续读）
+      while (read < len) {
+        const { bytesRead } = await fh.read(buf, read, len - read, s + read);
+        if (!bytesRead) break;
+        read += bytesRead;
+      }
     } finally {
       if (fh) await fh.close().catch(() => {});
     }
     // Buffer 底层 ArrayBuffer 视图（精确截取，避免把整个大缓冲传过去）
-    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + read);
     approve(filePath); // P7：记录已成功读取的路径（与 fs:read-file 一致 —— 外部大文件打开后保存/运行仍可用）
-    return { bytes: ab, start: s, end: s + len, size: st.size, mtime: st.mtimeMs };
+    return { bytes: ab, start: s, end: s + read, size: st.size, mtime: st.mtimeMs };
   });
 
   // 写二进制文件（粘贴图片用；必须先通过路径校验）
@@ -213,6 +219,7 @@ function registerFileIpc(getWindow) {
     }
     if (isDir) await fsp.rm(target, { recursive: true, force: true });
     else await fsp.unlink(target);
+    revokeUnder(target); // 清理批准集合：已删除路径不再保留写权限
     return true;
   });
 
@@ -224,6 +231,7 @@ function registerFileIpc(getWindow) {
     const target = path.join(path.dirname(oldPath), safe);
     if (fs.existsSync(target)) throw new Error(`已存在同名项：${safe}`);
     await fsp.rename(oldPath, target);
+    remapApproved(oldPath, target); // 批准集合映射到新路径：重命名后（外部文件）保存/运行仍可用
     return target;
   });
 

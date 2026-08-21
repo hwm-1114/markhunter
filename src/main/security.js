@@ -80,4 +80,53 @@ function dirHasApprovedFile(dir) {
   return false;
 }
 
-module.exports = { isInside, setRoot, getRoot, approve, isApproved, requireApproved, realpath, dirHasApprovedFile };
+/** 同一路径判等（Windows 大小写不敏感）与「p 在 dir 内」前缀判定（含分隔符边界，防 F:\ab 误匹配 F:\a） */
+const samePath = (a, b) =>
+  process.platform === 'win32' ? String(a).toLowerCase() === String(b).toLowerCase() : String(a) === String(b);
+function isUnderDir(p, dir) {
+  if (samePath(p, dir)) return true;
+  const sep = path.sep;
+  return String(p).startsWith(String(dir) + sep) ||
+    (process.platform === 'win32' && String(p).toLowerCase().startsWith(String(dir).toLowerCase() + sep));
+}
+
+/** 批准集合中加入路径（优先 realpath，失败回退规范化路径） */
+function approvePath(p) {
+  try {
+    approvedSet.add(realpath(p));
+  } catch {
+    approvedSet.add(normalize(p));
+  }
+}
+
+/** 重命名后同步批准集合：旧路径（及其子路径，目录重命名场景）映射到新路径，
+ *  避免「外部文件重命名后自动保存被拒」（旧 realpath 失效、新路径未批准）。
+ *  旧路径已不存在，此处统一用规范化路径比对（realpath 对已消失路径本来也回退规范化）。 */
+function remapApproved(oldPath, newPath) {
+  const from = normalize(String(oldPath || ''));
+  const to = normalize(String(newPath || ''));
+  if (!from || !to) return;
+  const moved = [];
+  for (const p of approvedSet) {
+    if (isUnderDir(p, from)) moved.push(p);
+  }
+  for (const p of moved) {
+    approvedSet.delete(p);
+    const rel = samePath(p, from) ? '' : String(p).slice(from.length).replace(/^[\\/]+/, '');
+    approvePath(rel ? path.join(to, rel) : to);
+  }
+  // 旧路径本身不在集合中（如目录重命名但目录内无已批准文件）也补批准新路径：
+  // 重命名的前提是旧路径已批准，新路径理应继承该批准
+  if (moved.length === 0) approvePath(to);
+}
+
+/** 删除后清理批准集合：移除目标本身及其子路径（防止对已删除路径残留写权限） */
+function revokeUnder(targetPath) {
+  const from = normalize(String(targetPath || ''));
+  if (!from) return;
+  for (const p of [...approvedSet]) {
+    if (isUnderDir(p, from)) approvedSet.delete(p);
+  }
+}
+
+module.exports = { isInside, setRoot, getRoot, approve, isApproved, requireApproved, realpath, dirHasApprovedFile, remapApproved, revokeUnder };

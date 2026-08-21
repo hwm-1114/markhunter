@@ -1,7 +1,7 @@
 {
     "name":  "@hwm-1114/markhunter",
     "productName":  "MarkHunter",
-    "version":  "0.1.45",
+    "version":  "0.1.46",
     "description":  "MarkHunter 马克猎手 —— 执笔即江湖，所写皆锋芒",
     "main":  "src/main/main.js",
     "repository":  {

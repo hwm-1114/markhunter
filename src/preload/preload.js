@@ -1,6 +1,9 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
+  // 拖拽 File → 真实路径：Electron 32 起 File.path 已移除，须经 webUtils 解析（drop 处理用）
+  getPathForFile: (file) => webUtils.getPathForFile(file),
+
   // 对话框
   selectDirectory: () => ipcRenderer.invoke('dialog:select-directory'),
   selectFile: (opts) => ipcRenderer.invoke('dialog:select-file', opts),

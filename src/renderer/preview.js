@@ -77,16 +77,16 @@ let mermaidInstanceSeq = 0;
 function uniquifySvg(svg, suffix) {
   if (typeof svg !== 'string' || svg.indexOf('id=') < 0) return svg;
   const sfx = '-' + String(suffix);
-  // 1) id="..." 属性
-  svg = svg.replace(/(\bid\s*=\s*["'])([^"']+)(["'])/g, (m, a, id, b) => a + id + sfx + b);
+  // 1) id="..." 属性（负向后顾排除 data-id= 等「-id」结尾属性名；Chromium 62+ 支持后顾断言）
+  svg = svg.replace(/(?<![\w-])(id\s*=\s*["'])([^"']+)(["'])/g, (m, a, id, b) => a + id + sfx + b);
   // 2) url(#id) 引用（含 url("#id") 引号变体）
   svg = svg.replace(/(url\(\s*["']?#)([^"')]+)(["']?\))/g, (m, a, id, b) => a + id + sfx + b);
   // 3) href="#id" / xlink:href="#id"
   svg = svg.replace(/((?:xlink:)?href\s*=\s*["']#)([^"']+)(["'])/g, (m, a, id, b) => a + id + sfx + b);
   // 4) <style> 内 #id 选择器（mermaid 以 #生成的id .class{...} 定位节点样式）。
-  //    仅当 #id 后跟空白或 {（选择器位置）才改写，避免误伤十六进制色值（fill:#ECECFF; 等）
+  //    仅当 #id 后跟空白、{ 或 ,（逗号分组选择器）才改写，避免误伤十六进制色值（fill:#ECECFF; 等）
   svg = svg.replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/g, (m, open, css, close) =>
-    open + css.replace(/#([A-Za-z_][\w.-]*)(?=[\s{])/g, (mm, id) => '#' + id + sfx) + close
+    open + css.replace(/#([A-Za-z_][\w.-]*)(?=[\s{,:])/g, (mm, id) => '#' + id + sfx) + close
   );
   return svg;
 }

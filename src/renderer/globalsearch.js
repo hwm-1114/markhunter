@@ -163,7 +163,7 @@ export function createGlobalSearch(getRootDir, onOpenFileAt) {
 
   btn.addEventListener('click', run);
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') run();
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) run();
   });
 
   return {

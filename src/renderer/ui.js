@@ -131,7 +131,8 @@ export function showPrompt(title, label, initial, onOk) {
   input.value = initial || '';
   input.placeholder = label;
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') okBtn.click();
+    // IME 组合确认键不触发确定（中文输入法按 Enter 选字不应提交弹窗）
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) okBtn.click();
   });
   wrap.append(lbl, input);
   let okBtn;

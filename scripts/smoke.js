@@ -849,6 +849,12 @@ const RENDERER_TEST = `
     return t && t.name === 'drag-test.txt' ? true : 'tab=' + (t && t.name);
   });
 
+  // dropPathResolver：preload 必须暴露 webUtils.getPathForFile（Electron 32+ 移除 File.path，
+  // 真实拖拽依赖它解析路径；dragOpenFile 的假对象只覆盖回退分支）
+  await step('dropPathResolver', async () => {
+    return typeof api.getPathForFile === 'function' ? true : 'typeof=' + typeof api.getPathForFile;
+  });
+
   // ---- 本地目录收藏（收藏 / 切换打开 / 取消 / 持久化往返） ----
   let favOrig = null; // 测试前的原始收藏（结束时还原，避免影响用户数据）
   await step('favAdd', async () => {
@@ -1914,6 +1920,25 @@ const RENDERER_TEST = `
     return !packed && ok ? true : 'packed=' + packed + ',ok=' + ok;
   });
 
+  // renameExternalSave：外部已打开文件重命名后，新路径保存仍放行（修复前：批准集合仍指向旧路径，
+  // fs:write-file 以「路径不在当前工作目录内」拒绝，自动保存持续失败）
+  await step('renameExternalSave', async () => {
+    const old = extRoot + '/note.md';
+    const renamed = extRoot + '/note-renamed.md';
+    const tab = app.editor.findTabByPath(old);
+    if (tab) app.editor.closeTab(tab); // 关掉旧标签，避免悬空引用干扰
+    await api.rename(old, 'note-renamed.md');
+    let saved = false;
+    let errMsg = '';
+    try {
+      saved = (await api.writeFile(renamed, '# 外部笔记（重命名后保存）\\n')) === true;
+    } catch (err) {
+      errMsg = String(err && err.message ? err.message : err);
+    }
+    await api.rename(renamed, 'note.md'); // 还原文件名，保证重复运行
+    return saved ? true : 'saved=' + saved + ',err=' + errMsg;
+  });
+
   // minifySanity（P5）：bundle 可加载、window.__app 与核心接口存在（esbuild minify 不改属性名，接口面应完好）
   await step('minifySanity', async () => {
     const a = window.__app;
@@ -2103,8 +2128,12 @@ const RENDERER_TEST = `
     // 模拟滚动到底部：设置 scrollTop 后派发 scroll 事件触发预读监听
     view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight;
     view.scrollDOM.dispatchEvent(new Event('scroll'));
-    await new Promise((r) => setTimeout(r, 1500));
-    const afterLen = view.state.doc.length;
+    // 轮询等待增长（最长 ~8s）：全量冒烟高负载下首次分段追加可能超过固定 1500ms
+    let afterLen = view.state.doc.length;
+    for (let i = 0; i < 26 && afterLen === initialLen; i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      afterLen = view.state.doc.length;
+    }
     const grew = afterLen > initialLen;
     const tabStill = !!app.editor.findTabByPath(bigPath);
     if (tabStill) app.editor.closeTab(app.editor.findTabByPath(bigPath));
@@ -2112,6 +2141,37 @@ const RENDERER_TEST = `
     return chunked && grew
       ? true
       : 'chunked=' + chunked + ',init=' + initialLen + ',after=' + afterLen + ',size=' + st.size;
+  });
+
+  // chunkedSaveClean（Python 运行前置保存路径）：分段标签编辑后经 saveNow 保存 ——
+  // 补齐剩余分段、剥离 MH-CHUNKED 占位标记、内容无截断（修复前 python.run 直接写 doc.toString()
+  // 会把标记写进 .py 且截断未加载部分）
+  await step('chunkedSaveClean', async () => {
+    const bigPath = root + '/large-save.md';
+    const TAIL = '\\nTAIL_MARKER_9X';
+    await api.writeFile(bigPath, '# 分段保存\\n' + 'y'.repeat(5 * 1024 * 1024));
+    const before = await api.readFile(bigPath);
+    const tab = await app.editor.openFile(bigPath);
+    await new Promise((r) => setTimeout(r, 600));
+    if (!tab || tab.kind !== 'chunked') {
+      if (tab) app.editor.closeTab(tab);
+      await api.remove(bigPath, false);
+      return 'not-chunked';
+    }
+    const view = app.editor.getView();
+    view.dispatch({ changes: { from: view.state.doc.length, insert: TAIL } });
+    await new Promise((r) => setTimeout(r, 100));
+    const ok = (await app.editor.saveNow()) === true; // 返回 true/false（写盘成败）
+    const after = await api.readFile(bigPath);
+    const noMarker = !after.content.includes('MH-CHUNKED');
+    const hasTail = after.content.includes('TAIL_MARKER_9X');
+    const noTrunc = after.content.length === before.content.length + TAIL.length;
+    const t2 = app.editor.findTabByPath(bigPath);
+    if (t2) app.editor.closeTab(t2);
+    await api.remove(bigPath, false);
+    return ok && noMarker && hasTail && noTrunc
+      ? true
+      : 'ok=' + ok + ',noMarker=' + noMarker + ',hasTail=' + hasTail + ',len=' + after.content.length + '/' + (before.content.length + TAIL.length);
   });
 
   // mermaidChunkLoaded（P5）：mermaid 拆包后，含 mermaid 的文档触发 chunk 动态加载 →

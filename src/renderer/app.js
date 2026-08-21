@@ -184,7 +184,7 @@ async function boot() {
   preview.refreshMermaid();
   find = createFind(() => editor, getActiveTab);
   globalSearch = createGlobalSearch(() => state.rootDir, openFileAt);
-  python = createPythonPanel(getActiveTab, () => state.settings);
+  python = createPythonPanel(getActiveTab, () => state.settings, (tab) => editor.saveNow(tab));
   tree = createTree();
 
   // ---------- AI 助手 ----------
@@ -869,8 +869,17 @@ async function boot() {
       e.stopPropagation();
       for (const f of files) {
         try {
-          editor.openFile(f.path);
-          tree.reveal(f.path).catch(() => {}); // 拖拽打开：树跟随定位
+          // Electron 32+ 移除 File.path：优先 webUtils 解析真实路径（preload 暴露）；
+          // 解析失败（如冒烟伪造对象/异常 File）回退 f.path，保持旧路径可用
+          let p;
+          try {
+            p = window.api.getPathForFile ? window.api.getPathForFile(f) : f.path;
+          } catch {
+            p = f.path;
+          }
+          if (!p) continue;
+          editor.openFile(p);
+          tree.reveal(p).catch(() => {}); // 拖拽打开：树跟随定位
         } catch {
           /* 忽略无法打开的文件 */
         }

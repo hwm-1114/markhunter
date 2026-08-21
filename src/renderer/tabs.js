@@ -336,7 +336,7 @@ export function createEditor(callbacks) {
       dirty: false,
       saveTimer: null,
       pinned: false,
-      chunk: { size: st.size, loaded: 0, complete: false, inflight: false, decoder: null, encoding: null },
+      chunk: { size: st.size, loaded: 0, complete: false, inflight: false, loadPromise: null, decoder: null, encoding: null },
     };
     let c0;
     try {
@@ -367,36 +367,45 @@ export function createEditor(callbacks) {
     return tab;
   }
 
-  /** 加载下一段并追加到文档（dispatch 增量，不整体重建；非活动标签用 state.update 保持光标） */
-  async function loadNextChunk(tab) {
+  /** 加载下一段并追加到文档（dispatch 增量，不整体重建；非活动标签用 state.update 保持光标）。
+   *  并发调用共享同一次加载（c.loadPromise）：ensureFullyLoaded 的 while 循环 await 到真实进度，
+   *  不再因 inflight 立即返回而空转守卫提前退出 —— 否则并发保存（自动保存 + 手动/Python）会
+   *  在未加载完时写盘，造成截断。 */
+  function loadNextChunk(tab) {
     const c = tab && tab.chunk;
-    if (!c || c.complete || c.inflight || !tab.state) return;
-    c.inflight = true;
-    try {
-      const start = c.loaded;
-      const len = Math.min(CHUNK_SIZE, c.size - start);
-      if (len <= 0) {
-        c.complete = true; // 无剩余内容：仅移除占位标记
-        appendChunkText(tab, '');
-        return;
+    if (!c || c.complete || !tab.state) return Promise.resolve();
+    if (c.loadPromise) return c.loadPromise;
+    const p = (async () => {
+      c.inflight = true;
+      try {
+        const start = c.loaded;
+        const len = Math.min(CHUNK_SIZE, c.size - start);
+        if (len <= 0) {
+          c.complete = true; // 无剩余内容：仅移除占位标记
+          appendChunkText(tab, '');
+          return;
+        }
+        const r = await window.api.readFileRange(tab.path, start, len);
+        let text = '';
+        if (c.decoder) {
+          text = c.decoder.decode(r.bytes, { stream: true });
+          if (r.end >= c.size) text += c.decoder.decode(); // 末段 flush 残余多字节序列
+        } else {
+          text = new TextDecoder(c.encoding || detectEncodingBytes(r.bytes)).decode(r.bytes);
+        }
+        c.loaded = r.end;
+        if (r.end >= c.size) c.complete = true;
+        appendChunkText(tab, text);
+      } catch (err) {
+        console.warn('[chunked] 分段读取失败:', tab.path, err && err.message ? err.message : err);
+      } finally {
+        c.inflight = false;
+        c.loadPromise = null;
+        maybeAutoLoad(tab); // 若用户仍停在底部附近，继续预读
       }
-      const r = await window.api.readFileRange(tab.path, start, len);
-      let text = '';
-      if (c.decoder) {
-        text = c.decoder.decode(r.bytes, { stream: true });
-        if (r.end >= c.size) text += c.decoder.decode(); // 末段 flush 残余多字节序列
-      } else {
-        text = new TextDecoder(c.encoding || detectEncodingBytes(r.bytes)).decode(r.bytes);
-      }
-      c.loaded = r.end;
-      if (r.end >= c.size) c.complete = true;
-      appendChunkText(tab, text);
-    } catch (err) {
-      console.warn('[chunked] 分段读取失败:', tab.path, err && err.message ? err.message : err);
-    } finally {
-      c.inflight = false;
-      maybeAutoLoad(tab); // 若用户仍停在底部附近，继续预读
-    }
+    })();
+    c.loadPromise = p;
+    return p;
   }
 
   /** 追加分段文本：先移除已有占位标记（可能在末尾，也可能因用户编辑漂移），再在文末追加内容 + 新标记 */
@@ -760,9 +769,25 @@ export function createEditor(callbacks) {
   }
 
   // ---------- 保存 ----------
-  async function saveNow(tab) {
+  /** 保存队列：所有保存（自动保存防抖 / Ctrl+S / 关标签 / Python 运行前置）全局串行合并 ——
+   *  并发 saveNow 在大文件 ensureFullyLoaded 阶段交错是截断写盘的竞态源；排队后后来者
+   *  看到干净标签直接返回，不重复写。 */
+  let saveQueue = Promise.resolve();
+
+  /** 保存标签内容。返回 true（已保存 / 本就无改动）或 false（写盘失败）——
+   *  Python 运行等调用方据此中止后续动作。 */
+  function saveNow(tab) {
+    const run = saveQueue.then(() => doSaveNow(tab));
+    saveQueue = run.then(
+      () => undefined,
+      () => undefined
+    ); // 队列不因单次失败断裂
+    return run;
+  }
+
+  async function doSaveNow(tab) {
     const t = tab || activeTab;
-    if (!t || !t.dirty) return;
+    if (!t || !t.dirty) return true;
     if (t.kind === 'chunked' && !t.chunk.complete) {
       await ensureFullyLoaded(t); // P7：先补齐剩余分段再写盘，防止只写已加载部分造成截断
     }
@@ -772,8 +797,10 @@ export function createEditor(callbacks) {
       t.dirty = false;
       if (onSaveStatus) onSaveStatus(`已保存 ${t.name}`);
       renderTabs();
+      return true;
     } catch (err) {
       if (onSaveStatus) onSaveStatus(`保存失败：${err.message || err}`);
+      return false;
     }
   }
 

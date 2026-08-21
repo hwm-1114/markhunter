@@ -1,4 +1,4 @@
-const { ipcMain } = require('electron');
+const { app, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -6,6 +6,42 @@ const { isApproved } = require('./security');
 
 let currentProc = null;
 let currentStartTime = 0;
+
+/** 按进程树终止（win32 用 taskkill /T /F，防遗留子进程；其余平台 kill 直杀）。
+ *  done 为可选回调（等待 taskkill 退出后触发）；同步失败静默忽略。 */
+function killTree(child, done) {
+  if (!child) {
+    if (typeof done === 'function') done();
+    return;
+  }
+  try {
+    if (process.platform === 'win32') {
+      const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+      killer.on('exit', () => done && done());
+      killer.on('error', () => done && done());
+    } else {
+      child.kill();
+      if (typeof done === 'function') done();
+    }
+  } catch {
+    if (typeof done === 'function') done();
+  }
+}
+
+/** 换新进程前处置旧进程：摘掉输出监听（防残余输出窜入新批次）后树杀（不等待） */
+function disposeCurrentProc() {
+  const old = currentProc;
+  currentProc = null;
+  if (!old) return;
+  try {
+    if (old.stdout) old.stdout.removeAllListeners('data');
+    if (old.stderr) old.stderr.removeAllListeners('data');
+  } catch { /* 忽略 */ }
+  killTree(old);
+}
 
 // P4（v0.1.45）：输出背压 —— stdout/stderr 按「~60ms 或 ~4KB（先到者）」聚合后统一经
 // 'python:output' 通道发送，避免每 chunk 一条 IPC（实测 2000 行 ≈ 数千条 IPC 拖垮渲染线程）。
@@ -206,8 +242,7 @@ function registerPythonIpc(getWindow) {
       interpreter = pp;
     }
     if (currentProc) {
-      try { currentProc.kill(); } catch {}
-      currentProc = null;
+      disposeCurrentProc(); // 旧进程：摘监听 + 进程树终止（普通 kill 会遗留子进程）
     }
     const win = getWindow();
     if (!win) throw new Error('窗口不可用');
@@ -234,7 +269,10 @@ function registerPythonIpc(getWindow) {
       if (settled) return;
       settled = true;
       batcher.flush(); // P4：退出时 flush 残余，保证输出完整、退出码后到
-      win.webContents.send('python:exit', payload);
+      // 窗口可能已销毁（应用退出中）：flush 已做同样检查，此处防 webContents.send 抛错
+      try {
+        if (win && !win.isDestroyed()) win.webContents.send('python:exit', payload);
+      } catch { /* 忽略 */ }
       currentProc = null;
     };
     child.on('error', (err) => {
@@ -256,19 +294,13 @@ function registerPythonIpc(getWindow) {
     const child = currentProc;
     if (!child) return false;
     currentProc = null;
-    if (process.platform === 'win32') {
-      await new Promise((resolve) => {
-        const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
-          windowsHide: true,
-          stdio: 'ignore',
-        });
-        killer.on('exit', resolve);
-        killer.on('error', resolve);
-      });
-    } else {
-      try { child.kill(); } catch {}
-    }
+    await new Promise((resolve) => killTree(child, resolve));
     return true;
+  });
+
+  // 应用退出时回收正在运行的 Python 进程（taskkill 已 spawn 即独立执行，不阻塞退出）
+  app.on('will-quit', () => {
+    disposeCurrentProc();
   });
 }
 

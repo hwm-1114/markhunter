@@ -91,6 +91,9 @@ export function createAiPanel(getEditor, getSettings, onApplySnippet, executeToo
     const msgs = [{ role: 'system', content: SYSTEM_PROMPT }];
     if (ctx) msgs.push({ role: 'user', content: `以下是当前文档${label}的内容：\n\n${ctx}` });
     for (const h of history.slice(-10)) {
+      // system 为界面提示（如「未配置 API Key」），不参与 API 请求：
+      // 部分 OpenAI 兼容端点拒绝对话中段出现多条 system 消息
+      if (h.role === 'system') continue;
       msgs.push({ role: h.role === 'ai' ? 'assistant' : h.role, content: h.content });
     }
     msgs.push({ role: 'user', content: userText });
@@ -206,7 +209,8 @@ export function createAiPanel(getEditor, getSettings, onApplySnippet, executeToo
 
   btnSend.addEventListener('click', () => send());
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // 输入法组合确认键（isComposing）不触发发送：中文 IME 按 Enter 选字时不应提前发出消息
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       send();
     }

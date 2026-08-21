@@ -131,7 +131,23 @@ export function openViewer({ kind, src, svgHtml, filePath, title }) {
   );
 
   // 鼠标左键按住拖拽平移查看（放大后查看不同部位）
+  // 监听器按需挂载：mousedown 时挂到 document，mouseup 时摘除 —— 多次打开查看器不再累积泄漏
   let dragState = null;
+  const onDragMove = (e) => {
+    if (!dragState) return;
+    const dx = e.clientX - dragState.x;
+    const dy = e.clientY - dragState.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) dragState.moved = true;
+    stage.scrollLeft = dragState.sl - dx;
+    stage.scrollTop = dragState.st - dy;
+  };
+  const onDragUp = () => {
+    if (!dragState) return;
+    dragState = null;
+    stage.classList.remove('dragging');
+    document.removeEventListener('mousemove', onDragMove);
+    document.removeEventListener('mouseup', onDragUp);
+  };
   stage.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -143,19 +159,8 @@ export function openViewer({ kind, src, svgHtml, filePath, title }) {
       moved: false,
     };
     stage.classList.add('dragging');
-  });
-  document.addEventListener('mousemove', (e) => {
-    if (!dragState) return;
-    const dx = e.clientX - dragState.x;
-    const dy = e.clientY - dragState.y;
-    if (Math.abs(dx) + Math.abs(dy) > 3) dragState.moved = true;
-    stage.scrollLeft = dragState.sl - dx;
-    stage.scrollTop = dragState.st - dy;
-  });
-  document.addEventListener('mouseup', () => {
-    if (!dragState) return;
-    dragState = null;
-    stage.classList.remove('dragging');
+    document.addEventListener('mousemove', onDragMove);
+    document.addEventListener('mouseup', onDragUp);
   });
 
   // 操作条
