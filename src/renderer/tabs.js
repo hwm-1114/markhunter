@@ -206,6 +206,9 @@ export function createEditor(callbacks) {
         langCompartment.of(langExt(lang)),
         wrapCompartment.of(wordWrapOn ? EditorView.lineWrapping : []),
         indentCompartment.of(indentExtensions(indentSize)),
+        // 查找替换统一走底部大面板（find.js）：拦截 CM 内置搜索小窗（Mod-f 默认弹右上角小框，
+        // 返回 true 仅阻止默认行为、不拦截冒泡 → app.js 的 document 级 Ctrl+F 处理仍会打开底部面板）
+        Prec.highest(keymap.of([{ key: 'Mod-f', run: () => true }])),
         matchField,
         EditorView.updateListener.of((u) => {
           if (u.docChanged && activeTab) {
@@ -795,6 +798,7 @@ export function createEditor(callbacks) {
     try {
       await window.api.writeFile(t.path, content);
       t.dirty = false;
+      t.lastSavedAt = Date.now(); // 自写回声双保险：file-changed 通知到达时据此忽略刚保存后的回声
       if (onSaveStatus) onSaveStatus(`已保存 ${t.name}`);
       renderTabs();
       return true;
@@ -1024,6 +1028,10 @@ export function createEditor(callbacks) {
     // 普通文本标签（kind 未定义）+ 分段标签（kind='chunked'）参与外部修改同步；图片标签（kind='image'）不参与
     const tab = tabs.find((t) => t.path === changedPath && (!t.kind || t.kind === 'chunked'));
     if (!tab) return;
+    // 自写回声双保险：刚保存后短时间内的变更通知视为自身写入的延迟回声，静默忽略
+    // （主进程 markSelfWrite 宽限窗口已吸收绝大多数；此处兜底高频编辑下的残余竞态，
+    //  避免打字中弹出「已在外部被修改」确认框打断输入）
+    if (tab.lastSavedAt && Date.now() - tab.lastSavedAt < 1200) return;
     if (tab.dirty) {
       // 有未保存的本地修改：询问是否丢弃并重新加载
       const { confirmDialog } = await import('./ui.js');

@@ -62,6 +62,10 @@
           <input id="gs-input" type="text" placeholder="全局搜索（Ctrl+Shift+F）…" />
           <button id="btn-gs-go" class="tbtn">搜索</button>
         </div>
+        <div class="gs-bar gs-replace-bar">
+          <input id="gs-replace-input" type="text" placeholder="替换为…（对结果文件的全部匹配）" />
+          <button id="btn-gs-replace-all" class="tbtn small danger" title="在当前搜索结果涉及的文件中批量替换">全部替换</button>
+        </div>
         <div id="gs-results" class="gs-results"></div>
         <div class="gs-count-row"><span id="gs-count" class="find-count"></span></div>
       </div>
@@ -120,11 +124,18 @@
       </div>
     </div>
 
-    <!-- 文件内搜索 -->
+    <!-- 文件内查找与替换 -->
     <div class="panel-body" id="panel-find">
       <div class="find-bar">
-        <input id="find-input" type="text" placeholder="在当前文件中查找…" />
+        <span class="find-label">查找</span>
+        <input id="find-input" type="text" placeholder="在当前文件中查找（不区分大小写，Enter 下一处）…" />
         <span id="find-count" class="find-count"></span>
+      </div>
+      <div class="find-bar">
+        <span class="find-label">替换</span>
+        <input id="replace-input" type="text" placeholder="替换为…（留空 = 删除匹配内容）" />
+        <button id="btn-replace" class="tbtn small" title="替换当前选中处（Enter）">替换</button>
+        <button id="btn-replace-all" class="tbtn small" title="替换当前文件中全部匹配">全部替换</button>
       </div>
       <div id="find-results" class="find-results"></div>
     </div>

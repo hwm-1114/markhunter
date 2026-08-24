@@ -1,10 +1,11 @@
-// 文件内搜索：底部面板展示全部匹配 + 编辑器高亮
+// 文件内查找与替换：底部面板展示全部匹配 + 编辑器高亮 + 替换当前/全部
 import { Decoration, EditorView } from '@codemirror/view';
-import { $, escapeHtml } from './ui.js';
+import { $, escapeHtml, toast } from './ui.js';
 import { matchEffect } from './tabs.js';
 
 export function createFind(getEditor, getTab) {
   const input = $('#find-input');
+  const replaceInput = $('#replace-input');
   const count = $('#find-count');
   const resultsEl = $('#find-results');
   const panel = $('#panel-find');
@@ -165,6 +166,53 @@ export function createFind(getEditor, getTab) {
     runSearch(noJump);
   }
 
+  // ---------- 替换（与查找同口径：不区分大小写；替换文本原样插入，不做分组引用） ----------
+  /** 大小写不敏感全量替换辅助：返回 [新文本, 替换处数] */
+  function replaceAllInText(text, q, rep) {
+    const lower = text.toLowerCase();
+    const ql = q.toLowerCase();
+    let out = '';
+    let i = 0;
+    let n = 0;
+    let idx = lower.indexOf(ql);
+    while (idx >= 0) {
+      out += text.slice(i, idx) + rep;
+      i = idx + q.length;
+      n++;
+      idx = lower.indexOf(ql, i);
+    }
+    out += text.slice(i);
+    return [out, n];
+  }
+
+  /** 替换当前选中匹配（无选中时替换第一处），替换后跳到下一处 */
+  function replaceCurrent() {
+    if (current < 0 || current >= matches.length) {
+      if (matches.length > 0) jumpTo(0);
+      return 0;
+    }
+    const idx = current;
+    const m = matches[idx];
+    const rep = replaceInput.value;
+    getView().dispatch({ changes: { from: m.from, to: m.to, insert: rep } });
+    runSearch(true); // 位置已失效：按新文档重算（current 重置为 -1）
+    if (matches.length > 0) jumpTo(Math.min(idx, matches.length - 1));
+    return 1;
+  }
+
+  /** 替换当前文件中全部匹配（一次 dispatch，多处原子生效），返回替换处数 */
+  function replaceAll() {
+    const tab = getTab();
+    if (!query || !tab || !tab.state || matches.length === 0) return 0;
+    const rep = replaceInput.value;
+    const changes = matches.map((m) => ({ from: m.from, to: m.to, insert: rep }));
+    getView().dispatch({ changes });
+    const n = matches.length;
+    runSearch(true);
+    toast(`已替换 ${n} 处${matches.length ? `，剩余 ${matches.length} 处匹配` : ''}`);
+    return n;
+  }
+
   input.addEventListener('input', () => runSearch());
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
@@ -174,6 +222,17 @@ export function createFind(getEditor, getTab) {
       jumpTo((current + step + matches.length) % matches.length);
     }
   });
+  replaceInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+      e.preventDefault();
+      if (e.shiftKey) replaceAll();
+      else replaceCurrent();
+    }
+  });
+  const btnRep = $('#btn-replace');
+  const btnRepAll = $('#btn-replace-all');
+  if (btnRep) btnRep.addEventListener('click', replaceCurrent);
+  if (btnRepAll) btnRepAll.addEventListener('click', replaceAll);
   // P10：结果行点击 → 容器级事件委托（行内不再挂 listener，2000 行也只有一个监听器）
   resultsEl.addEventListener('click', (e) => {
     const row = e.target.closest('.find-result');
@@ -182,5 +241,9 @@ export function createFind(getEditor, getTab) {
     if (Number.isInteger(idx) && idx >= 0 && idx < matches.length) jumpTo(idx);
   });
 
-  return { runSearch, setQuery, clearSearch, focus: () => { panel.classList.remove('hidden'); input.focus(); input.select(); } };
+  return {
+    runSearch, setQuery, clearSearch, replaceCurrent, replaceAll,
+    focus: () => { panel.classList.remove('hidden'); input.focus(); input.select(); },
+    focusReplace: () => { panel.classList.remove('hidden'); replaceInput.focus(); replaceInput.select(); },
+  };
 }

@@ -9,12 +9,19 @@ const fs = require('fs');
 const fsp = fs.promises;
 
 const watchers = new Map();  // path -> { mtime, timer, fsw, poller }
-const selfWrites = new Map(); // path -> 最近一次自写的 mtime（按 mtime 精确匹配，一次性消费）
+const selfWrites = new Map(); // path -> { mtime, size, until } 最近一次自写的 mtime/大小与宽限截止时刻
 
 // 通知防抖：聚合 fs.watch 一次变更可能触发的多条事件（Windows 实测 ~2 事件/次写），
 // 也覆盖「写入 → markSelfWrite 记录 mtime」的毫秒级竞态（T3），300ms 后统一 stat 比对。
 const NOTIFY_DEBOUNCE = 300;
 const POLL_INTERVAL = 1000; // 兜底轮询间隔（原 500ms 减半轮询频率，externalChange 冒烟 1500ms 等待仍覆盖 1300ms 最坏时延）
+// 自写宽限窗口：写盘后短时间内的变更一律视为自身写入的延迟回声（吸收，不通知）。
+// 背景：Windows fs.watch 事件在高频写入下会延迟/合并，且 markSelfWrite 的 stat 在高 IO 负载
+// （杀毒/索引）下也可能滞后 —— 检查拿到新状态而记录还是旧值时，精确匹配失败就会误报
+// 「已在外部被修改」，打字快、自动保存频繁时反复弹确认框（用户可感知的严重误报）。
+// 代价：宽限窗口内紧随自写发生的真实外部修改会被吸收一次（entry.mtime 同步刷新，
+// 后续外部修改恢复正常通知）；停止编辑 2s 后检测完全恢复。
+const SELF_WRITE_GRACE_MS = 2000;
 
 function getWin() {
   const { BrowserWindow } = require('electron');
@@ -40,15 +47,22 @@ async function checkAndNotify(filePath) {
   if (!entry) return;
   try {
     const st = await fsp.stat(filePath);
-    // 若与本应用最近一次写入的 mtime 一致，视为本地保存，跳过通知
-    const selfMtime = selfWrites.get(filePath);
-    if (selfMtime !== undefined) {
-      selfWrites.delete(filePath);
-      if (st.mtimeMs === selfMtime) {
+    const rec = selfWrites.get(filePath);
+    if (rec) {
+      if (st.mtimeMs === rec.mtime && st.size === rec.size) {
+        selfWrites.delete(filePath);
         entry.mtime = st.mtimeMs;
         return;
       }
-      // mtime 不同：本地写入之后又被外部修改过，继续走通知逻辑
+      if (Date.now() < rec.until) {
+        // 自写宽限内：事件延迟/stat 滞后导致的记录错位回声，吸收本次变化
+        // （rec 同步为当前状态，窗口内后续回声同样吸收；宽限过期后恢复正常外部修改检测）
+        rec.mtime = st.mtimeMs;
+        rec.size = st.size;
+        entry.mtime = st.mtimeMs;
+        return;
+      }
+      // 宽限外且与记录不符：本地写入之后又被外部修改过，继续走通知逻辑
     }
     if (st.mtimeMs !== entry.mtime) {
       entry.mtime = st.mtimeMs;
@@ -103,11 +117,12 @@ function startWatch(filePath, mtime) {
   }
 }
 
-/** 标记一次本应用写入（写文件 IPC 调用后调用），按写入后的 mtime 精确匹配避免误报 */
+/** 标记一次本应用写入（写文件 IPC 调用后调用）：按 mtime+size 匹配避免误报；
+ *  同时记录宽限窗口（SELF_WRITE_GRACE_MS），吸收事件延迟/合并导致的 mtime 错位回声。 */
 async function markSelfWrite(filePath) {
   try {
     const st = await fsp.stat(filePath);
-    selfWrites.set(filePath, st.mtimeMs);
+    selfWrites.set(filePath, { mtime: st.mtimeMs, size: st.size, until: Date.now() + SELF_WRITE_GRACE_MS });
   } catch {
     /* 忽略 */
   }

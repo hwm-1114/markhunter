@@ -689,14 +689,17 @@ const RENDERER_TEST = `
   await step('externalChange', async () => {
     await api.writeFile(root + '/ext.md', '第一行\\n第二行\\n第三行\\n第四行\\n第五行');
     await app.editor.openFile(root + '/ext.md');
-    await new Promise((r) => setTimeout(r, 400));
+    // 等待须超过自写宽限窗口（filewatch SELF_WRITE_GRACE_MS=2000ms）：上面的 api.writeFile
+    // 建文件会记录一次自写宽限，立即外部写会被当作自身回声吸收（rapidSaveEcho 用例的对称面）
+    await new Promise((r) => setTimeout(r, 2300));
     const view = app.editor.getView();
     const before = view.state.doc.toString();
     // 把光标放到第三行开头
     const selPos = view.state.doc.line(3).from;
     view.dispatch({ selection: { anchor: selPos } });
     const selBefore = view.state.selection.main.head;
-    // 模拟外部修改（内容变长）
+    // 模拟外部修改（内容变长）。等待须超过自写宽限窗口（filewatch SELF_WRITE_GRACE_MS=2000ms）：
+    // 上面的 api.writeFile 建文件会记录一次自写宽限，立即外部写会被当作自身回声吸收
     await api.writeExternal(root + '/ext.md', '第一行\\n第二行\\n第三行\\n第四行\\n第五行\\n第六行\\n第七行\\n第八行');
     await new Promise((r) => setTimeout(r, 1500)); // watchFile 轮询 + 防抖 + 重载
     const after = view.state.doc.toString();
@@ -704,6 +707,38 @@ const RENDERER_TEST = `
     return before.includes('第五行') && after.includes('第八行') && selAfter === selBefore
       ? true
       : 'before=' + before.slice(0, 10) + ',after=' + after.slice(0, 10) + ',sel=' + selBefore + '->' + selAfter;
+  });
+
+  // rapidSaveEcho（v0.1.47）：高频编辑 + 连续保存不得误报「外部修改」——
+  // Windows fs.watch 事件延迟/合并会让自写 mtime 精确匹配失败（打字快时反复弹确认框）。
+  // 连续 5 轮「编辑→保存」（间隔 ~120ms，远小于 300ms 防抖），静置 2.6s（超过宽限窗口）
+  // 期间轮询检测：不得出现「已从外部重新加载」toast；文档与磁盘内容一致
+  await step('rapidSaveEcho', async () => {
+    await api.writeFile(root + '/echo.md', 'echo-0\\n');
+    const tab = await app.editor.openFile(root + '/echo.md');
+    if (!tab) return 'open failed';
+    await new Promise((r) => setTimeout(r, 400));
+    const view = app.editor.getView();
+    for (let i = 1; i <= 5; i++) {
+      view.dispatch({ changes: { from: view.state.doc.length, insert: 'echo-' + i + '\\n' } });
+      await app.editor.saveNow(); // 立即保存（不等自动保存），写间隔远小于防抖窗口，制造事件错位条件
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    let reloaded = false;
+    for (let i = 0; i < 13 && !reloaded; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      reloaded = Array.from(document.querySelectorAll('.toast')).some((t) => t.textContent.includes('已从外部重新加载'));
+    }
+    const disk = await api.readFile(root + '/echo.md');
+    const expect = 'echo-0\\necho-1\\necho-2\\necho-3\\necho-4\\necho-5\\n';
+    const docOk = view.state.doc.toString() === expect;
+    const diskOk = disk.content === expect;
+    const t2 = app.editor.findTabByPath(root + '/echo.md');
+    if (t2) app.editor.closeTab(t2);
+    await api.remove(root + '/echo.md', false);
+    return !reloaded && docOk && diskOk
+      ? true
+      : 'reloaded=' + reloaded + ',doc=' + docOk + ',disk=' + diskOk;
   });
 
   // ---- 同一行内鼠标拖选文字（基础选择能力回归；后台窗口测量缺失时仅验证不崩溃） ----
@@ -2125,13 +2160,17 @@ const RENDERER_TEST = `
     const view = app.editor.getView();
     const initialLen = view.state.doc.length;
     const chunked = !!tab && tab.kind === 'chunked' && initialLen < st.size;
-    // 模拟滚动到底部：设置 scrollTop 后派发 scroll 事件触发预读监听
+    // 模拟滚动到底部：设置 scrollTop 后派发 scroll 事件触发预读监听。
+    // 轮询等待增长（最长 ~13s，增长即停）：全量冒烟高负载下，2MB 单行换行文档的首次
+    // 追加分发（CM 高度重算）可能远超固定等待；每轮重设 scrollTop 并重发 scroll，
+    // 模拟用户停在底部（追加完成后链式触发下一段预读）
     view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight;
     view.scrollDOM.dispatchEvent(new Event('scroll'));
-    // 轮询等待增长（最长 ~8s）：全量冒烟高负载下首次分段追加可能超过固定 1500ms
     let afterLen = view.state.doc.length;
     for (let i = 0; i < 26 && afterLen === initialLen; i++) {
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 500));
+      view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight;
+      view.scrollDOM.dispatchEvent(new Event('scroll'));
       afterLen = view.state.doc.length;
     }
     const grew = afterLen > initialLen;
@@ -2174,6 +2213,53 @@ const RENDERER_TEST = `
       : 'ok=' + ok + ',noMarker=' + noMarker + ',hasTail=' + hasTail + ',len=' + after.content.length + '/' + (before.content.length + TAIL.length);
   });
 
+  // findReplace（v0.1.47）：底部查找替换 —— 大小写不敏感；替换当前（选中处）+ 全部替换
+  await step('findReplace', async () => {
+    await api.writeFile(root + '/replace-me.md', 'foo abc foo\\nnope\\nFOO tail foo');
+    const tab = await app.editor.openFile(root + '/replace-me.md');
+    if (!tab) return 'open failed';
+    app.find.setQuery('foo'); // 跳到第一处（current=0）
+    const cntOk = (document.getElementById('find-count').textContent || '').includes('4'); // foo/FOO 共 4 处（大小写不敏感）
+    document.getElementById('replace-input').value = 'BAR';
+    const one = app.find.replaceCurrent(); // 替换第一处
+    const doc1 = app.editor.getView().state.doc.toString();
+    const afterOne = doc1 === 'BAR abc foo\\nnope\\nFOO tail foo';
+    const n = app.find.replaceAll(); // 剩余 3 处全替换
+    const doc2 = app.editor.getView().state.doc.toString();
+    const afterAll = doc2 === 'BAR abc BAR\\nnope\\nBAR tail BAR';
+    app.find.clearSearch();
+    const t = app.editor.findTabByPath(root + '/replace-me.md');
+    if (t) app.editor.closeTab(t);
+    await api.remove(root + '/replace-me.md', false);
+    return cntOk && afterOne && one === 1 && n === 3 && afterAll
+      ? true
+      : 'cnt=' + cntOk + ',one=' + one + '/' + afterOne + ',n=' + n + '/' + afterAll + ',doc=' + doc2;
+  });
+
+  // globalReplace（v0.1.47）：全局搜索「全部替换」—— 结果文件整文大小写不敏感替换 + 自动重搜
+  await step('globalReplace', async () => {
+    await api.writeFile(root + '/gr-a.md', 'alpha ZZFOOZZ beta\\nZZFOOZZ2');
+    await api.writeFile(root + '/gr-b.txt', 'ZZFOOZZ ZZFOOZZ ZZFOOZZ');
+    document.getElementById('gs-input').value = 'ZZFOOZZ';
+    await app.globalSearch.run();
+    const cntTxt = (document.getElementById('gs-count').textContent || '');
+    // 搜索语义为每行仅计首处匹配：gr-a 2 行各 1 处 + gr-b 1 行 1 处 = 3（替换是整文全量，比列表多）
+    const found = cntTxt.includes('3');
+    document.getElementById('gs-replace-input').value = 'QUX';
+    const ok = await app.globalSearch.replaceAll(true); // force：跳过原生确认框
+    const a = await api.readFile(root + '/gr-a.md');
+    const b = await api.readFile(root + '/gr-b.txt');
+    const okA = a.content === 'alpha QUX beta\\nQUX2';
+    const okB = b.content === 'QUX QUX QUX';
+    const none = (document.getElementById('gs-results').textContent || '').includes('没有找到'); // 替换后自动重搜应无匹配
+    document.getElementById('gs-input').value = '';
+    await api.remove(root + '/gr-a.md', false);
+    await api.remove(root + '/gr-b.txt', false);
+    return ok && found && okA && okB && none
+      ? true
+      : 'ok=' + ok + ',cnt=' + cntTxt + ',a=' + okA + ',b=' + okB + ',none=' + none;
+  });
+
   // mermaidChunkLoaded（P5）：mermaid 拆包后，含 mermaid 的文档触发 chunk 动态加载 →
   // window.__mermaid 已就绪且 SVG 正常渲染（chunk 链路可用）
   await step('mermaidChunkLoaded', async () => {
@@ -2197,16 +2283,17 @@ const RENDERER_TEST = `
 // phase: 'text'（剪贴板含文本 → 断言插入） / 'empty'（剪贴板为空 → 断言 toast 且文档不变）
 function menuClipboardSnippet(phase) {
   const pasteLabel = phase === 'text' ? 'menuPaste' : 'menuPasteEmpty';
+  // 点击后的异步链路（readClipboardText IPC → 插入/toast）在高负载下可能超过固定等待：
+  // done 为「本阶段预期结果已出现」的轮询条件
+  const done =
+    phase === 'text'
+      ? `doc.startsWith('纯文本测试 123') && cur === '纯文本测试 123'.length`
+      : `toastText.includes('剪贴板为空') && doc === '第一行内容\\n第二行内容'`;
   const assertBody =
     phase === 'text'
-      ? `const doc = view.state.doc.toString();
-         const cur = view.state.selection.main.head;
-         const ok = visible && !!item && doc.startsWith('纯文本测试 123') && cur === '纯文本测试 123'.length;
+      ? `const ok = visible && !!item && doc.startsWith('纯文本测试 123') && cur === '纯文本测试 123'.length;
          return ok ? true : 'vis=' + visible + ',item=' + !!item + ',doc=' + JSON.stringify(doc.slice(0, 24)) + ',cur=' + cur;`
-      : `const doc = view.state.doc.toString();
-         const toastEl = Array.from(document.querySelectorAll('.toast')).pop();
-         const toastText = toastEl ? toastEl.textContent : '';
-         const ok = visible && !!item && toastText.includes('剪贴板为空') && doc === '第一行内容\\n第二行内容';
+      : `const ok = visible && !!item && toastText.includes('剪贴板为空') && doc === '第一行内容\\n第二行内容';
          return ok ? true : 'vis=' + visible + ',item=' + !!item + ',toast=' + toastText + ',doc=' + JSON.stringify(doc);`;
   return `(async () => {
   const api = window.api;
@@ -2231,13 +2318,31 @@ function menuClipboardSnippet(phase) {
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '第一行内容\\n第二行内容' }, selection: { anchor: 0 } });
     await new Promise((r) => setTimeout(r, 50));
     const cm = document.querySelector('.cm-content');
-    cm.dispatchEvent(new MouseEvent('contextmenu', { clientX: 300, clientY: 200, bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 50));
     const menu = document.querySelector('#ctx-menu');
-    const visible = !menu.classList.contains('hidden');
+    // 抗抖动重试：测试窗口运行在真实桌面上，期间一次真实鼠标点击即会关闭菜单（全局 click 隐藏），
+    // 派发后最多重试 5 次（每次 100ms），菜单可见即继续
+    let visible = false;
+    for (let i = 0; i < 5 && !visible; i++) {
+      cm.dispatchEvent(new MouseEvent('contextmenu', { clientX: 300, clientY: 200, bubbles: true, cancelable: true }));
+      for (let j = 0; j < 5 && !visible; j++) {
+        await new Promise((r) => setTimeout(r, 20));
+        visible = !menu.classList.contains('hidden');
+      }
+    }
     const item = Array.from(menu.querySelectorAll('.ctx-item')).find((el) => el.textContent.includes('粘贴为纯文本'));
     if (item) item.click();
-    await new Promise((r) => setTimeout(r, 200));
+    // 点击后轮询（最长 3s，预期结果出现即停）：IPC 链路在高负载下可能超过固定等待
+    let doc = view.state.doc.toString();
+    let cur = view.state.selection.main.head;
+    let toastText = '';
+    const isDone = () => ${done};
+    for (let i = 0; i < 30 && !isDone(); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      doc = view.state.doc.toString();
+      cur = view.state.selection.main.head;
+      const toastEl = Array.from(document.querySelectorAll('.toast')).pop();
+      toastText = toastEl ? toastEl.textContent : '';
+    }
     ${assertBody}
   });
   return results;

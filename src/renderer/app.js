@@ -901,6 +901,10 @@ async function boot() {
       e.preventDefault();
       switchPanel('find');
       find.focus();
+    } else if (mod && e.key.toLowerCase() === 'h' && !e.shiftKey) {
+      e.preventDefault();
+      switchPanel('find');
+      find.focusReplace();
     } else if (mod && e.shiftKey && e.key.toLowerCase() === 'f') {
       e.preventDefault();
       globalSearch.focus();
