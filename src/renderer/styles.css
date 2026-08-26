@@ -943,6 +943,20 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 滚动快捷按钮（回顶部/到底部） */
+#status-bar .sb-btn {
+  background: none;
+  border: none;
+  color: var(--mh-text-2);
+  cursor: pointer;
+  font-size: 11.5px;
+  line-height: 1;
+  padding: 4px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+#status-bar .sb-btn:hover { background: var(--mh-bg-active); color: var(--mh-text); }
+#status-bar .sb-btn:active { transform: translateY(1px); }
 
 /* 查看器（图片 / mermaid 详情） */
 .viewer { display: flex; flex-direction: column; gap: 12px; min-width: 0; }

@@ -145,6 +145,9 @@ export function createTree() {
         return;
       }
       if (node.isDir) {
+        // 目录点击也更新选中：「新建文件/目录」的目标跟随最后点击的目录
+        // （此前仅文件点击 select —— 新建会落到别处，在用户浏览的位置看似"没创建出来"）
+        select(node.path);
         await toggleExpand(node.path, row);
         if (onOpenDir) onOpenDir(node.path);
       } else {
@@ -445,14 +448,28 @@ export function createTree() {
     }
   }
 
-  /** 刷新某个目录节点（root 特殊处理） */
+  /** 刷新某个目录节点（root 特殊处理）。
+   *  目标行不在当前 nodeMap（全量 render 后未重走的展开目录 / 外部移动删除导致的陈旧行）
+   *  时，向上找最近已渲染祖先刷新，都没有则整树重建 —— 修复「新建成功但树不刷新、看似没创建」。 */
   async function refreshNode(dirPath, expand = false) {
     if (dirPath === rootDir) {
       render();
       return;
     }
-    const entry = nodeMap.get(dirPath);
-    if (!entry) return;
+    let entry = nodeMap.get(dirPath);
+    if (!entry) {
+      let cur = dirOf(dirPath);
+      while (cur && cur !== rootDir && dirOf(cur) !== cur && !nodeMap.has(cur)) {
+        cur = dirOf(cur);
+      }
+      if (nodeMap.has(cur)) {
+        dirPath = cur;
+        entry = nodeMap.get(cur);
+      } else {
+        render(); // 兜底：整树重建
+        return;
+      }
+    }
     if (expand && !expanded.has(dirPath)) expanded.add(dirPath);
     await loadChildren(dirPath, true);
     refreshIcon(entry.row, dirPath);

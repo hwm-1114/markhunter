@@ -149,6 +149,11 @@ async function boot() {
       // 文件内搜索实时刷新（P1：同样防抖，不抢占光标，避免打字时光标被拽走）
       if (findQuery()) debouncedFindSearch();
     },
+    onTabLeave: (oldTab) => {
+      // 预览区滚动位置随标签记忆（编辑器滚动由 tabs.js switchTab 内部保存）
+      const ph = $('#preview-host');
+      if (ph && oldTab) oldTab.previewScrollTop = ph.scrollTop;
+    },
     onTabSwitch: (tab) => {
       preview.applyMode();
       updateRunButton();
@@ -160,6 +165,18 @@ async function boot() {
         if (tab.path && !tree.isInsideRoot(tab.path) && tab.path !== lastExtToastPath) {
           lastExtToastPath = tab.path;
           toast('文件不在当前工作目录，已在「外部文件」分支定位');
+        }
+        // 预览区滚动位置恢复：render 同步完成，mermaid 异步渲染可能再改高度 → 多帧校正；
+        // 无记录 → 顶部（避免残留上一标签的滚动偏移）
+        const ph = $('#preview-host');
+        if (ph) {
+          const target = typeof tab.previewScrollTop === 'number' ? tab.previewScrollTop : 0;
+          const restorePv = (n) => {
+            if (getActiveTab() !== tab) return;
+            ph.scrollTop = target;
+            if (n > 0) requestAnimationFrame(() => restorePv(n - 1));
+          };
+          restorePv(4);
         }
       } else {
         $('#save-status').textContent = '';
@@ -328,6 +345,26 @@ async function boot() {
     const tab = getActiveTab();
     $('#btn-run-py').disabled = !(tab && isPython(tab.name));
   }
+
+  // ---------- 状态栏滚动快捷按钮：回顶部 / 到底部 ----------
+  // 仅预览模式下主面板是预览区（滚预览）；其余滚编辑器（tabs.js 内处理图片/分段标签）
+  $('#btn-scroll-top').addEventListener('click', () => {
+    const tab = getActiveTab();
+    if (tab && tab.kind !== 'image' && preview.getMode() === 'preview') {
+      $('#preview-host').scrollTop = 0;
+      return;
+    }
+    editor.scrollToTop();
+  });
+  $('#btn-scroll-bottom').addEventListener('click', () => {
+    const tab = getActiveTab();
+    if (tab && tab.kind !== 'image' && preview.getMode() === 'preview') {
+      const ph = $('#preview-host');
+      ph.scrollTop = ph.scrollHeight;
+      return;
+    }
+    editor.scrollToBottom();
+  });
 
   // ---------- 会话保持：标签快照持久化（防抖 600ms） + 跨重启恢复 ----------
   let sessionTimer = null;

@@ -81,9 +81,9 @@ const lightTheme = EditorView.theme({
 export function createEditor(callbacks) {
   const host = document.getElementById('editor-host');
   const tabsEl = document.getElementById('tabs');
-  const { onDocChanged, onTabSwitch, onRequestClose, getWordWrap, onSaveStatus, onSessionChange, getIndentSize } = callbacks;
+  const { onDocChanged, onTabSwitch, onTabLeave, onRequestClose, getWordWrap, onSaveStatus, onSessionChange, getIndentSize } = callbacks;
 
-  const tabs = []; // { id, path, name, lang, state, dirty, saveTimer, savedContent }
+  const tabs = []; // { id, path, name, lang, state, dirty, saveTimer, savedContent, scrollTop }
   let activeTab = null;
   let idSeq = 0;
   let wordWrapOn = getWordWrap();
@@ -511,6 +511,17 @@ export function createEditor(callbacks) {
   }
 
   function switchTab(tab) {
+    // 记住离开标签的滚动位置（编辑器 / 图片视图），切回时恢复；
+    // onTabLeave 供上层同步保存预览区滚动等视图级状态
+    if (activeTab && activeTab !== tab) {
+      const leaving = activeTab;
+      if (leaving.kind === 'image') {
+        leaving.scrollTop = imageHost.scrollTop;
+      } else {
+        leaving.scrollTop = view.scrollDOM.scrollTop;
+      }
+      if (onTabLeave) onTabLeave(leaving);
+    }
     activeTab = tab;
     if (tab.kind === 'image') {
       // 图片标签：编辑区显示图片视图
@@ -525,10 +536,30 @@ export function createEditor(callbacks) {
       view.dispatch({ effects: indentCompartment.reconfigure(indentExtensions(indentSize)) });
       tab.state = view.state;
     }
+    // 恢复进入标签的滚动位置：setState 重建视口后位置丢失，CM 高度测量异步 → 多帧校正；
+    // 若期间位置被其它力量移动（用户滚动/测量修正超出容差）则停止校正，不与用户抢滚动条。
+    // 新标签 / 无记录 → 顶部。
+    restoreTabScroll(tab);
     renderTabs();
     updateStatusBar();
     onTabSwitch(tab);
     if (onSessionChange) onSessionChange();
+  }
+
+  /** 多帧恢复 tab 滚动位置（编辑器或图片视图）。
+   *  setState 重建视口后 CM 的高度测量会异步修正 scrollTop，单次赋值会被"弹回"，
+   *  需连续多帧压回目标值（~100ms，测量完成后即稳定）；期间切换标签则放弃。
+   *  无记录 → 顶部。 */
+  function restoreTabScroll(tab) {
+    const el = tab.kind === 'image' ? imageHost : view.scrollDOM;
+    const target = typeof tab.scrollTop === 'number' ? tab.scrollTop : 0;
+    const step = (n) => {
+      if (activeTab !== tab || !el) return;
+      el.scrollTop = target;
+      if (n <= 0) return;
+      requestAnimationFrame(() => step(n - 1));
+    };
+    step(6);
   }
 
   /** Ctrl+Tab / Ctrl+Shift+Tab 循环切换标签 */
@@ -825,6 +856,38 @@ export function createEditor(callbacks) {
     }
   }
 
+  /** 滚动到顶部（状态栏按钮）：编辑器 / 图片视图通用，不改光标 */
+  function scrollToTop() {
+    const t = activeTab;
+    if (!t) return;
+    if (t.kind === 'image') {
+      imageHost.scrollTop = 0;
+      return;
+    }
+    view.scrollDOM.scrollTop = 0;
+  }
+
+  /** 滚动到底部（状态栏按钮）：chunked 标签先补齐剩余分段（显式到底部 = 与保存同语义），
+   *  追加后高度测量异步 → 多帧校正；图片视图直接滚到底。 */
+  async function scrollToBottom() {
+    const t = activeTab;
+    if (!t) return;
+    if (t.kind === 'image') {
+      imageHost.scrollTop = imageHost.scrollHeight;
+      return;
+    }
+    if (t.kind === 'chunked' && !t.chunk.complete) {
+      await ensureFullyLoaded(t);
+    }
+    const el = view.scrollDOM;
+    const set = (n) => {
+      if (activeTab !== t || !el) return;
+      el.scrollTop = el.scrollHeight;
+      if (n > 0) requestAnimationFrame(() => set(n - 1));
+    };
+    set(4);
+  }
+
   function getActiveTab() {
     return activeTab;
   }
@@ -1092,5 +1155,5 @@ export function createEditor(callbacks) {
     toast(`已从外部重新加载 ${tab.name}`);
   });
 
-  return { openFile, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs };
+  return { openFile, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs, scrollToTop, scrollToBottom };
 }

@@ -741,6 +741,97 @@ const RENDERER_TEST = `
       : 'reloaded=' + reloaded + ',doc=' + docOk + ',disk=' + diskOk;
   });
 
+  // tabScrollMemory（v0.1.48）：标签切换记住滚动位置 —— A 滚到 800 → 切 B（应为顶部）→ B 滚到 400
+  // → 切回 A（≈800）→ 切回 B（≈400）
+  await step('tabScrollMemory', async () => {
+    const long = Array.from({ length: 400 }, (_, i) => '第' + (i + 1) + '行内容').join('\\n');
+    await api.writeFile(root + '/scroll-a.md', long);
+    await api.writeFile(root + '/scroll-b.md', long);
+    await app.editor.openFile(root + '/scroll-a.md');
+    await new Promise((r) => setTimeout(r, 300));
+    const view = app.editor.getView();
+    view.scrollDOM.scrollTop = 800;
+    await new Promise((r) => setTimeout(r, 120));
+    const aPos = view.scrollDOM.scrollTop;
+    await app.editor.openFile(root + '/scroll-b.md');
+    await new Promise((r) => setTimeout(r, 500));
+    const bTop = view.scrollDOM.scrollTop; // 新标签无记录 → 应在顶部
+    view.scrollDOM.scrollTop = 400;
+    await new Promise((r) => setTimeout(r, 120));
+    await app.editor.openFile(root + '/scroll-a.md'); // 切回 A
+    await new Promise((r) => setTimeout(r, 500));
+    const backA = view.scrollDOM.scrollTop;
+    await app.editor.openFile(root + '/scroll-b.md'); // 切回 B
+    await new Promise((r) => setTimeout(r, 500));
+    const backB = view.scrollDOM.scrollTop;
+    for (const p of ['/scroll-a.md', '/scroll-b.md']) {
+      const t = app.editor.findTabByPath(root + p);
+      if (t) app.editor.closeTab(t);
+      await api.remove(root + p, false);
+    }
+    const okA = Math.abs(aPos - 800) < 80 && bTop < 60 && Math.abs(backA - aPos) < 120 && Math.abs(backB - 400) < 120;
+    return okA ? true : 'a=' + aPos + ',bTop=' + bTop + ',backA=' + backA + ',backB=' + backB;
+  });
+
+  // scrollButtons（v0.1.48）：状态栏「到底部/回顶部」按钮 —— 底部接近最大滚动、顶部归零
+  await step('scrollButtons', async () => {
+    const long = Array.from({ length: 400 }, (_, i) => '第' + (i + 1) + '行内容').join('\\n');
+    await api.writeFile(root + '/scroll-btn.md', long);
+    await app.editor.openFile(root + '/scroll-btn.md');
+    await new Promise((r) => setTimeout(r, 300));
+    const view = app.editor.getView();
+    document.getElementById('btn-scroll-bottom').click();
+    let okBottom = false;
+    let cur = -1;
+    let maxSeen = 0;
+    for (let i = 0; i < 20 && !okBottom; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      cur = view.scrollDOM.scrollTop;
+      maxSeen = Math.max(maxSeen, view.scrollDOM.scrollHeight - view.scrollDOM.clientHeight);
+      okBottom = maxSeen > 1000 && Math.abs(cur - maxSeen) < 120;
+    }
+    document.getElementById('btn-scroll-top').click();
+    await new Promise((r) => setTimeout(r, 300));
+    const top = view.scrollDOM.scrollTop;
+    const t = app.editor.findTabByPath(root + '/scroll-btn.md');
+    if (t) app.editor.closeTab(t);
+    await api.remove(root + '/scroll-btn.md', false);
+    return okBottom && top < 5 ? true : 'bottom=' + okBottom + '/' + cur + '/' + maxSeen + ',top=' + top;
+  });
+
+  // createInSelectedDir（v0.1.48）：点击目录行后「新建文件」落在该目录内 ——
+  // 修复前目录点击不更新选中，新建落到最后点击文件所在目录/根目录，在用户浏览的位置"看似没创建"
+  await step('createInSelectedDir', async () => {
+    await api.create(root, 'cisd-sub', 'dir');
+    await app.tree.refreshNode(root, true); // api.create 不自动刷树
+    await new Promise((r) => setTimeout(r, 400));
+    const rows = () => Array.from(document.querySelectorAll('#file-tree .tree-node'));
+    const row = rows().find((n) => String(n.dataset.path).replace(/\\\\/g, '/').endsWith('/cisd-sub'));
+    if (!row) {
+      await api.remove(root + '/cisd-sub', true);
+      return 'row missing';
+    }
+    row.click(); // 点击目录行 → 应更新选中（新建目标跟随）
+    await new Promise((r) => setTimeout(r, 400));
+    document.querySelector('#btn-new-file').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const input = document.querySelector('#modal-body input');
+    if (!input) {
+      await api.remove(root + '/cisd-sub', true);
+      return 'no prompt';
+    }
+    input.value = 'in-cisd.md';
+    const btns = Array.from(document.querySelectorAll('#modal-actions .tbtn'));
+    btns[btns.length - 1].click();
+    await new Promise((r) => setTimeout(r, 700));
+    const inSub = await api.stat(root + '/cisd-sub/in-cisd.md').catch(() => null);
+    const atRoot = await api.stat(root + '/in-cisd.md').catch(() => null);
+    const t = app.editor.findTabByPath(root + '/cisd-sub/in-cisd.md'); // 新建文件会自动打开
+    if (t) app.editor.closeTab(t);
+    await api.remove(root + '/cisd-sub', true);
+    return inSub && !atRoot ? true : 'inSub=' + !!inSub + ',atRoot=' + !!atRoot;
+  });
+
   // ---- 同一行内鼠标拖选文字（基础选择能力回归；后台窗口测量缺失时仅验证不崩溃） ----
   await step('selectSameLine', async () => {
     await api.writeFile(root + '/sel.md', '第一行文字内容ABCDEFGH\\n第二行内容\\n');

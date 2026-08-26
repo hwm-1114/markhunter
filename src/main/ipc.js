@@ -200,9 +200,12 @@ function registerFileIpc(getWindow) {
     const target = path.join(parentDir, safe);
     requireApproved(target, '路径不在当前工作目录内，操作已拒绝');
     if (fs.existsSync(target)) throw new Error(`已存在同名项：${safe}`);
+    // 父目录可能已失效（树缓存陈旧：目录被外部移动/删除后行仍在树上）→
+    // recursive 重建父链，避免 ENOENT 裸错误让「新建」表现为无声失败
     if (type === 'dir') {
-      await fsp.mkdir(target);
+      await fsp.mkdir(target, { recursive: true });
     } else {
+      await fsp.mkdir(path.dirname(target), { recursive: true });
       await fsp.writeFile(target, '', 'utf8');
     }
     return target;
