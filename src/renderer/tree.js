@@ -70,6 +70,7 @@ export function createTree() {
   let onOpenDir = null;
   let onClosePath = null; // 删除/重命名后关闭或更新已打开标签
   let onSwitchRoot = null; // 需求1：外部区目录行「切换工作目录到此目录」
+  let compareBase = null; // v0.2.1 对比基准（右键「设为对比基准」→ 另一文件右键「与基准对比」）
 
   const nodeMap = new Map(); // path -> { row, children, isDir }
 
@@ -77,11 +78,14 @@ export function createTree() {
   // （同目录多文件共享一条链；同盘多目录共享盘符/UNC 根）
   let externalOpen = new Map();
 
+  let onCompareFiles = null; // v0.2.1：与基准对比（app.js 传入，读取两文件开对比标签）
+
   function setCallbacks(cbs) {
     onOpenFile = cbs.onOpenFile;
     onOpenDir = cbs.onOpenDir;
     onClosePath = cbs.onClosePath;
     onSwitchRoot = cbs.onSwitchRoot;
+    onCompareFiles = cbs.onCompareFiles;
   }
 
   function setRoot(dir) {
@@ -388,6 +392,29 @@ export function createTree() {
       items.push({ label: '🗑 删除目录', danger: true, onClick: () => removeEntry(node.path, true) });
     } else {
       items.push({ label: '📄 打开', onClick: () => onOpenFile && onOpenFile(node.path) });
+      items.push({ sep: true });
+      // v0.2.1 对比：无基准 → 设为基准；有基准且非自身 → 与基准对比
+      if (!compareBase) {
+        items.push({ label: '🔖 设为对比基准', onClick: () => {
+          compareBase = node.path;
+          toast(`对比基准：${node.name}（在另一文件上右键「与基准对比」）`);
+        } });
+      } else if (compareBase !== node.path) {
+        items.push({ label: `🔀 与基准对比（${(compareBase.split(/[\\/]/).pop() || '').slice(0, 18)}）`, onClick: () => {
+          const base = compareBase;
+          compareBase = null; // 一次性使用
+          onCompareFiles && onCompareFiles(base, node.path);
+        } });
+        items.push({ label: '🔖 改设此文件为基准', onClick: () => {
+          compareBase = node.path;
+          toast(`对比基准已改为：${node.name}`);
+        } });
+      } else {
+        items.push({ label: '🔖 取消对比基准', onClick: () => {
+          compareBase = null;
+          toast('已取消对比基准');
+        } });
+      }
       items.push({ sep: true });
       items.push({ label: '✏️ 重命名', onClick: () => renameEntry(node.path, node.name) });
       items.push({ label: '🗑 删除文件', danger: true, onClick: () => removeEntry(node.path, false) });

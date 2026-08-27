@@ -2438,10 +2438,10 @@ const RENDERER_TEST = `
     return ok ? true : 'open=' + Math.round(tOpen) + 'ms,avgInput=' + avgInput.toFixed(1) + 'ms（超阈值）';
   });
 
-  // stressSession120：120 标签会话恢复（顺序/数量正确；上限 200、并发 6 的验证）
-  await step('stressSession120', async () => {
+  // stressSessionFull：200 标签会话满档恢复（顺序/数量正确；上限 200、并发 6 的验证，v0.2.1 满档实测）
+  await step('stressSessionFull', async () => {
     const paths = [];
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 200; i++) {
       const p = root + '/stress-s' + i + '.txt';
       await api.writeFile(p, 'session stress ' + i);
       paths.push(p);
@@ -2452,13 +2452,13 @@ const RENDERER_TEST = `
     await app.session.restore();
     const tRestore = performance.now() - t0;
     const s = app.editor.getSession();
-    const countOk = s.paths.length === 120;
-    const orderOk = s.paths[0] === paths[0] && s.paths[119] === paths[119];
-    console.log('[stress-session] restore120=' + Math.round(tRestore) + 'ms count=' + s.paths.length);
+    const countOk = s.paths.length === 200;
+    const orderOk = s.paths[0] === paths[0] && s.paths[199] === paths[199];
+    console.log('[stress-session] restore200=' + Math.round(tRestore) + 'ms count=' + s.paths.length);
     await app.editor.closeAll();
     await api.setSettings({ lastSession: null });
     app.state.settings = await api.getSettings();
-    for (let i = 0; i < 120; i++) await api.remove(root + '/stress-s' + i + '.txt', false);
+    for (let i = 0; i < 200; i++) await api.remove(root + '/stress-s' + i + '.txt', false);
     return countOk && orderOk ? true : 'count=' + s.paths.length + ',order=' + orderOk;
   });
 
@@ -2658,7 +2658,10 @@ const RENDERER_TEST = `
   });
 
   // diffUnsaved：工具栏「对比」对话框 + 磁盘版本 —— 未保存改动在 diff 中可见
+  // （临时调大自动保存延迟至 10s：消除 dispatch→readFile 期间 autosave 抢先写盘的竞态）
   await step('diffUnsaved', async () => {
+    await api.setSettings({ autoSaveDelay: 10000 });
+    app.state.settings = await api.getSettings();
     await api.writeFile(root + '/dv.md', 'original line 1\\noriginal line 2\\n');
     await app.editor.openFile(root + '/dv.md');
     await new Promise((r) => setTimeout(r, 300));
@@ -2670,6 +2673,8 @@ const RENDERER_TEST = `
     const sel = document.querySelector('#modal-body select');
     if (!sel) {
       app.editor.closeAll();
+      await api.setSettings({ autoSaveDelay: 800 });
+      app.state.settings = await api.getSettings();
       return 'no dialog';
     }
     sel.value = '__disk__';
@@ -2683,20 +2688,84 @@ const RENDERER_TEST = `
     const isDiff = t && t.kind === 'diff';
     app.editor.closeAll();
     await api.remove(root + '/dv.md', false);
+    await api.setSettings({ autoSaveDelay: 800 });
+    app.state.settings = await api.getSettings();
     return isDiff && modN === 1 && addN === 1 ? true : 'diff=' + isDiff + ',mod=' + modN + ',add=' + addN;
   });
 
-  // diffLimits：单侧超 20MB 拒绝（.diff-truncated 提示，不渲染）
+  // diffLimits（v0.2.1）：单侧超 20MB → 截断对比（醒目横幅 + 前 20MB 正常渲染），不再硬拒绝
   await step('diffLimits', async () => {
     const big = 'x'.repeat(21 * 1024 * 1024);
     app.editor.openDiffTab({ leftLabel: 'big-l', leftContent: big, rightLabel: 'big-r', rightContent: 'small' });
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 600));
     const host = document.getElementById('diff-host');
-    const tip = host.querySelector('.diff-truncated');
-    const noRows = host.querySelectorAll('.diff-row').length === 0;
-    const msgOk = tip && tip.textContent.includes('超出上限');
+    const banner = host.querySelector('.diff-trunc-banner');
+    const msgOk = banner && banner.textContent.includes('已截断');
+    // 20MB 单行 vs 'small'：jsdiff 相邻 removed+added → 配对为 1 个 mod 行（非 del+add）
+    const hasMod = host.querySelectorAll('.diff-row.mod').length > 0;
     app.editor.closeAll();
-    return tip && noRows && msgOk ? true : 'tip=' + !!tip + ',noRows=' + noRows + ',msg=' + (tip && tip.textContent.slice(0, 20));
+    return banner && msgOk && hasMod ? true : 'banner=' + !!banner + ',msg=' + msgOk + ',mod=' + hasMod;
+  });
+
+  // diffThree（v0.2.1）：三方对比 —— 基准/本方/对方三栏、双方改同行 both 高亮、统计
+  await step('diffThree', async () => {
+    const base = 'a\\nb\\nc\\nd\\ne\\n';
+    const ours = 'a\\nB-ours\\nc\\nd\\ne\\nours-extra\\n';   // 本方改 b
+    const theirs = 'a\\nB-theirs\\nc\\nd\\ne\\n';             // 对方也改 b（不同）→ both 行
+    app.editor.openDiffTab({
+      three: true,
+      leftLabel: 'base.md', leftContent: base,
+      midLabel: 'ours.md', midContent: ours,
+      rightLabel: 'theirs.md', rightContent: theirs,
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    const host = document.getElementById('diff-host');
+    const t = app.editor.getActiveTab();
+    const isThree = t && t.kind === 'diff' && t.three === true;
+    const rows3 = host.querySelectorAll('.diff3-row:not(.diff-head)').length;
+    const bothN = host.querySelectorAll('.diff3-row.both').length;
+    const stats = (host.querySelector('.diff-stats') || {}).textContent || '';
+    const bothOk = stats.includes('双方改同行 1');
+    app.editor.closeAll();
+    return isThree && rows3 >= 6 && bothN === 1 && bothOk
+      ? true
+      : 'three=' + isThree + ',rows=' + rows3 + ',both=' + bothN + ',stats=' + stats;
+  });
+
+  // treeCompare（v0.2.1）：树右键对比 —— 设为基准 → 另一文件「与基准对比」开对比标签
+  await step('treeCompare', async () => {
+    await api.writeFile(root + '/tc-base.md', 'same\\nbase-line\\n');
+    await api.writeFile(root + '/tc-target.md', 'same\\ntarget-line\\nnew-line\\n');
+    await app.tree.refreshNode(root, true);
+    await new Promise((r) => setTimeout(r, 400));
+    const rows = () => Array.from(document.querySelectorAll('#file-tree .tree-node'));
+    const norm = (p) => String(p).replace(/\\\\/g, '/');
+    const rowB = rows().find((n) => norm(n.dataset.path).endsWith('/tc-base.md'));
+    if (!rowB) return 'no base row';
+    // 右键基准文件 → 设为对比基准
+    rowB.dispatchEvent(new MouseEvent('contextmenu', { clientX: 200, clientY: 200, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 200));
+    const itemBase = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).find((el) => el.textContent.includes('设为对比基准'));
+    if (!itemBase) return 'no set-base item';
+    itemBase.click();
+    await new Promise((r) => setTimeout(r, 200));
+    // 右键目标文件 → 与基准对比
+    const rowT = rows().find((n) => norm(n.dataset.path).endsWith('/tc-target.md'));
+    rowT.dispatchEvent(new MouseEvent('contextmenu', { clientX: 200, clientY: 260, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 200));
+    const itemCmp = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).find((el) => el.textContent.includes('与基准对比'));
+    if (!itemCmp) return 'no compare item';
+    itemCmp.click();
+    await new Promise((r) => setTimeout(r, 500));
+    const t = app.editor.getActiveTab();
+    const isDiff = t && t.kind === 'diff';
+    const host = document.getElementById('diff-host');
+    const modN = host.querySelectorAll('.diff-row.mod').length;
+    const addN = host.querySelectorAll('.diff-row.add').length;
+    app.editor.closeAll();
+    await api.remove(root + '/tc-base.md', false);
+    await api.remove(root + '/tc-target.md', false);
+    return isDiff && modN === 1 && addN === 1 ? true : 'diff=' + isDiff + ',mod=' + modN + ',add=' + addN;
   });
 
   // diffSessionExcluded：对比标签不入会话（重启不恢复临时视图）

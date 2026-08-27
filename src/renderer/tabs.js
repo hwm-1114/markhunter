@@ -385,14 +385,18 @@ export function createEditor(callbacks) {
   }
 
   /** 加载指定字节偏移的窗口内容到 tab（活动标签直接替换 view 文档，非活动标签重建 state）。
-   *  各窗口独立解码：窗口边界可能截断多字节字符（显示为替换符），查看语义可接受。 */
+   *  UTF-8 窗口边界处理（v0.2.1）：多读 4 字节，剥离窗口起始处的前半字符连续字节与结尾处的
+   *  不完整序列头部 —— 边界字符完整归属一侧窗口，不再显示替换符；区域编辑的写回区间
+   *  同步按剥离量校正（regionStart/byteLen）。GBK 窗口维持原独立解码语义（边界偶有替换符）。 */
   async function loadViewerWindow(tab, offset) {
     const c = tab.vwin;
     if (c.inflight) return;
     c.inflight = true;
     try {
       const len = Math.min(VIEWER_WINDOW, c.size - offset);
-      const r = await window.api.readFileRange(tab.path, offset, len);
+      // 尾部多读 4 字节（非文件末尾时），用于补全跨窗口边界的多字节字符
+      const readLen = offset + len < c.size ? len + 4 : len;
+      const r = await window.api.readFileRange(tab.path, offset, readLen);
       if (!c.encoding) {
         try {
           new TextDecoder('utf-8', { fatal: true }).decode(r.bytes);
@@ -406,12 +410,37 @@ export function createEditor(callbacks) {
           }
         }
       }
+      const u8 = r.bytes instanceof Uint8Array ? r.bytes : new Uint8Array(r.bytes);
+      const bufLen = r.end - r.start;
+      let lead = 0;
+      let tail = 0;
+      if (c.encoding === 'utf-8') {
+        if (r.start > 0) {
+          // 起始处的 UTF-8 连续字节（0b10xxxxxx）属于上一窗口末尾字符的前半 → 归上一窗口（其尾部多读已补全）
+          while (lead < 4 && lead < bufLen && (u8[lead] & 0xc0) === 0x80) lead++;
+        }
+        if (r.end < c.size) {
+          // 结尾处的 UTF-8 不完整序列头部 → 连同其前导字节归下一窗口（其起始剥离配合）
+          let i = bufLen - 1 - lead;
+          let cont = 0;
+          while (i >= 0 && (u8[i] & 0xc0) === 0x80 && cont < 3) {
+            i--;
+            cont++;
+          }
+          if (i >= 0) {
+            const b = u8[i];
+            const need = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : b >= 0xc0 ? 2 : 1;
+            if (need > cont + 1) tail = cont + 1; // 序列被截断：前导 + 已有连续字节归下窗
+          }
+        }
+      }
+      const viewBytes = u8.subarray(lead, Math.max(lead, len - tail));
       let text;
       try {
-        text = new TextDecoder(c.encoding).decode(r.bytes);
+        text = new TextDecoder(c.encoding).decode(viewBytes);
       } catch {
         c.encoding = 'latin1';
-        text = new TextDecoder('latin1').decode(r.bytes);
+        text = new TextDecoder('latin1').decode(viewBytes);
       }
       // 二进制内容防护：控制字符（NUL 等）替换为 '·' 显示；窗口标记 binary → 禁止区域编辑
       // （写回会失真）。真实文本大文件（日志等）不含控制字符，不受影响。
@@ -422,9 +451,9 @@ export function createEditor(callbacks) {
         c.binary = false;
       }
       c.offset = r.start;
-      c.byteLen = r.end - r.start;
-      const isActive = activeTab === tab;
-      if (isActive) {
+      c.regionStart = r.start + lead; // 区域编辑写回区间（经边界剥离校正）
+      c.byteLen = Math.max(0, len - lead - tail);
+      if (activeTab === tab) {
         view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
         tab.state = view.state;
       } else {
@@ -432,7 +461,7 @@ export function createEditor(callbacks) {
       }
       tab.dirty = false;
       clearTimeout(tab.saveTimer);
-      if (isActive) {
+      if (activeTab === tab) {
         updateViewerBar(tab);
         updateStatusBar();
       }
@@ -546,7 +575,7 @@ export function createEditor(callbacks) {
     if (!t.editing) return true;
     const content = t.state.doc.toString();
     try {
-      const r = await window.api.spliceFile(t.path, t.vwin.offset, t.vwin.byteLen, content);
+      const r = await window.api.spliceFile(t.path, t.vwin.regionStart !== undefined ? t.vwin.regionStart : t.vwin.offset, t.vwin.byteLen, content);
       t.vwin.size = r.size;
       t.vwin.byteLen = r.bytes;
       t.dirty = false;
@@ -1257,11 +1286,12 @@ export function createEditor(callbacks) {
   /** 打开（或激活）一个对比标签：左右内容只读双栏 diff。
    *  opts: { leftLabel, leftContent, rightLabel, rightContent }；同参数组合已开则激活。 */
   function openDiffTab(opts) {
-    const key = 'diff://' + opts.leftLabel + '⟷' + opts.rightLabel;
+    const key = 'diff://' + (opts.three ? '3:' : '') + opts.leftLabel + '⟷' + (opts.three ? opts.midLabel + '⟷' : '') + opts.rightLabel;
     const existing = tabs.find((t) => t.kind === 'diff' && t.diffKey === key);
     if (existing) {
       existing.leftContent = opts.leftContent;
       existing.rightContent = opts.rightContent;
+      if (opts.three) existing.midContent = opts.midContent;
       switchTab(existing);
       renderDiff(existing); // 内容可能已变，重渲染
       return existing;
@@ -1269,11 +1299,14 @@ export function createEditor(callbacks) {
     const tab = {
       id: ++idSeq,
       path: null, // 不参与会话持久化与文件监听
-      name: '🔀 ' + opts.leftLabel + ' ↔ ' + opts.rightLabel,
+      name: '🔀 ' + (opts.three ? opts.midLabel + ' ↔ ' + opts.rightLabel + '（基准 ' + opts.leftLabel + '）' : opts.leftLabel + ' ↔ ' + opts.rightLabel),
       diffKey: key,
       kind: 'diff',
+      three: !!opts.three,
       leftLabel: opts.leftLabel,
       rightLabel: opts.rightLabel,
+      midLabel: opts.midLabel || '',
+      midContent: opts.midContent || '',
       leftContent: opts.leftContent,
       rightContent: opts.rightContent,
       exportDir: opts.exportDir || '', // 报告导出目录（app.js 传入当前工作目录）
@@ -1529,13 +1562,37 @@ export function createEditor(callbacks) {
 
   // ---------- 外部修改检测：自动重载（有未保存修改时询问） ----------
   window.api.onFileChanged(async ({ path: changedPath }) => {
-    // 普通文本标签（kind 未定义）+ 分段标签（kind='chunked'）参与外部修改同步；图片标签（kind='image'）不参与
-    const tab = tabs.find((t) => t.path === changedPath && (!t.kind || t.kind === 'chunked'));
+    // 普通文本标签（kind 未定义）+ 分段标签（chunked）+ 大文件查看器（viewer-lg）参与外部修改同步；图片标签不参与
+    const tab = tabs.find((t) => t.path === changedPath && (!t.kind || t.kind === 'chunked' || t.kind === 'viewer-lg'));
     if (!tab) return;
     // 自写回声双保险：刚保存后短时间内的变更通知视为自身写入的延迟回声，静默忽略
     // （主进程 markSelfWrite 宽限窗口已吸收绝大多数；此处兜底高频编辑下的残余竞态，
     //  避免打字中弹出「已在外部被修改」确认框打断输入）
     if (tab.lastSavedAt && Date.now() - tab.lastSavedAt < 1200) return;
+    // viewer-lg（v0.2.1）：外部修改 → 刷新文件大小并重读当前窗口（区域编辑中且有修改先确认）
+    if (tab.kind === 'viewer-lg') {
+      if (tab.editing && tab.dirty) {
+        const { confirmDialog } = await import('./ui.js');
+        const ok = await confirmDialog(
+          `「${tab.name}」已在外部被修改，且当前有未保存的区域编辑。\n确定要重新加载窗口（丢弃本地更改）吗？`,
+          '文件已在外部更改'
+        );
+        if (!ok) return;
+      }
+      try {
+        const st = await window.api.stat(tab.path);
+        tab.vwin.size = st.size;
+        const off = Math.max(0, Math.min(tab.vwin.offset, Math.max(0, st.size - VIEWER_WINDOW)));
+        await loadViewerWindow(tab, off);
+        updateViewerBar(tab);
+        updateStatusBar();
+        const { toast } = await import('./ui.js');
+        toast(`已从外部重新加载 ${tab.name}（当前窗口）`);
+      } catch (err) {
+        console.warn('[viewer-lg] 外部修改重载失败:', changedPath, err && err.message ? err.message : err);
+      }
+      return;
+    }
     // 只读标签（跨窗口共享文件的观察窗）静默同步：不弹确认/toast + 节流（800ms trailing），
     // 编辑窗口连续自动保存时不闪不抖
     if (tab.readOnly && !tab.dirty) {
@@ -1651,6 +1708,30 @@ export function createEditor(callbacks) {
   if (btnViewerNext) btnViewerNext.addEventListener('click', () => {
     if (activeTab && activeTab.kind === 'viewer-lg') slideViewer(activeTab, +1);
   });
+  // ②e：提取当前窗口内容为新文件（同目录另存 → 正常打开编辑；二进制窗口禁用）
+  const btnViewerExtract = document.getElementById('btn-viewer-extract');
+  if (btnViewerExtract) {
+    btnViewerExtract.addEventListener('click', () => {
+      const t = activeTab;
+      if (!t || t.kind !== 'viewer-lg') return;
+      if (t.vwin.binary) {
+        toast('二进制窗口内容不含可提取的文本（控制字符已替换显示）');
+        return;
+      }
+      const stem = t.name.replace(/\.[^.]+$/, '') || 'extract';
+      showPrompt(
+        '提取为新文件',
+        '文件名（保存到当前文件所在目录）',
+        `extract-${stem}-${Math.floor(t.vwin.offset / 1048576)}MB.txt`,
+        async (val) => {
+          const p = dirOf(t.path) + '\\' + val;
+          await window.api.writeFile(p, t.state.doc.toString());
+          toast('已提取：' + val);
+          openFile(p);
+        }
+      );
+    });
+  }
 
   return { openFile, openDiffTab, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs, scrollToTop, scrollToBottom, viewerJump, setViewerEditing, revealViewerAt, slideViewerWindow: slideViewer, setTabReadOnly, toggleReadOnly };
 }

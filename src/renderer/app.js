@@ -411,8 +411,10 @@ async function boot() {
   let sessionTimer = null;
   let lastExtToastPath = null; // 需求1：外部文件 toast 去重（同一路径只提示一次）
 
-  /** 将当前打开标签快照写入设置；force=true 立即落盘，否则 600ms 防抖合并 */
+  /** 将当前打开标签快照写入设置；force=true 立即落盘，否则 600ms 防抖合并。
+   *  多窗口（v0.2.1）：仅焦点窗口写入 —— 后台窗口的标签变化不再覆盖最后活动窗口的会话。 */
   function persistSession(force = false) {
+    if (!document.hasFocus()) return;
     if (!force) {
       clearTimeout(sessionTimer);
       sessionTimer = setTimeout(() => persistSession(true), 600);
@@ -488,6 +490,21 @@ async function boot() {
       tree.reveal(p).catch(() => {}); // 树定位到该文件
     },
     onOpenDir: () => {},
+    // v0.2.1：树右键「与基准对比」—— 读取两文件开对比标签（超限走截断对比）
+    onCompareFiles: async (base, target) => {
+      try {
+        const [a, b] = await Promise.all([window.api.readFile(base), window.api.readFile(target)]);
+        editor.openDiffTab({
+          leftLabel: base.split(/[\\/]/).pop(),
+          leftContent: a.content,
+          rightLabel: target.split(/[\\/]/).pop(),
+          rightContent: b.content,
+          exportDir: state.rootDir || '',
+        });
+      } catch (err) {
+        toast('读取对比文件失败：' + (err.message || err));
+      }
+    },
     onSwitchRoot: (dir) => openDirFromPath(dir), // 需求1：外部区目录行「切换工作目录到此目录」
     onClosePath: (p, newPath) => {
       const tab = editor.findTabByPath(p);
@@ -945,6 +962,43 @@ async function boot() {
     }
     field.append(lbl, sel);
     body.appendChild(field);
+
+    // v0.2.1 三方对比（基准 / 本方=当前 / 对方）：需要至少两个其它文本标签
+    const threeField = document.createElement('div');
+    threeField.className = 'field';
+    const threeRow = document.createElement('label');
+    threeRow.className = 'check-row';
+    const threeChk = document.createElement('input');
+    threeChk.type = 'checkbox';
+    const threeTxt = document.createElement('span');
+    threeTxt.textContent = '三方对比（基准 · 本方=当前 · 对方）';
+    threeRow.append(threeChk, threeTxt);
+    const baseSel = document.createElement('select');
+    baseSel.className = 'field-select';
+    baseSel.style.marginTop = '6px';
+    const baseLbl = document.createElement('label');
+    baseLbl.textContent = '基准文件（共同原始版本）：';
+    baseLbl.style.display = 'none';
+    baseSel.style.display = 'none';
+    for (const t of others) {
+      if (t === cur || t.state.doc.length > 20 * 1024 * 1024) continue;
+      if (String(t.id) === sel.options[sel.selectedIndex]?.value) continue;
+      const o = document.createElement('option');
+      o.value = String(t.id);
+      o.textContent = '▣ ' + t.name;
+      baseSel.appendChild(o);
+    }
+    threeChk.addEventListener('change', () => {
+      const on = threeChk.checked && baseSel.options.length > 0;
+      baseLbl.style.display = on ? '' : 'none';
+      baseSel.style.display = on ? '' : 'none';
+      if (threeChk.checked && baseSel.options.length === 0) {
+        threeChk.checked = false;
+        toast('三方对比需要至少两个其它打开的文本标签（基准 + 对方）');
+      }
+    });
+    threeField.append(threeRow, baseLbl, baseSel);
+    body.appendChild(threeField);
     openModal({
       title: '文档对比',
       body,
@@ -980,6 +1034,22 @@ async function boot() {
               }
             } catch (err) {
               toast('读取对比内容失败：' + (err.message || err));
+              return;
+            }
+            // 三方模式：基准=baseSel 所选标签；本方=当前；对方=sel 所选标签（标签模式）
+            if (threeChk.checked && baseSel.style.display !== 'none' && v !== '__disk__' && v !== '__clip__') {
+              const baseTab = tabsById(baseSel.value);
+              if (!baseTab) return;
+              editor.openDiffTab({
+                three: true,
+                leftLabel: baseTab.name,
+                leftContent: baseTab.state.doc.toString(),
+                midLabel: cur.name + '（本方）',
+                midContent: rightContent,
+                rightLabel: leftLabel,
+                rightContent: leftContent,
+                exportDir: state.rootDir || '',
+              });
               return;
             }
             editor.openDiffTab({

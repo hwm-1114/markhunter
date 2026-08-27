@@ -89,6 +89,13 @@ export function computeDiffModel(left, right) {
   return { rows, stats, blocks };
 }
 
+/** 单元格文本显示截断：超长行只渲染前段 + 长度提示（防 20MB 级单行卡死渲染线程） */
+const CELL_MAX_CHARS = 4000;
+function cellText(t) {
+  if (t.length <= CELL_MAX_CHARS) return t;
+  return t.slice(0, CELL_MAX_CHARS) + ` …（该行共 ${t.length.toLocaleString('zh-CN')} 字符，已截断显示）`;
+}
+
 /** 词级片段转 HTML（hl=true 的片段加高亮 span） */
 function segHtml(segs) {
   if (!segs) return null;
@@ -104,13 +111,13 @@ function rowEl(row) {
   lno.textContent = row.ln || '';
   const ltx = document.createElement('span');
   ltx.className = 'diff-cell diff-l';
-  ltx.innerHTML = row.hl ? segHtml(row.hl.l) : escapeHtml(row.lt);
+  ltx.innerHTML = row.hl ? segHtml(row.hl.l) : escapeHtml(cellText(row.lt));
   const rno = document.createElement('span');
   rno.className = 'diff-no';
   rno.textContent = row.rn || '';
   const rtx = document.createElement('span');
   rtx.className = 'diff-cell diff-r';
-  rtx.innerHTML = row.hl ? segHtml(row.hl.r) : escapeHtml(row.rt);
+  rtx.innerHTML = row.hl ? segHtml(row.hl.r) : escapeHtml(cellText(row.rt));
   el.append(lno, ltx, rno, rtx);
   return el;
 }
@@ -119,15 +126,32 @@ function rowEl(row) {
  *  tab: { kind:'diff', leftLabel, rightLabel, leftContent, rightContent, scrollTop } */
 export function renderDiffTab(tab, host, callbacks = {}) {
   host.innerHTML = '';
-  if (tab.leftContent.length > DIFF_MAX_BYTES || tab.rightContent.length > DIFF_MAX_BYTES) {
-    const err = document.createElement('div');
-    err.className = 'diff-truncated';
-    err.textContent = `对比内容超出上限（单侧 ${formatSize(DIFF_MAX_BYTES)}）：左 ${formatSize(tab.leftContent.length)} / 右 ${formatSize(tab.rightContent.length)}。jsdiff 为 O(ND) 复杂度，超大内容不适用。`;
-    host.appendChild(err);
+  // v0.2.1：超限截断对比（替换硬拒绝）—— 左右各保留前 DIFF_MAX_BYTES，醒目横幅提示
+  let lc = tab.leftContent;
+  let rc = tab.rightContent;
+  let truncated = false;
+  if (lc.length > DIFF_MAX_BYTES) {
+    lc = lc.slice(0, DIFF_MAX_BYTES);
+    truncated = true;
+  }
+  if (rc.length > DIFF_MAX_BYTES) {
+    rc = rc.slice(0, DIFF_MAX_BYTES);
+    truncated = true;
+  }
+  tab._leftUsed = lc;
+  tab._rightUsed = rc;
+  if (truncated) {
+    const banner = document.createElement('div');
+    banner.className = 'diff-truncated diff-trunc-banner';
+    banner.textContent = `⚠ 内容超出 ${formatSize(DIFF_MAX_BYTES)}（左 ${formatSize(tab.leftContent.length)} / 右 ${formatSize(tab.rightContent.length)}），已截断仅对比前 ${formatSize(DIFF_MAX_BYTES)} —— 截断点之后的差异不在本视图中`;
+    host.appendChild(banner);
+  }
+  if (tab.three) {
+    renderThreeDiff(tab, host, callbacks);
     return;
   }
 
-  const model = computeDiffModel(tab.leftContent, tab.rightContent);
+  const model = computeDiffModel(lc, rc);
   tab._model = model; // 冒烟断言用
 
   // —— 工具栏 ——
@@ -235,7 +259,7 @@ export function renderDiffTab(tab, host, callbacks = {}) {
 
 /** 导出 Markdown 对比报告（unified diff 风格代码块） */
 export function buildDiffReport(tab) {
-  const model = tab._model || computeDiffModel(tab.leftContent, tab.rightContent);
+  const model = tab._model || computeDiffModel(tab._leftUsed ?? tab.leftContent, tab._rightUsed ?? tab.rightContent);
   const lines = [
     `# 对比报告：${tab.leftLabel} ↔ ${tab.rightLabel}`,
     '',
@@ -252,4 +276,220 @@ export function buildDiffReport(tab) {
   }
   lines.push('```');
   return lines.join('\n');
+}
+
+// ============================================================
+// v0.2.1 三方对比（基准 base / 本方 ours / 对方 theirs）：三栏只读视图
+// 左右两栏各自与基准做行级 diff，按基准行号对齐合并成三栏行；
+// 「双方均改动且不同」的行以 both 高亮（潜在冲突行）。合并/冲突解决编辑不在本视图范围。
+// ============================================================
+
+/** 把一侧与基准的 diff 模型折叠为按基准行号的映射（附加行挂在上一基准行） */
+function foldByBase(model) {
+  const map = new Map(); // baseLine -> { text, type }（type: same|mod|del|add）
+  let lastBase = 0;
+  for (const r of model.rows) {
+    if (r.type === 'eq') {
+      map.set(r.ln, { text: r.rt, type: 'same' });
+      lastBase = r.ln;
+    } else if (r.type === 'mod') {
+      map.set(r.ln, { text: r.rt, type: 'mod' });
+      lastBase = r.ln;
+    } else if (r.type === 'del') {
+      map.set(r.ln, { text: '', type: 'del' });
+      lastBase = r.ln;
+    } else {
+      // add：无基准行号 → 挂到上一基准行（附加段）
+      const prev = map.get(lastBase) || { text: '', type: lastBase === 0 ? 'add' : 'same' };
+      const arr = prev.extra || (prev.extra = []);
+      arr.push(r.rt);
+      map.set(lastBase, prev);
+    }
+  }
+  return map;
+}
+
+function renderThreeDiff(tab, host, callbacks) {
+  const base = tab._leftUsed ?? tab.leftContent; // 复用截断变量：三方模式下 base 存于 leftContent
+  const ours = tab._midUsed ?? tab.midContent;
+  const theirs = tab._rightUsed ?? tab.rightContent;
+  // 三方各自截断
+  let b = base, o = ours, t = theirs;
+  if (b.length > DIFF_MAX_BYTES) b = b.slice(0, DIFF_MAX_BYTES);
+  if (o.length > DIFF_MAX_BYTES) o = o.slice(0, DIFF_MAX_BYTES);
+  if (t.length > DIFF_MAX_BYTES) t = t.slice(0, DIFF_MAX_BYTES);
+  tab._midUsed = o;
+
+  const m1 = computeDiffModel(b, o); // 基准 ↔ 本方
+  const m2 = computeDiffModel(b, t); // 基准 ↔ 对方
+  const f1 = foldByBase(m1);
+  const f2 = foldByBase(m2);
+  const baseLines = b.length ? b.split('\n') : [];
+  if (baseLines.length && baseLines[baseLines.length - 1] === '') baseLines.pop();
+
+  const stats = { oursAdd: m1.stats.add, oursMod: m1.stats.mod + m1.stats.del, theirsAdd: m2.stats.add, theirsMod: m2.stats.mod + m2.stats.del, both: 0 };
+  const rows = [];
+  const blocks = [];
+  for (let i = 1; i <= baseLines.length; i++) {
+    const s1 = f1.get(i);
+    const s2 = f2.get(i);
+    const t1 = s1 ? s1.type : 'same';
+    const t2 = s2 ? s2.type : 'same';
+    const both = (t1 === 'mod' || t1 === 'del') && (t2 === 'mod' || t2 === 'del') &&
+      ((s1.text || '') !== (s2.text || ''));
+    if (both) stats.both++;
+    const changed = t1 !== 'same' || t2 !== 'same' || !!(s1 && s1.extra) || !!(s2 && s2.extra);
+    if (changed) blocks.push(rows.length);
+    rows.push({
+      bn: i,
+      bt: baseLines[i - 1],
+      o: { text: s1 ? s1.text : baseLines[i - 1], type: t1, extra: s1 && s1.extra },
+      t: { text: s2 ? s2.text : baseLines[i - 1], type: t2, extra: s2 && s2.extra },
+      both,
+    });
+  }
+  tab._model = { rows, stats, blocks }; // 导出/状态栏复用（结构兼容：rows/stats/blocks）
+
+  // —— 工具栏 ——
+  const bar = document.createElement('div');
+  bar.className = 'diff-bar';
+  const lblB = document.createElement('span');
+  lblB.className = 'diff-label';
+  lblB.textContent = '▣ 基准：' + tab.leftLabel;
+  lblB.title = tab.leftLabel;
+  const st = document.createElement('span');
+  st.className = 'diff-stats';
+  st.innerHTML = `本方 <span class="ds-add">+${stats.oursAdd}</span>/<span class="ds-mod">~${stats.oursMod}</span>` +
+    ` · 对方 <span class="ds-add">+${stats.theirsAdd}</span>/<span class="ds-mod">~${stats.theirsMod}</span>` +
+    ` · <span class="ds-del">⚠ 双方改同行 ${stats.both}</span>`;
+  const curBadge = document.createElement('span');
+  curBadge.className = 'diff-cur';
+  let blockIdx = -1;
+  const showCur = () => {
+    curBadge.textContent = blocks.length ? `${blockIdx < 0 ? 0 : blockIdx + 1}/${blocks.length}` : '0/0';
+  };
+  const mkBtn = (text, title, fn) => {
+    const b2 = document.createElement('button');
+    b2.className = 'tbtn small';
+    b2.textContent = text;
+    b2.title = title;
+    b2.addEventListener('click', fn);
+    return b2;
+  };
+  const scroller = document.createElement('div');
+  scroller.className = 'diff-scroller';
+  const gotoBlock = (dir) => {
+    if (!blocks.length) return;
+    blockIdx = ((blockIdx + dir) % blocks.length + blocks.length) % blocks.length;
+    showCur();
+    const row = scroller.querySelector(`[data-i="${blocks[blockIdx]}"]`);
+    if (row) {
+      scroller.querySelectorAll('.diff3-row.current').forEach((r) => r.classList.remove('current'));
+      row.classList.add('current');
+      row.scrollIntoView({ block: 'center' });
+    }
+  };
+  bar.append(
+    lblB,
+    mkBtn('↑ 上一处', '跳到上一处变更', () => gotoBlock(-1)),
+    curBadge,
+    mkBtn('↓ 下一处', '跳到下一处变更', () => gotoBlock(+1)),
+    st,
+    mkBtn('⇄ 交换本方/对方', '交换左右两侧重新对比', () => {
+      const m = tab.midContent, ml = tab.midLabel;
+      tab.midContent = tab.rightContent;
+      tab.midLabel = tab.rightLabel;
+      tab.rightContent = m;
+      tab.rightLabel = ml;
+      tab.scrollTop = 0;
+      renderDiffTab(tab, host, callbacks);
+    }),
+    mkBtn('📤 导出报告', '导出三方对比 Markdown 报告', () => callbacks.onExport && callbacks.onExport())
+  );
+  const lblO = document.createElement('span');
+  lblO.className = 'diff-label';
+  lblO.textContent = '◀ 本方：' + tab.midLabel;
+  const lblT = document.createElement('span');
+  lblT.className = 'diff-label';
+  lblT.textContent = '对方：' + tab.rightLabel + ' ▶';
+  lblT.style.marginLeft = 'auto';
+  bar.append(lblO, lblT);
+  showCur();
+  host.appendChild(bar);
+
+  // —— 三栏滚动区 ——
+  const head = document.createElement('div');
+  head.className = 'diff3-row diff-head';
+  head.innerHTML = `<span class="diff-no"></span><span class="diff-cell">基准（${escapeHtml(tab.leftLabel)}）</span>` +
+    `<span class="diff-no"></span><span class="diff-cell">本方（${escapeHtml(tab.midLabel)}）</span>` +
+    `<span class="diff-no"></span><span class="diff-cell">对方（${escapeHtml(tab.rightLabel)}）</span>`;
+  scroller.appendChild(head);
+  host.appendChild(scroller);
+
+  const RENDER3_BATCH = RENDER_BATCH;
+  const renderRange = (from, to) => {
+    const frag = document.createDocumentFragment();
+    for (let i = from; i < to && i < rows.length; i++) {
+      const r = rows[i];
+      const el = document.createElement('div');
+      el.className = 'diff3-row ' + (r.both ? 'both' : '');
+      el.dataset.i = i;
+      const mk = (no, text, cls) => {
+        const n = document.createElement('span');
+        n.className = 'diff-no';
+        n.textContent = no || '';
+        const c = document.createElement('span');
+        c.className = 'diff-cell ' + cls;
+        c.textContent = cellText(text);
+        el.append(n, c);
+      };
+      mk(r.bn, r.bt, 'diff-b');
+      mk(r.bn, r.o.text, 'diff-l ' + r.o.type);
+      mk(r.bn, r.t.text, 'diff-r ' + r.t.type);
+      frag.appendChild(el);
+      // 附加行（两侧新增且无基准行号）：紧跟锚点行的独立行
+      const oEx = (r.o && r.o.extra) || [];
+      const tEx = (r.t && r.t.extra) || [];
+      const n = Math.max(oEx.length, tEx.length);
+      for (let k = 0; k < n; k++) {
+        const er = document.createElement('div');
+        er.className = 'diff3-row add';
+        const mk2 = (text, cls) => {
+          const sn = document.createElement('span');
+          sn.className = 'diff-no';
+          const sc = document.createElement('span');
+          sc.className = 'diff-cell ' + cls;
+          sc.textContent = cellText(text);
+          er.append(sn, sc);
+        };
+        mk2('', 'diff-b');
+        mk2(oEx[k] !== undefined ? oEx[k] : '', 'diff-l' + (oEx[k] !== undefined ? ' add' : ''));
+        mk2(tEx[k] !== undefined ? tEx[k] : '', 'diff-r' + (tEx[k] !== undefined ? ' add' : ''));
+        frag.appendChild(er);
+      }
+    }
+    return frag;
+  };
+  let rendered = Math.min(RENDER3_BATCH, rows.length);
+  scroller.appendChild(renderRange(0, rendered));
+  if (rendered < rows.length) {
+    const more = document.createElement('button');
+    more.className = 'tbtn small diff-more';
+    more.textContent = `加载更多（已渲染 ${rendered} / ${rows.length} 行）`;
+    more.addEventListener('click', () => {
+      const next = Math.min(rendered + RENDER3_BATCH, rows.length);
+      scroller.insertBefore(renderRange(rendered, next), more);
+      rendered = next;
+      if (rendered >= rows.length) more.remove();
+      else more.textContent = `加载更多（已渲染 ${rendered} / ${rows.length} 行）`;
+    });
+    scroller.appendChild(more);
+  }
+
+  const target = typeof tab.scrollTop === 'number' ? tab.scrollTop : 0;
+  const restore = (n) => {
+    scroller.scrollTop = target;
+    if (n > 0) requestAnimationFrame(() => restore(n - 1));
+  };
+  restore(4);
 }

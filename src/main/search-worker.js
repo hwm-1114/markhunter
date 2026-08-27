@@ -14,7 +14,6 @@
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
-const readline = require('readline');
 
 const SKIP_DIRS = new Set([
   'node_modules', '.git', '.svn', '.hg', '.idea', '.vscode',
@@ -29,33 +28,58 @@ const TEXT_EXT = new Set([
 ]);
 
 const MAX_SEARCH_FILE_MB = 10;      // 小文件路径上限：整读进内存逐行匹配
-const MAX_STREAM_FILE_MB = 4096;    // 1B-4：大文件流式扫描上限（readline 流式逐行，内存有界）
+const MAX_STREAM_FILE_MB = 4096;    // 1B-4：大文件流式扫描上限（流式逐行 + 编码探测，内存有界）
 const PROGRESS_EVERY = 25;          // 每扫描 25 个文件回传一次进度（1GB 工程 ≈ 数千文件 → 数百条进度）
 
-/** 大文件流式行扫描（>10MB）：readline 逐行（8MB 高水位），行号全局精确；
+/** 大文件流式行扫描（>10MB）：按块读取 + TextDecoder 增量解码（v0.2.1 编码探测：
+ *  首块 utf-8 严格解码失败 → GBK；正确处理分块边界截断的多字节字符），行号全局精确；
  *  结果行文本截断 1000 字符防超长行撑爆结果集。返回是否达到 maxResults。 */
 async function scanStream(file, q, results, maxResults, isCancelled) {
-  const rl = readline.createInterface({
-    input: fs.createReadStream(file, { encoding: 'utf8', highWaterMark: 8 * 1024 * 1024 }),
-    crlfDelay: Infinity,
-  });
+  let enc = null;
+  let dec = null;
+  let buf = '';
   let ln = 0;
   let check = 0;
+  const stream = fs.createReadStream(file, { highWaterMark: 8 * 1024 * 1024 });
   try {
-    for await (const line of rl) {
-      ln++;
-      if (++check >= 50000) {
-        check = 0;
-        if (isCancelled()) return true; // 任务被替换/取消：停止扫描本文件
+    for await (const chunk of stream) {
+      if (!enc) {
+        // 首块探测：截去尾部 4 字节（避免块边界截断多字节字符导致误判）
+        const probe = chunk.subarray(0, Math.max(0, chunk.length - 4));
+        try {
+          new TextDecoder('utf-8', { fatal: true }).decode(probe);
+          enc = 'utf-8';
+        } catch {
+          enc = 'gbk'; // Windows 环境大文件中文编码次选（latin1 内容误判为 gbk 时匹配行为与原跳过一致）
+        }
+        dec = new TextDecoder(enc, { stream: true });
       }
-      const idx = line.toLowerCase().indexOf(q);
-      if (idx >= 0) {
-        results.push({ file, line: ln, text: line.length > 1000 ? line.slice(0, 1000) : line, matchIndex: idx });
-        if (results.length >= maxResults) return true;
+      buf += dec.decode(chunk, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).replace(/\r$/, '');
+        buf = buf.slice(idx + 1);
+        ln++;
+        if (++check >= 50000) {
+          check = 0;
+          if (isCancelled()) return true;
+        }
+        const hit = line.toLowerCase().indexOf(q);
+        if (hit >= 0) {
+          results.push({ file, line: ln, text: line.length > 1000 ? line.slice(0, 1000) : line, matchIndex: hit });
+          if (results.length >= maxResults) return true;
+        }
+      }
+    }
+    if (buf.length) {
+      ln++;
+      const hit = buf.toLowerCase().indexOf(q);
+      if (hit >= 0) {
+        results.push({ file, line: ln, text: buf.length > 1000 ? buf.slice(0, 1000) : buf, matchIndex: hit });
       }
     }
   } finally {
-    rl.close();
+    stream.destroy();
   }
   return false;
 }
