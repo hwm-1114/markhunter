@@ -174,7 +174,7 @@ function toRendererSettings(s) {
 
 function registerSettingsIpc() {
   ipcMain.handle('settings:get', () => toRendererSettings(loadSettings()));
-  ipcMain.handle('settings:set', (_e, patch) => {
+  ipcMain.handle('settings:set', (e, patch) => {
     const p = sanitizePatch(patch);
     if (p.aiApiKeyClear === true) {
       // 清除密钥
@@ -192,12 +192,21 @@ function registerSettingsIpc() {
         delete p.aiApiKey;
       }
     }
-    // S6 延续：theme 值须在 36 个合法主题名内（非字符串/非法名一律静默丢弃，回退默认）
+    // S6 延续：theme 值须在合法主题名内（非字符串/非法名一律静默丢弃，回退默认）
     if ('theme' in p && (typeof p.theme !== 'string' || !THEME_NAMES.includes(p.theme))) {
       delete p.theme;
     }
     delete p.aiApiKeyClear; // 保险：命令键不落盘
-    return toRendererSettings(saveSettings(p));
+    const result = toRendererSettings(saveSettings(p));
+    // v0.1.51 多窗口：设置/主题变更广播到其它窗口（排除发起窗口），各窗口即时换肤/更新缓存
+    try {
+      const { BrowserWindow } = require('electron');
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (w.isDestroyed() || w.webContents === e.sender) continue;
+        w.webContents.send('settings:changed', result);
+      }
+    } catch { /* 忽略广播失败 */ }
+    return result;
   });
 }
 

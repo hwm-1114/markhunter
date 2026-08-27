@@ -1,4 +1,4 @@
-const { app, ipcMain } = require('electron');
+const { app, ipcMain, BrowserWindow } = require('electron');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -6,6 +6,15 @@ const { isApproved } = require('./security');
 
 let currentProc = null;
 let currentStartTime = 0;
+
+/** 发起窗口（v0.1.51 多窗口：输出/退出事件只发给启动 Python 的窗口） */
+function winOf(e) {
+  try {
+    return BrowserWindow.fromWebContents(e.sender);
+  } catch {
+    return null;
+  }
+}
 
 /** 按进程树终止（win32 用 taskkill /T /F，防遗留子进程；其余平台 kill 直杀）。
  *  done 为可选回调（等待 taskkill 退出后触发）；同步失败静默忽略。 */
@@ -49,6 +58,7 @@ function disposeCurrentProc() {
 const BATCH_INTERVAL_MS = 60; // ~50-100ms 窗口内取 60ms（D7：4KB 或 50ms 先到者，此处 60ms 量级一致）
 const BATCH_MAX_BYTES = 4096;
 
+/** 输出聚合器：事件只发发起窗口（getWin 闭包持有该窗口引用，销毁即丢弃残余） */
 function createOutputBatcher(getWin) {
   const buf = { stdout: '', stderr: '' };
   let total = 0;       // 当前批累计字节数（utf8 近似按字符数计，量级足够）
@@ -203,7 +213,7 @@ function probeCommonPaths() {
   return candidates;
 }
 
-function registerPythonIpc(getWindow) {
+function registerPythonIpc(_getWindow) {
   // 自动检测可用解释器（PATH 命令 + 注册表 + 常见安装位置，返回绝对路径）
   ipcMain.handle('python:detect', async () => {
     const found = [];
@@ -244,11 +254,11 @@ function registerPythonIpc(getWindow) {
     if (currentProc) {
       disposeCurrentProc(); // 旧进程：摘监听 + 进程树终止（普通 kill 会遗留子进程）
     }
-    const win = getWindow();
-    if (!win) throw new Error('窗口不可用');
+    const win = winOf(_e); // v0.1.51：输出/退出只发发起窗口
+    if (!win || win.isDestroyed()) throw new Error('窗口不可用');
     currentStartTime = Date.now();
     // P4：输出聚合器（stdout/stderr 合批发送，退出时 flush 残余）
-    const batcher = createOutputBatcher(getWindow);
+    const batcher = createOutputBatcher(() => win);
     // 使用 ['--', filePath]：避免以 '-' 开头的文件名被解释为解释器选项
     const child = spawn(interpreter, ['--', filePath], {
       cwd: path.dirname(filePath),

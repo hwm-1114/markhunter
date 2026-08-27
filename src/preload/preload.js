@@ -63,6 +63,13 @@ contextBridge.exposeInMainWorld('api', {
   // 右键菜单打开目录
   onOpenDir: (cb) => ipcRenderer.on('open-dir', (_e, dir) => cb(dir)),
 
+  // v0.1.51 多窗口
+  openNewWindow: () => ipcRenderer.invoke('win:new'),
+  // 设置/主题跨窗口广播（其它窗口改设置时本窗口即时应用）
+  onSettingsChanged: (cb) => ipcRenderer.on('settings:changed', (_e, s) => cb(s)),
+  // 同文件被另一窗口打开（本窗口为后来者 → 自动转只读；标签右键可解除）
+  onFileSharedOpen: (cb) => ipcRenderer.on('file-shared-open', (_e, d) => cb(d)),
+
   // AI 大模型
   aiChat: (payload) => ipcRenderer.invoke('ai:chat', payload),
   aiAbort: () => ipcRenderer.invoke('ai:abort'),

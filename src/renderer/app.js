@@ -1005,6 +1005,9 @@ async function boot() {
     } else if (mod && e.key === '0') {
       e.preventDefault();
       preview.resetZoom();
+    } else if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
+      e.preventDefault();
+      window.api.openNewWindow(); // 多窗口：每窗口独立标签/目录，共享设置与主题
     } else if (mod && e.key.toLowerCase() === 'w') {
       e.preventDefault();
       const tab = getActiveTab();
@@ -1017,6 +1020,31 @@ async function boot() {
       if (!$('#bottom-panel').classList.contains('collapsed')) {
         $('#bottom-panel').classList.add('collapsed');
       }
+    }
+  });
+
+  // ---------- 多窗口（v0.1.51） ----------
+  // 其它窗口改设置/主题 → 本窗口即时应用（state 缓存同步；不重开已打开的设置弹窗）
+  window.api.onSettingsChanged((s) => {
+    if (!s || typeof s !== 'object') return;
+    const prev = state.settings;
+    state.settings = s;
+    if (s.theme && s.theme !== document.documentElement.getAttribute('data-theme')) {
+      applyTheme(s.theme);
+    }
+    if (s.scrollbarWidth && s.scrollbarWidth !== prev.scrollbarWidth) {
+      applyScrollbarWidth(s.scrollbarWidth);
+    }
+    if (s.wordWrap !== prev.wordWrap) editor.setWordWrap(s.wordWrap);
+    if (s.indentSize !== prev.indentSize) editor.setIndentSize(s.indentSize);
+  });
+  // 同文件已在另一窗口打开（本窗口为后来者）→ 自动转只读，编辑仍可在标签右键解除；
+  // 编辑窗口保存后经 file-changed 静默同步到本窗口（tabs.js 只读节流，不弹提示不抖动）
+  window.api.onFileSharedOpen(({ path: sharedPath }) => {
+    const tab = editor.findTabByPath(sharedPath);
+    if (tab && !tab.kind) {
+      editor.setTabReadOnly(tab, true);
+      toast(`「${tab.name}」已在另一窗口打开，本窗口以只读打开（右键标签可解除）`);
     }
   });
 

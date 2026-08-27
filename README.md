@@ -92,7 +92,7 @@
 ```bash
 npm install     # 安装依赖
 npm start       # 启动应用
-npm run smoke   # 端到端冒烟测试（145 项自动化验证）
+npm run smoke   # 端到端冒烟测试（153 项自动化验证）
 ```
 
 ## 构建打包

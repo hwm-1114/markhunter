@@ -1,9 +1,17 @@
 // AI 大模型接口：OpenAI 兼容 /chat/completions（function calling 工具循环）
-const { ipcMain } = require('electron');
+const { ipcMain, BrowserWindow } = require('electron');
 const { getSettings } = require('./settings');
 
 let abortController = null;
 let pendingToolResolve = null;
+
+function winOf(e) {
+  try {
+    return BrowserWindow.fromWebContents(e.sender);
+  } catch {
+    return null;
+  }
+}
 
 // 工具定义（OpenAI function schema）
 const TOOLS = [
@@ -17,7 +25,7 @@ const TOOLS = [
   { type: 'function', function: { name: 'open_file', description: '打开工作目录中的文件（支持所有可显示类型）', parameters: { type: 'object', properties: { name: { type: 'string', description: '文件名或相对路径' } }, required: ['name'] } } },
 ];
 
-function registerAiIpc(getWindow) {
+function registerAiIpc(_getWindow) {
   ipcMain.handle('ai:chat', async (_e, payload) => {
     const { messages, baseUrl, model } = payload || {};
     // S5：API Key 一律从主进程设置（safeStorage 解密）读取，忽略渲染进程传入值
@@ -35,7 +43,7 @@ function registerAiIpc(getWindow) {
     }
     const apiUrl = url + '/chat/completions';
     abortController = new AbortController();
-    const win = getWindow();
+    const win = winOf(_e); // v0.1.51：工具调用事件只发发起窗口
     const current = messages.map((m) => ({ role: m.role, content: m.content }));
 
     try {

@@ -3,29 +3,32 @@
 // （搜索期间保存文件 / 改设置等 IPC 即时响应）。
 // 对外契约保持不变：search:global 返回 [{ file, line, text, matchIndex }]（上限 maxResults=3000），
 // 渲染层调用方（globalsearch.js / AI search_documents / 冒烟）零改动。
-const { ipcMain, utilityProcess, app } = require('electron');
+const { ipcMain, utilityProcess, app, BrowserWindow } = require('electron');
 const path = require('path');
 
 const SEARCH_TIMEOUT_MS = 120000; // 超时兜底：单任务最长 120s（1GB 工程 ≈ 4s 量级，留足余量）
 let worker = null;
 let nextId = 1;
 let activeId = null;              // 当前活动任务 id（同一时刻至多一个，新任务先取消旧任务）
-const pending = new Map();        // id -> { resolve, reject, timer }
+const pending = new Map();        // id -> { resolve, reject, timer, win }
 
-function getWindow() {
-  const { BrowserWindow } = require('electron');
-  const wins = BrowserWindow.getAllWindows();
-  return wins.length > 0 ? wins[0] : null;
+function winOf(e) {
+  try {
+    return BrowserWindow.fromWebContents(e.sender);
+  } catch {
+    return null;
+  }
 }
 
 function handleWorkerMessage(msg) {
   if (!msg || typeof msg !== 'object' || !msg.id) return;
   const p = pending.get(msg.id);
   if (msg.type === 'progress') {
-    // 进度事件：透传渲染进程（globalsearch.js 用于「已扫描 N 个文件」提示；无订阅方则忽略）
-    const win = getWindow();
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('search:progress', { id: msg.id, scanned: msg.scanned, matches: msg.matches });
+    // 进度事件：只发发起任务的窗口（v0.1.51 多窗口路由）
+    if (p && p.win && !p.win.isDestroyed()) {
+      try {
+        p.win.webContents.send('search:progress', { id: msg.id, scanned: msg.scanned, matches: msg.matches });
+      } catch { /* 窗口销毁竞态 */ }
     }
     return;
   }
@@ -76,6 +79,7 @@ function registerSearchIpc() {
     const id = nextId++;
     activeId = id;
     const w = getWorker();
+    const reqWin = winOf(_e); // 进度事件的目的窗口
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!pending.has(id)) return;
@@ -83,7 +87,7 @@ function registerSearchIpc() {
         try { w.postMessage({ id, type: 'cancel' }); } catch { /* 忽略 */ }
         reject(new Error('搜索超时，已终止'));
       }, SEARCH_TIMEOUT_MS);
-      pending.set(id, { resolve, reject, timer });
+      pending.set(id, { resolve, reject, timer, win: reqWin });
       try {
         w.postMessage({ id, type: 'search', dir, query, maxResults });
       } catch (err) {

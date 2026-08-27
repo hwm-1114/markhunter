@@ -7,92 +7,113 @@ const { registerSettingsIpc, loadSettings, DARK_THEMES } = require('./settings')
 const { registerWatchIpc, markSelfWrite, stopAllWatches } = require('./filewatch');
 const { registerAiIpc } = require('./ai');
 
-let mainWindow = null;
+let mainWindow = null;        // 首窗口（smoke/测试钩子绑定；多窗口下仅作其中之一）
+const allWindows = new Set(); // v0.1.51：窗口集合（window-all-closed 以其清空为准）
 
 function getWindow() {
-  return mainWindow;
+  return mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
 }
 
-// 右键菜单传入的目录参数：MarkHunter.exe --dir <path>
-const dirArg = (() => {
-  const i = process.argv.indexOf('--dir');
-  if (i >= 0 && process.argv[i + 1]) return process.argv[i + 1];
+// 右键菜单传入的目录参数：MarkHunter.exe --dir <path>（second-instance 携带 argv）
+function extractDirArg(argv) {
+  const i = argv.indexOf('--dir');
+  if (i >= 0 && argv[i + 1]) return argv[i + 1];
   return null;
-})();
+}
+const dirArg = extractDirArg(process.argv);
 
-function createWindow() {
-  // 防闪白第一层：暗色主题（DARK_THEMES 14 个）设深色窗口底色，避免冷启动首帧白闪；
-  // 渲染侧另有 index.html 静态 data-theme + boot 即时应用双层保障（阶段2，无需 preload sendSync）
+function createWindow(opts = {}) {
+  // 防闪白第一层：暗色主题（DARK_THEMES 25 个，含 fx 暗色特效款）设深色窗口底色
   const themeName = loadSettings().theme;
   const isDarkTheme = DARK_THEMES.includes(themeName);
-  mainWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 960,
     minHeight: 600,
     title: 'MarkHunter',
     autoHideMenuBar: true,
-    backgroundColor: isDarkTheme ? '#1d232a' : '#f5f7fa', // daisyUI dark 底色 / 经典浅底
+    backgroundColor: isDarkTheme ? '#1d232a' : '#f5f7fa',
     icon: path.join(__dirname, '../../assets/icon.png'),
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true, // 渲染进程沙箱：preload 仅用 contextBridge/ipcRenderer，兼容
+      sandbox: true,
       spellcheck: false,
     },
   });
+  allWindows.add(win);
+  if (!mainWindow) mainWindow = win;
 
   // 导航防护：新窗口只允许系统浏览器打开 http/https，其余一律拒绝
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) {
       shell.openExternal(url);
     }
     return { action: 'deny' };
   });
   // 导航防护：仅允许停留在应用自身 index.html，其余导航一律拦截
-  mainWindow.webContents.on('will-navigate', (event, url) => {
+  win.webContents.on('will-navigate', (event, url) => {
     const ok = /^file:.*index\.html/i.test(String(url || ''));
     if (!ok) event.preventDefault();
   });
 
-  mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+  win.loadFile(path.join(__dirname, '../renderer/index.html'));
 
-  // 右键「用 MarkHunter 打开」：以指定目录作为工作目录
-  mainWindow.webContents.on('did-finish-load', () => {
-    if (dirArg) {
-      console.log('[markhunter-open-dir]', dirArg);
-      mainWindow.webContents.send('open-dir', dirArg);
+  // 右键「用 MarkHunter 打开」/二次启动 --dir：以指定目录作为该窗口工作目录
+  const winDir = opts.dir || (win === mainWindow ? dirArg : null);
+  if (winDir) {
+    win.webContents.on('did-finish-load', () => {
+      try {
+        win.webContents.send('open-dir', winDir);
+      } catch { /* 窗口已销毁 */ }
+    });
+  }
+
+  // 冒烟/扩展测试模式：仅首窗口绑定（scripts/smoke.js 在 src 内随 asar 打包但打包版不启用）
+  if (win === mainWindow && !opts.noTestHooks) {
+    for (const flag of ['--smoke', '--mmtest', '--exttest']) {
+      if (process.argv.includes(flag)) {
+        const mod = { '--smoke': 'smoke', '--mmtest': 'mm-test', '--exttest': 'ext-test' }[flag];
+        try {
+          const m = require('../../scripts/' + mod);
+          if (m.runSmoke) m.runSmoke(win);
+          else if (m.run) m.run(win);
+        } catch {
+          /* 打包后的应用不包含测试脚本，忽略 */
+        }
+      }
     }
+  }
+
+  win.on('closed', () => {
+    allWindows.delete(win);
+    if (mainWindow === win) mainWindow = allWindows.values().next().value || null;
   });
+  return win;
+}
 
-  // 冒烟测试模式：npm run smoke 用（加载完成后打印结果并退出；仅开发环境有该脚本）
-  if (process.argv.includes('--smoke')) {
-    try {
-      const { runSmoke } = require('../../scripts/smoke');
-      runSmoke(mainWindow);
-    } catch {
-      /* 打包后的应用不包含 smoke 脚本，忽略 */
+// ---------- v0.1.51：多窗口 ----------
+// 新建窗口（Ctrl+Shift+N）：每窗口独立渲染上下文（各自标签/目录/面板），主进程共享设置与安全状态
+ipcMain.handle('win:new', () => {
+  createWindow();
+  return true;
+});
+
+// 单实例：二次启动不再开新进程，而是在本实例开新窗口（携带 --dir 时以该目录开窗）
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_e, argv) => {
+    const d = extractDirArg(argv);
+    const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
     }
-  }
-  if (process.argv.includes('--mmtest')) {
-    try {
-      const { run } = require('../../scripts/mm-test');
-      run(mainWindow);
-    } catch {
-      /* 打包后的应用不包含测试脚本，忽略 */
-    }
-  }
-  if (process.argv.includes('--exttest')) {
-    try {
-      const { run } = require('../../scripts/ext-test');
-      run(mainWindow);
-    } catch {
-      /* 打包后的应用不包含测试脚本，忽略 */
-    }
-  }
-  mainWindow.on('closed', () => {
-    mainWindow = null;
+    createWindow(d ? { dir: d } : {});
   });
 }
 
@@ -106,6 +127,9 @@ app.whenReady().then(() => {
 
   // 运行环境查询（渲染进程据此决定是否暴露 window.__app 测试接口）
   ipcMain.handle('app:is-packaged', () => app.isPackaged);
+
+  // 新建窗口快捷指令（preload 暴露 window.api.openNewWindow）
+  // —— 已在上方注册 win:new
 
   // 复制图片到剪贴板（图片详情弹窗用）
   ipcMain.handle('clipboard:write-image', async (_e, filePath) => {

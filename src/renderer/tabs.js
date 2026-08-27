@@ -790,6 +790,8 @@ export function createEditor(callbacks) {
       view.dispatch({ effects: wrapCompartment.reconfigure(wrapOn ? EditorView.lineWrapping : []) });
       // 对齐缩进设置（设置变更后，已开标签切换时也按当前 indentSize 生效）
       view.dispatch({ effects: indentCompartment.reconfigure(indentExtensions(indentSize)) });
+      // 对齐只读态（跨窗口共享文件自动只读 / 用户手动切换）
+      view.dispatch({ effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(!!tab.readOnly)) });
       tab.state = view.state;
     }
     // 恢复进入标签的滚动位置：setState 重建视口后位置丢失，CM 高度测量异步 → 多帧校正；
@@ -852,7 +854,7 @@ export function createEditor(callbacks) {
     const sel = view.state.selection.main;
     const selLen = sel.from === sel.to ? 0 : sel.to - sel.from;
     sbFile.textContent = activeTab.name;
-    sbPos.textContent = `行 ${line.number}, 列 ${col}${selLen ? `（选中 ${selLen} 字）` : ''}`;
+    sbPos.textContent = `${activeTab.readOnly ? '🔒 只读 · ' : ''}行 ${line.number}, 列 ${col}${selLen ? `（选中 ${selLen} 字）` : ''}`;;
     sbLen.textContent = `${view.state.doc.length} 字符`;
   }
 
@@ -967,18 +969,46 @@ export function createEditor(callbacks) {
     if (onSessionChange) onSessionChange();
   }
 
-  /** 标签右键菜单：固定/取消固定 → 批量关闭 → 关闭当前（复用 ui.js 单例 #ctx-menu） */
+  /** 标签右键菜单：固定/取消固定 → 只读切换（跨窗口共享文件）→ 批量关闭 → 关闭当前 */
   function showTabCtx(x, y, tab) {
     const items = [
       { label: tab.pinned ? '📌 取消固定' : '📌 固定标签', onClick: () => togglePinned(tab) },
+    ];
+    if (!tab.kind) {
+      items.push({ label: tab.readOnly ? '🔓 允许编辑' : '🔒 设为只读', onClick: () => toggleReadOnly(tab) });
+    }
+    items.push(
       { sep: true },
       { label: '关闭其它标签', onClick: () => closeOthers(tab) },
       { label: '关闭右侧标签', onClick: () => closeRight(tab) },
       { label: '关闭左侧标签', onClick: () => closeLeft(tab) },
       { sep: true },
-      { label: '✕ 关闭标签', onClick: () => onRequestClose(tab) },
-    ];
+      { label: '✕ 关闭标签', onClick: () => onRequestClose(tab) }
+    );
     showContextMenu(x, y, items);
+  }
+
+  /** 只读切换（D2 跨窗口同文件协调 + 通用）：开启只读前若有未保存修改先保存；
+   *  视图在线热切换 readOnly compartment，不重建 DOM（无闪烁）。 */
+  async function toggleReadOnly(tab) {
+    if (!tab || tab.kind) return;
+    await setTabReadOnly(tab, !tab.readOnly);
+  }
+
+  async function setTabReadOnly(tab, v) {
+    if (!tab || tab.kind || tab.readOnly === !!v) return true;
+    if (v && tab.dirty) {
+      const ok = await saveNow(tab); // 转只读前落盘，避免脏内容被只读态锁住
+      if (!ok) return false;
+    }
+    tab.readOnly = !!v;
+    if (activeTab === tab) {
+      view.dispatch({ effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(!!v)) });
+      tab.state = view.state;
+      updateStatusBar();
+    }
+    renderTabs();
+    return true;
   }
 
   /** 批量关闭：对快照迭代，保留「锚定标签 + 范围内 pinned 标签」，末尾激活锚定标签 */
@@ -1035,6 +1065,14 @@ export function createEditor(callbacks) {
           togglePinned(tab);
         });
         el.appendChild(pin);
+      }
+      if (tab.readOnly) {
+        // 🔒 只读标记（跨窗口共享文件自动只读 / 手动切换）
+        const ro = document.createElement('span');
+        ro.className = 'tab-pin';
+        ro.textContent = '🔒';
+        ro.title = '只读（右键标签可解除）';
+        el.appendChild(ro);
       }
       // 未保存圆点：常驻元素 + hidden 切换（增量化更新用，见 updateTabBadges）
       const dot = document.createElement('span');
@@ -1405,6 +1443,19 @@ export function createEditor(callbacks) {
     // （主进程 markSelfWrite 宽限窗口已吸收绝大多数；此处兜底高频编辑下的残余竞态，
     //  避免打字中弹出「已在外部被修改」确认框打断输入）
     if (tab.lastSavedAt && Date.now() - tab.lastSavedAt < 1200) return;
+    // 只读标签（跨窗口共享文件的观察窗）静默同步：不弹确认/toast + 节流（800ms trailing），
+    // 编辑窗口连续自动保存时不闪不抖
+    if (tab.readOnly && !tab.dirty) {
+      const now = Date.now();
+      if (now - (tab.lastSyncAt || 0) < 800) {
+        clearTimeout(tab.syncTimer);
+        tab.syncTimer = setTimeout(() => reloadFromDisk(tab, true), 800);
+        return;
+      }
+      tab.lastSyncAt = now;
+      await reloadFromDisk(tab, true);
+      return;
+    }
     if (tab.dirty) {
       // 有未保存的本地修改：询问是否丢弃并重新加载
       const { confirmDialog } = await import('./ui.js');
@@ -1414,24 +1465,33 @@ export function createEditor(callbacks) {
       );
       if (!ok) return;
     }
+    await reloadFromDisk(tab, false);
+  });
+
+  /** 从磁盘重载标签内容（外部修改同步 / 跨窗口只读同步共用）。
+   *  silent=true（只读观察窗）：不弹 toast —— 编辑窗口连续自动保存时观察窗静默跟随、不闪不抖。
+   *  活动标签用 dispatch 整文替换（保持 state 连续性 + 光标/滚动位置），非活动标签重建 state。 */
+  async function reloadFromDisk(tab, silent) {
     // P7：分段标签走分段重载（重置解码器重读首段 + 续读），避免全量 readFile 触碰大文件上限
     if (tab.kind === 'chunked') {
       try {
         await reloadChunked(tab);
       } catch (err) {
-        console.warn('[chunked] 外部修改重载失败:', changedPath, err && err.message ? err.message : err);
+        console.warn('[chunked] 外部修改重载失败:', tab.path, err && err.message ? err.message : err);
         return;
       }
       tab.dirty = false;
       if (activeTab === tab) onTabSwitch(tab); // 刷新预览等
       renderTabs();
-      const { toast } = await import('./ui.js');
-      toast(`已从外部重新加载 ${tab.name}`);
+      if (!silent) {
+        const { toast } = await import('./ui.js');
+        toast(`已从外部重新加载 ${tab.name}`);
+      }
       return;
     }
     let data;
     try {
-      data = await window.api.readFile(changedPath);
+      data = await window.api.readFile(tab.path);
     } catch {
       return; // 文件不可读，忽略
     }
@@ -1461,9 +1521,11 @@ export function createEditor(callbacks) {
     tab.dirty = false;
     if (activeTab === tab) onTabSwitch(tab); // 刷新预览等
     renderTabs();
-    const { toast } = await import('./ui.js');
-    toast(`已从外部重新加载 ${tab.name}`);
-  });
+    if (!silent) {
+      const { toast } = await import('./ui.js');
+      toast(`已从外部重新加载 ${tab.name}`);
+    }
+  }
 
   // ---------- 查看器横幅按钮（DOM 在 index.html，逻辑归编辑器模块） ----------
   const viewerBar = document.getElementById('viewer-bar');
@@ -1497,5 +1559,5 @@ export function createEditor(callbacks) {
     if (activeTab && activeTab.kind === 'viewer-lg') slideViewer(activeTab, +1);
   });
 
-  return { openFile, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs, scrollToTop, scrollToBottom, viewerJump, setViewerEditing, revealViewerAt, slideViewerWindow: slideViewer };
+  return { openFile, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs, scrollToTop, scrollToBottom, viewerJump, setViewerEditing, revealViewerAt, slideViewerWindow: slideViewer, setTabReadOnly, toggleReadOnly };
 }

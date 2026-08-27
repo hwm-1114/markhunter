@@ -1,6 +1,6 @@
 # AGENTS.md — MarkHunter 工作区指引
 
-MarkHunter（马克猎手）是 Windows 桌面 Markdown/文本编辑器，Electron 43 + CodeMirror 6 + markdown-it + mermaid + Tailwind v4/daisyUI 5 主题引擎。中文注释与文档，无独立 lint/typecheck，靠 `npm run smoke`（真实窗口端到端，145 项）回归。
+MarkHunter（马克猎手）是 Windows 桌面 Markdown/文本编辑器，Electron 43 + CodeMirror 6 + markdown-it + mermaid + Tailwind v4/daisyUI 5 主题引擎。中文注释与文档，无独立 lint/typecheck，靠 `npm run smoke`（真实窗口端到端，153 项）回归。
 
 ## 常用命令
 
@@ -34,7 +34,7 @@ npm run release      # 本地打 NSIS 安装包（scripts/release.ps1）；加 -
 
 ## 已知未修问题（2026-08-22 审计，修复后请删条目）
 
-（空 —— 2026-08-22 审计的 5 项 + 验证期新发现的分段保存竞态已在 v0.1.46 全部修复，高频编辑误报外部修改已在 v0.1.47 修复，新建落错位置/树不刷新已在 v0.1.48 修复，明细见 CHANGELOG；修复验证口径：`npm run smoke` 全部通过（v0.1.49 起 145 项），其中 5 项为信息型结果（`detectPython`/`runPython`/`findAll`/`pyUI`/`bundleSplit` 返回携带信息的真值串，非失败）。冒烟窗口运行在真实桌面：偶发外部鼠标点击/负载抖动可能误报 UI 类用例，重跑即可；`largeFileChunk`/`menuPaste*` 已内置自适应轮询与重试。）
+（空 —— 2026-08-22 审计的 5 项 + 验证期新发现的分段保存竞态已在 v0.1.46 全部修复，高频编辑误报外部修改已在 v0.1.47 修复，新建落错位置/树不刷新已在 v0.1.48 修复，明细见 CHANGELOG；修复验证口径：`npm run smoke` 全部通过（v0.1.49 起 153 项），其中 5 项为信息型结果（`detectPython`/`runPython`/`findAll`/`pyUI`/`bundleSplit` 返回携带信息的真值串，非失败）。冒烟窗口运行在真实桌面：偶发外部鼠标点击/负载抖动可能误报 UI 类用例，重跑即可；`largeFileChunk`/`menuPaste*` 已内置自适应轮询与重试。）
 
 ## 文档索引（改敏感区前先读）
 

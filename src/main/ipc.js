@@ -1,4 +1,4 @@
-const { app, ipcMain, dialog } = require('electron');
+const { app, ipcMain, dialog, BrowserWindow } = require('electron');
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
@@ -8,6 +8,15 @@ const { isInside, setRoot, getRoot, approve, isApproved, requireApproved, realpa
 
 function normalize(p) {
   return path.resolve(p);
+}
+
+/** 发起窗口（v0.1.51 多窗口：原生对话框挂在调用方窗口上） */
+function winOf(e) {
+  try {
+    return BrowserWindow.fromWebContents(e.sender);
+  } catch {
+    return null;
+  }
 }
 
 /** 检测文本编码（判定顺序：UTF-8 → GBK → latin1）：'utf-8' | 'gbk' | 'latin1' */
@@ -32,7 +41,7 @@ function decodeText(buf, encoding = detectEncoding(buf)) {
   return buf.toString('latin1');
 }
 
-function registerFileIpc(getWindow) {
+function registerFileIpc(_getWindow) {
   // 设置当前工作目录（渲染进程 openDirFromPath 成功后调用；主进程路径校验基准）
   ipcMain.handle('fs:set-root', (_e, dir) => {
     setRoot(dir || null);
@@ -40,8 +49,8 @@ function registerFileIpc(getWindow) {
   });
 
   // 选择工作目录
-  ipcMain.handle('dialog:select-directory', async () => {
-    const win = getWindow();
+  ipcMain.handle('dialog:select-directory', async (e) => {
+    const win = winOf(e);
     const res = await dialog.showOpenDialog(win, {
       title: '选择工作目录',
       properties: ['openDirectory', 'createDirectory'],
@@ -50,8 +59,8 @@ function registerFileIpc(getWindow) {
   });
 
   // 浏览选择可执行文件（如 python.exe）
-  ipcMain.handle('dialog:select-file', async (_e, opts = {}) => {
-    const win = getWindow();
+  ipcMain.handle('dialog:select-file', async (e, opts = {}) => {
+    const win = winOf(e);
     const res = await dialog.showOpenDialog(win, {
       title: opts.title || '选择文件',
       properties: ['openFile'],
@@ -61,8 +70,8 @@ function registerFileIpc(getWindow) {
   });
 
   // 原生确认对话框
-  ipcMain.handle('dialog:confirm', async (_e, opts) => {
-    const win = getWindow();
+  ipcMain.handle('dialog:confirm', async (e, opts) => {
+    const win = winOf(e);
     const res = await dialog.showMessageBox(win, {
       type: opts.type || 'warning',
       title: opts.title || '确认',

@@ -2732,6 +2732,128 @@ async function runSmoke(win) {
         'bundle=' + (bundleSize >= 0 ? (bundleSize / 1024 / 1024).toFixed(2) + 'MB' : 'missing') +
           ',chunk=' + (chunkSize >= 0 ? (chunkSize / 1024 / 1024).toFixed(2) + 'MB' : 'missing'),
       ]);
+
+      // ============ v0.1.51 多窗口：主进程编排第二窗口（show:false 后台运行，不干扰桌面） ============
+      {
+        const { BrowserWindow } = require('electron');
+        const win2 = new BrowserWindow({
+          width: 1200,
+          height: 800,
+          show: false,
+          webPreferences: {
+            preload: path.join(__dirname, '..', 'src', 'preload', 'preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            spellcheck: false,
+          },
+        });
+        const W2 = (code) => win2.webContents.executeJavaScript(code);
+        const W1 = (code) => win.webContents.executeJavaScript(code);
+        const root2 = TEST_ROOT.replace(/\\/g, '/');
+        try {
+          await win2.loadFile(path.join(__dirname, '..', 'src', 'renderer', 'index.html'));
+          // 等第二窗口 boot（后台窗口 rAF 可能节流 —— 用足够长的轮询等待 __app）
+          await W2(`(async () => {
+            for (let i = 0; i < 100 && !window.__app; i++) await new Promise(r => setTimeout(r, 100));
+            return !!window.__app;
+          })()`).then((ok) => {
+            results.push(['mwBoot', ok === true ? true : 'w2 app not ready']);
+          });
+          if (await W2(`!!window.__app`)) {
+            // 基础：独立目录上下文 + 打开文件
+            await W2(`(async () => {
+              await window.__app.openDirFromPath(${JSON.stringify(root2)});
+              await window.api.writeFile(${JSON.stringify(root2)} + '/mw-own.md', 'win2 own');
+              await window.__app.editor.openFile(${JSON.stringify(root2)} + '/mw-own.md');
+              const t = window.__app.editor.getActiveTab();
+              return t && t.name === 'mw-own.md';
+            })()`).then((ok) => {
+              results.push(['mwIndependent', ok === true ? true : 'w2 tab=' + ok]);
+            });
+            // 主题广播：主窗口改主题 → 第二窗口即时换肤
+            await W1(`window.__app.applyTheme('fx-starry'); window.api.setSettings({ theme: 'fx-starry' }); null`);
+            await new Promise((r) => setTimeout(r, 600));
+            await W2(`document.documentElement.getAttribute('data-theme')`).then((th) => {
+              results.push(['mwThemeSync', th === 'fx-starry' ? true : 'w2 theme=' + th]);
+            });
+            await W1(`window.__app.applyTheme('markhunter-classic'); window.api.setSettings({ theme: 'markhunter-classic' }); null`);
+            await new Promise((r) => setTimeout(r, 400));
+            // 事件路由：win1 打开 mw-route.md（watcher 归 win1），外部写 → 只有 win1 重载
+            // （等待须超过自写宽限窗口 2000ms —— 前面 writeFile 建文件记录了自写宽限，与 externalChange 用例同理）
+            await W1(`(async () => {
+              await window.api.writeFile(${JSON.stringify(root2)} + '/mw-route.md', 'v1');
+              await window.__app.editor.openFile(${JSON.stringify(root2)} + '/mw-route.md');
+              return true;
+            })()`);
+            await new Promise((r) => setTimeout(r, 2300));
+            await W1(`window.api.writeExternal(${JSON.stringify(root2)} + '/mw-route.md', 'v2-external')`);
+            await new Promise((r) => setTimeout(r, 2000)); // watch + 防抖 + 重载
+            await W1(`window.__app.editor.findTabByPath(${JSON.stringify(root2)} + '/mw-route.md').state.doc.toString()`).then((doc1) => {
+              results.push(['mwFileChangedRouting', doc1 === 'v2-external' ? true : 'w1 doc=' + doc1]);
+            });
+            // D2 共享文件：win1 已开 mw-shared.md → win2 打开同文件 → 自动只读 + win1 编辑保存后静默同步
+            await W1(`(async () => {
+              await window.api.writeFile(${JSON.stringify(root2)} + '/mw-shared.md', 'shared-v1');
+              await window.__app.editor.openFile(${JSON.stringify(root2)} + '/mw-shared.md');
+              return true;
+            })()`);
+            await new Promise((r) => setTimeout(r, 400));
+            await W2(`(async () => {
+              const t = await window.__app.editor.openFile(${JSON.stringify(root2)} + '/mw-shared.md');
+              await new Promise(r => setTimeout(r, 500));
+              return !!(t && t.readOnly === true);
+            })()`).then((ro) => {
+              results.push(['mwSharedReadOnly', ro === true ? true : 'w2 readOnly=' + ro]);
+            });
+            // win1 编辑并保存 → win2 只读窗静默同步（内容一致 + 不弹重载 toast 由 silent 保证）
+            await W1(`(async () => {
+              const t = window.__app.editor.findTabByPath(${JSON.stringify(root2)} + '/mw-shared.md');
+              const v = window.__app.editor.getView();
+              v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: 'shared-v2-edited' } });
+              return await window.__app.editor.saveNow(t);
+            })()`);
+            await new Promise((r) => setTimeout(r, 2000));
+            await W2(`window.__app.editor.findTabByPath(${JSON.stringify(root2)} + '/mw-shared.md').state.doc.toString()`).then((doc2) => {
+              results.push(['mwSharedSync', doc2 === 'shared-v2-edited' ? true : 'w2 doc=' + doc2]);
+            });
+            // Python 输出路由：从 win2 运行 → 输出事件到 win2（状态文本变化）
+            await W2(`(async () => {
+              await window.api.writeFile(${JSON.stringify(root2)} + '/mw-run.py', 'print("MW2_PY_OK")');
+              const t = await window.__app.editor.openFile(${JSON.stringify(root2)} + '/mw-run.py');
+              await window.__app.python.run();
+              for (let i = 0; i < 40; i++) {
+                await new Promise(r => setTimeout(r, 200));
+                const s = (document.getElementById('py-status').textContent || '');
+                if (s.includes('已完成') || s.includes('退出码')) return s;
+              }
+              return 'timeout:' + (document.getElementById('py-status').textContent || '');
+            })()`).then((st) => {
+              const ok = typeof st === 'string' && st.includes('已完成');
+              results.push(['mwPythonRouting', ok ? true : 'w2 py=' + st]);
+            });
+            // 关窗存活：关掉 win2 前 win1 保持功能；关闭后 win1 再开文件正常
+            await W1(`(async () => {
+              await window.api.writeFile(${JSON.stringify(root2)} + '/mw-after.md', 'after close');
+              const t = await window.__app.editor.openFile(${JSON.stringify(root2)} + '/mw-after.md');
+              return !!t;
+            })()`).then((ok) => {
+              results.push(['mwCloseSurvive', ok === true ? true : 'w1 before close=' + ok]);
+            });
+          }
+        } catch (err) {
+          results.push(['mwError', 'ERR: ' + String(err && err.message ? err.message : err)]);
+        } finally {
+          try { win2.destroy(); } catch { /* 已销毁 */ }
+          // 清理多窗口测试文件 + 会话污染（win2 关闭时可能写入其会话）
+          await win.webContents.executeJavaScript(`(async () => {
+            window.__app.editor.closeAll();
+            await window.api.setSettings({ lastSession: null });
+            window.__app.state.settings = await window.api.getSettings();
+            return true;
+          })()`).catch(() => {});
+        }
+      }
       console.log('E2E_RESULTS');
       for (const r of results) {
         console.log('  -', r.join(' | '));
