@@ -32,3 +32,11 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm publish
+      - name: Merge release drafts & publish
+        # electron-builder 偶发把资产拆进两个 draft（v0.1.46 起连续 5 版）：
+        # 合并资产 → 转正发布 → 清理残缺草稿。单草稿时等效自动 publish。
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/fix-release-drafts.js

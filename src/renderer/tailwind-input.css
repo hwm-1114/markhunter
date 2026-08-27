@@ -73,11 +73,115 @@
 }
 
 /* ============================================================
-   经典精确层（修正：default:true 的 :where(:root) 零特异性、无条件匹配，
-   若 --mh-* 写在主题块内会以 @layer base 恒压过上方 @layer theme 桥接层，
-   使所有主题的 --mh-* 锁死为经典值。故经典精确 hex 仅在
-   [data-theme="markhunter-classic"] 时声明：@layer base 优先于 theme 层，
-   经典主题下像素级覆盖桥接推导值；其余 35 个内置主题不受影响，自适应推导。）
+   v0.1.50 特效皮肤（fx-*）：20 款 = 9 浅色 + 11 暗色
+   调色板在此注册（自动经令牌桥推导 --mh-*）；
+   动态特效（fx-layer 动画/玻璃铺面）在 styles.css「特效皮肤」节实现。
+   ============================================================ */
+@plugin "daisyui/theme" { name: "fx-aurora"; color-scheme: light;
+  --color-base-100: #ffffff; --color-base-200: #eef4ff; --color-base-300: #dde8fb;
+  --color-base-content: #1e2a3a; --color-primary: #6366f1; --color-primary-content: #ffffff;
+  --color-secondary: #22d3ee; --color-secondary-content: #083344; --color-error: #e5484d;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-sakura"; color-scheme: light;
+  --color-base-100: #ffffff; --color-base-200: #fdf0f5; --color-base-300: #fbdde9;
+  --color-base-content: #3d2a33; --color-primary: #ec4899; --color-primary-content: #ffffff;
+  --color-secondary: #f472b6; --color-secondary-content: #500724; --color-error: #e5484d;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-ocean"; color-scheme: light;
+  --color-base-100: #ffffff; --color-base-200: #eaf6fb; --color-base-300: #d6ecf5;
+  --color-base-content: #16323f; --color-primary: #0ea5e9; --color-primary-content: #ffffff;
+  --color-secondary: #06b6d4; --color-secondary-content: #083344; --color-error: #e5484d;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-ice"; color-scheme: light;
+  --color-base-100: #ffffff; --color-base-200: #eff7fb; --color-base-300: #dceef6;
+  --color-base-content: #24343d; --color-primary: #38bdf8; --color-primary-content: #082f49;
+  --color-secondary: #a5f3fc; --color-secondary-content: #164e63; --color-error: #e5484d;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-rainbow"; color-scheme: light;
+  --color-base-100: #ffffff; --color-base-200: #faf8ff; --color-base-300: #efeaf9;
+  --color-base-content: #2b2740; --color-primary: #8b5cf6; --color-primary-content: #ffffff;
+  --color-secondary: #f59e0b; --color-secondary-content: #451a03; --color-error: #e5484d;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-glass"; color-scheme: light;
+  --color-base-100: #fbfcfe; --color-base-200: #e9edf4; --color-base-300: #d8dfec;
+  --color-base-content: #232a35; --color-primary: #64748b; --color-primary-content: #ffffff;
+  --color-secondary: #94a3b8; --color-secondary-content: #1e293b; --color-error: #e5484d;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-forest"; color-scheme: light;
+  --color-base-100: #ffffff; --color-base-200: #eff5ee; --color-base-300: #dbe9d8;
+  --color-base-content: #22322a; --color-primary: #10b981; --color-primary-content: #ffffff;
+  --color-secondary: #84cc16; --color-secondary-content: #1a2e05; --color-error: #e5484d;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-lavender"; color-scheme: light;
+  --color-base-100: #ffffff; --color-base-200: #f4f0fb; --color-base-300: #e8e0f7;
+  --color-base-content: #2f2a40; --color-primary: #8b5cf6; --color-primary-content: #ffffff;
+  --color-secondary: #c084fc; --color-secondary-content: #3b0764; --color-error: #e5484d;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-gold"; color-scheme: light;
+  --color-base-100: #fffdf6; --color-base-200: #faf4e6; --color-base-300: #f1e6cb;
+  --color-base-content: #3a3222; --color-primary: #d97706; --color-primary-content: #ffffff;
+  --color-secondary: #f59e0b; --color-secondary-content: #451a03; --color-error: #e5484d;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+/* —— 暗色特效 11 款 —— */
+@plugin "daisyui/theme" { name: "fx-neon"; color-scheme: dark;
+  --color-base-100: #111827; --color-base-200: #0b0f1a; --color-base-300: #1d2740;
+  --color-base-content: #e2e8f0; --color-primary: #e879f9; --color-primary-content: #1e0426;
+  --color-secondary: #22d3ee; --color-secondary-content: #083344; --color-error: #fb7185;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-matrix"; color-scheme: dark;
+  --color-base-100: #0a140a; --color-base-200: #050a05; --color-base-300: #122412;
+  --color-base-content: #b7f5c0; --color-primary: #22c55e; --color-primary-content: #04120a;
+  --color-secondary: #4ade80; --color-secondary-content: #052e16; --color-error: #f87171;
+  --radius-selector: .25rem; --radius-field: .25rem; --radius-box: .25rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-starry"; color-scheme: dark;
+  --color-base-100: #12122e; --color-base-200: #0a0a1f; --color-base-300: #1e1e42;
+  --color-base-content: #dbe2ff; --color-primary: #818cf8; --color-primary-content: #1e1b4b;
+  --color-secondary: #c4b5fd; --color-secondary-content: #2e1065; --color-error: #fb7185;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-fire"; color-scheme: dark;
+  --color-base-100: #1f100c; --color-base-200: #140a08; --color-base-300: #331a12;
+  --color-base-content: #fde8dd; --color-primary: #f97316; --color-primary-content: #1c0a02;
+  --color-secondary: #ef4444; --color-secondary-content: #2b0606; --color-error: #f87171;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-crt"; color-scheme: dark;
+  --color-base-100: #181d10; --color-base-200: #10140a; --color-base-300: #262f19;
+  --color-base-content: #d8e8b0; --color-primary: #a3e635; --color-primary-content: #12200a;
+  --color-secondary: #65a30d; --color-secondary-content: #1a2e05; --color-error: #f87171;
+  --radius-selector: .1rem; --radius-field: .1rem; --radius-box: .1rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-vapor"; color-scheme: dark;
+  --color-base-100: #201636; --color-base-200: #170f2b; --color-base-300: #2f2150;
+  --color-base-content: #f0e6ff; --color-primary: #f472b6; --color-primary-content: #2b0716;
+  --color-secondary: #38bdf8; --color-secondary-content: #082f49; --color-error: #fb7185;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-deep"; color-scheme: dark;
+  --color-base-100: #0a1a2c; --color-base-200: #06121f; --color-base-300: #10263e;
+  --color-base-content: #d3e8f5; --color-primary: #0891b2; --color-primary-content: #04222c;
+  --color-secondary: #67e8f9; --color-secondary-content: #083344; --color-error: #fb7185;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-ink"; color-scheme: dark;
+  --color-base-100: #191a1e; --color-base-200: #101013; --color-base-300: #26272c;
+  --color-base-content: #e8e6df; --color-primary: #a8a29e; --color-primary-content: #1c1917;
+  --color-secondary: #57534e; --color-secondary-content: #f5f5f4; --color-error: #f87171;
+  --radius-selector: .25rem; --radius-field: .25rem; --radius-box: .25rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-cyber"; color-scheme: dark;
+  --color-base-100: #14141f; --color-base-200: #0c0c14; --color-base-300: #20202f;
+  --color-base-content: #e0e0f0; --color-primary: #f43f5e; --color-primary-content: #26060f;
+  --color-secondary: #06b6d4; --color-secondary-content: #083344; --color-error: #fb7185;
+  --radius-selector: .1rem; --radius-field: .1rem; --radius-box: .1rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-quantum"; color-scheme: dark;
+  --color-base-100: #141833; --color-base-200: #0d1024; --color-base-300: #1f2450;
+  --color-base-content: #e4e8ff; --color-primary: #6366f1; --color-primary-content: #1e1b4b;
+  --color-secondary: #2dd4bf; --color-secondary-content: #042f2e; --color-error: #fb7185;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+@plugin "daisyui/theme" { name: "fx-eclipse"; color-scheme: dark;
+  --color-base-100: #171320; --color-base-200: #0f0c16; --color-base-300: #251d33;
+  --color-base-content: #ece8f3; --color-primary: #fbbf24; --color-primary-content: #231602;
+  --color-secondary: #7c3aed; --color-secondary-content: #ede9fe; --color-error: #fb7185;
+  --radius-selector: .5rem; --radius-field: .5rem; --radius-box: .5rem; --size-selector: .25rem; --size-field: .25rem; --border: 1px; --depth: 1; --noise: 0; }
+
+/* ============================================================
+   经典精确层：--mh-* 精确 hex 仅在 [data-theme="markhunter-classic"] 声明
+   （@layer base 压过 theme 桥接层，经典主题像素级一致；其余主题自适应推导）
    ============================================================ */
 @layer base {
   [data-theme="markhunter-classic"] {

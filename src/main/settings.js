@@ -33,12 +33,20 @@ const THEME_NAMES = [
   // 暗色 14（内置 color-scheme: dark，实证清单 §3.2.7）
   'dark', 'synthwave', 'halloween', 'forest', 'aqua', 'black', 'luxury',
   'dracula', 'business', 'night', 'coffee', 'dim', 'sunset', 'abyss',
+  // 特效皮肤 20（v0.1.50：9 浅 + 11 深；调色板 tailwind-input.css，动画 styles.css）
+  'fx-aurora', 'fx-sakura', 'fx-ocean', 'fx-ice', 'fx-rainbow', 'fx-glass',
+  'fx-forest', 'fx-lavender', 'fx-gold',
+  'fx-neon', 'fx-matrix', 'fx-starry', 'fx-fire', 'fx-crt', 'fx-vapor',
+  'fx-deep', 'fx-ink', 'fx-cyber', 'fx-quantum', 'fx-eclipse',
 ];
 
-// 暗色主题 14 个：供主进程窗口底色（防闪白第一层）与 mermaid 明暗切换
+// 暗色主题清单：供主进程窗口底色（防闪白第一层）与 mermaid 明暗切换
 const DARK_THEMES = [
   'dark', 'synthwave', 'halloween', 'forest', 'aqua', 'black', 'luxury',
   'dracula', 'business', 'night', 'coffee', 'dim', 'sunset', 'abyss',
+  // 特效暗色 11 款
+  'fx-neon', 'fx-matrix', 'fx-starry', 'fx-fire', 'fx-crt', 'fx-vapor',
+  'fx-deep', 'fx-ink', 'fx-cyber', 'fx-quantum', 'fx-eclipse',
 ];
 
 const DEFAULTS = {

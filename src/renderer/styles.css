@@ -1214,3 +1214,344 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .resize-divider.h.dragging::after { top: 1px; height: 4px; }
 .markdown-body del { color: #8a94a3; }
 .markdown-body .task-list-item { list-style: none; margin-left: -1.4em; }
+
+
+/* ============================================================
+   v0.1.50 特效皮肤（fx-*，20 款 = 9 浅 + 11 深）
+   设计约束（勿破坏）：
+   ① 所有规则限定在 [data-theme^="fx-"] 选择器下 —— 非 fx 主题（经典/内置 35 款）零影响；
+   ② #fx-layer 默认 display:none、pointer-events:none、z-index:-1 —— 不拦截点击/编辑/滚动；
+   ③ 编辑区/预览区保持高不透明底（93%/88%）+ 面板毛玻璃 —— 文本可读性优先；
+   ④ 动画只用 transform/opacity/filter（GPU 合成）；prefers-reduced-motion 全部停用。
+   ============================================================ */
+
+/* ---------- 基础设施 ---------- */
+#fx-layer {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  display: none;
+  pointer-events: none;
+  overflow: hidden;
+  background: var(--mh-bg);
+}
+[data-theme^="fx-"] #fx-layer { display: block; }
+#fx-layer::before,
+#fx-layer::after {
+  content: '';
+  position: absolute;
+  inset: -60%;
+  will-change: transform, opacity, filter;
+}
+[data-theme^="fx-"] #toolbar { position: relative; }
+[data-theme^="fx-"] #toolbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--mh-accent), var(--mh-accent-2), transparent);
+  background-size: 200% 100%;
+  animation: fx-sheen 6s linear infinite;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+/* ---------- 公共关键帧 ---------- */
+@keyframes fx-sheen { to { background-position: -200% 0; } }
+@keyframes fx-drift-a {
+  0% { transform: translate(-6%, -4%) scale(1); }
+  50% { transform: translate(6%, 5%) scale(1.15); }
+  100% { transform: translate(-6%, -4%) scale(1); }
+}
+@keyframes fx-drift-b {
+  0% { transform: translate(5%, 6%) scale(1.1); }
+  50% { transform: translate(-7%, -5%) scale(0.95); }
+  100% { transform: translate(5%, 6%) scale(1.1); }
+}
+@keyframes fx-pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.95; } }
+@keyframes fx-hue { to { filter: hue-rotate(360deg); } }
+@keyframes fx-rise { from { transform: translateY(0); } to { transform: translateY(-33.33%); } }
+@keyframes fx-fall { from { transform: translateY(-33.33%); } to { transform: translateY(0); } }
+@keyframes fx-twinkle { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+@keyframes fx-scan { from { background-position: 0 0; } to { background-position: 0 6px; } }
+@keyframes fx-flicker { 0%, 100% { opacity: 0.9; } 8% { opacity: 0.75; } 9% { opacity: 0.95; } 42% { opacity: 0.82; } 43% { opacity: 0.92; } 77% { opacity: 0.78; } 78% { opacity: 0.9; } }
+@keyframes fx-rotate { to { transform: rotate(360deg); } }
+
+/* ---------- 玻璃铺面（仅 fx 主题：主框架半透明 + 毛玻璃，让特效透出） ---------- */
+[data-theme^="fx-"] body { background: transparent; }
+[data-theme^="fx-"] #toolbar,
+[data-theme^="fx-"] #bottom-panel,
+[data-theme^="fx-"] #status-bar {
+  background: color-mix(in srgb, var(--mh-bg-panel) 76%, transparent);
+  backdrop-filter: blur(12px);
+}
+[data-theme^="fx-"] #sidebar {
+  background: color-mix(in srgb, var(--mh-bg-panel) 70%, transparent);
+  backdrop-filter: blur(12px);
+}
+[data-theme^="fx-"] #preview-host { background: color-mix(in srgb, var(--mh-bg-panel) 88%, transparent); }
+html[data-theme^="fx-"] .cm-editor { background: color-mix(in srgb, var(--mh-bg-panel) 93%, transparent); }
+[data-theme^="fx-"] .tab.active {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--mh-accent) 45%, transparent);
+}
+
+/* ---------- 9 款浅色特效 ---------- */
+/* 极光：三色极光漂移 */
+[data-theme="fx-aurora"] #fx-layer {
+  background: linear-gradient(160deg, #eef4ff 0%, #ffffff 60%, #eefbff 100%);
+}
+[data-theme="fx-aurora"] #fx-layer::before {
+  background:
+    radial-gradient(38% 46% at 22% 28%, rgba(99, 102, 241, 0.30), transparent 70%),
+    radial-gradient(34% 40% at 76% 22%, rgba(34, 211, 238, 0.26), transparent 70%);
+  animation: fx-drift-a 26s ease-in-out infinite;
+}
+[data-theme="fx-aurora"] #fx-layer::after {
+  background: radial-gradient(40% 44% at 55% 78%, rgba(167, 139, 250, 0.24), transparent 72%);
+  animation: fx-drift-b 32s ease-in-out infinite;
+}
+/* 樱花：粉色微光 + 飘落花瓣带 */
+[data-theme="fx-sakura"] #fx-layer { background: linear-gradient(180deg, #fdf0f5, #fff7fa); }
+[data-theme="fx-sakura"] #fx-layer::before {
+  background:
+    radial-gradient(circle at 12px 18px, rgba(244, 114, 182, 0.5) 2.5px, transparent 3px),
+    radial-gradient(circle at 96px 66px, rgba(236, 72, 153, 0.42) 2px, transparent 3px),
+    radial-gradient(circle at 178px 128px, rgba(249, 168, 212, 0.5) 3px, transparent 4px),
+    radial-gradient(circle at 58px 210px, rgba(244, 114, 182, 0.36) 2px, transparent 3px),
+    radial-gradient(circle at 236px 36px, rgba(251, 207, 232, 0.55) 2.5px, transparent 3px);
+  background-size: 260px 260px;
+  animation: fx-fall 22s linear infinite;
+}
+[data-theme="fx-sakura"] #fx-layer::after {
+  background: radial-gradient(52% 40% at 78% 20%, rgba(251, 207, 232, 0.35), transparent 72%);
+  animation: fx-drift-a 30s ease-in-out infinite;
+}
+/* 海洋：双色波浪层流动 */
+[data-theme="fx-ocean"] #fx-layer { background: linear-gradient(180deg, #eaf6fb, #f2fbff); }
+[data-theme="fx-ocean"] #fx-layer::before {
+  background: radial-gradient(60% 34% at 30% 12%, rgba(14, 165, 233, 0.20), transparent 70%),
+    radial-gradient(52% 30% at 78% 30%, rgba(6, 182, 212, 0.16), transparent 70%);
+  animation: fx-drift-a 24s ease-in-out infinite;
+}
+[data-theme="fx-ocean"] #fx-layer::after {
+  background:
+    linear-gradient(100deg, transparent 46%, rgba(2, 132, 199, 0.10) 50%, transparent 54%),
+    linear-gradient(80deg, transparent 62%, rgba(8, 145, 178, 0.10) 66%, transparent 70%);
+  animation: fx-drift-b 28s ease-in-out infinite;
+}
+/* 冰晶：冷光斜掠 + 蓝辉 */
+[data-theme="fx-ice"] #fx-layer { background: linear-gradient(200deg, #eff7fb, #f7fdff); }
+[data-theme="fx-ice"] #fx-layer::before {
+  background: linear-gradient(115deg, transparent 42%, rgba(56, 189, 248, 0.16) 50%, transparent 58%);
+  animation: fx-drift-a 18s ease-in-out infinite;
+}
+[data-theme="fx-ice"] #fx-layer::after {
+  background: radial-gradient(44% 36% at 72% 76%, rgba(165, 243, 252, 0.40), transparent 72%);
+  animation: fx-pulse 9s ease-in-out infinite;
+}
+/* 彩虹流光：全谱渐变缓旋色相 */
+[data-theme="fx-rainbow"] #fx-layer {
+  background: linear-gradient(120deg, rgba(139, 92, 246, 0.14), rgba(59, 130, 246, 0.12), rgba(16, 185, 129, 0.12), rgba(245, 158, 11, 0.14), rgba(236, 72, 153, 0.13), rgba(139, 92, 246, 0.14));
+  animation: fx-hue 24s linear infinite;
+}
+[data-theme="fx-rainbow"] #fx-layer::before {
+  background: radial-gradient(46% 40% at 26% 30%, rgba(255, 255, 255, 0.55), transparent 70%);
+  animation: fx-drift-a 21s ease-in-out infinite;
+}
+/* 玻璃：柔光斑缓移（配全局毛玻璃铺面） */
+[data-theme="fx-glass"] #fx-layer { background: linear-gradient(150deg, #e9edf4, #f8fafd); }
+[data-theme="fx-glass"] #fx-layer::before {
+  background:
+    radial-gradient(34% 30% at 20% 24%, rgba(148, 163, 184, 0.30), transparent 70%),
+    radial-gradient(30% 28% at 80% 18%, rgba(100, 116, 139, 0.22), transparent 70%);
+  animation: fx-drift-a 27s ease-in-out infinite;
+}
+[data-theme="fx-glass"] #fx-layer::after {
+  background: radial-gradient(38% 32% at 60% 82%, rgba(203, 213, 225, 0.45), transparent 72%);
+  animation: fx-drift-b 34s ease-in-out infinite;
+}
+/* 晨雾森林：绿雾横漂 */
+[data-theme="fx-forest"] #fx-layer { background: linear-gradient(165deg, #eff5ee, #f7fbf5); }
+[data-theme="fx-forest"] #fx-layer::before {
+  background:
+    radial-gradient(46% 26% at 24% 22%, rgba(16, 185, 129, 0.14), transparent 72%),
+    radial-gradient(40% 22% at 82% 34%, rgba(132, 204, 22, 0.12), transparent 72%);
+  animation: fx-drift-a 30s ease-in-out infinite;
+}
+[data-theme="fx-forest"] #fx-layer::after {
+  background: linear-gradient(90deg, transparent 44%, rgba(22, 163, 74, 0.08) 50%, transparent 56%);
+  animation: fx-drift-b 26s ease-in-out infinite;
+}
+/* 薰衣草：紫晕呼吸 */
+[data-theme="fx-lavender"] #fx-layer { background: linear-gradient(180deg, #f4f0fb, #fdfbff); }
+[data-theme="fx-lavender"] #fx-layer::before {
+  background: radial-gradient(50% 44% at 50% 40%, rgba(192, 132, 252, 0.26), transparent 72%);
+  animation: fx-pulse 10s ease-in-out infinite;
+}
+[data-theme="fx-lavender"] #fx-layer::after {
+  background: radial-gradient(36% 30% at 78% 80%, rgba(139, 92, 246, 0.18), transparent 72%);
+  animation: fx-drift-a 28s ease-in-out infinite;
+}
+/* 鎏金：金辉扫掠 */
+[data-theme="fx-gold"] #fx-layer { background: linear-gradient(170deg, #faf4e6, #fffdf4); }
+[data-theme="fx-gold"] #fx-layer::before {
+  background: linear-gradient(105deg, transparent 40%, rgba(217, 119, 6, 0.14) 50%, transparent 60%);
+  animation: fx-drift-a 16s ease-in-out infinite;
+}
+[data-theme="fx-gold"] #fx-layer::after {
+  background: radial-gradient(44% 30% at 70% 78%, rgba(245, 158, 11, 0.16), transparent 72%);
+  animation: fx-pulse 8s ease-in-out infinite;
+}
+
+/* ---------- 11 款暗色特效 ---------- */
+/* 霓虹：品红/青双色辉光 + 侧栏霓虹描边 */
+[data-theme="fx-neon"] #fx-layer { background: radial-gradient(120% 90% at 50% 110%, #111827 0%, #0b0f1a 62%); }
+[data-theme="fx-neon"] #fx-layer::before {
+  background:
+    radial-gradient(36% 42% at 16% 18%, rgba(232, 121, 249, 0.24), transparent 70%),
+    radial-gradient(34% 40% at 86% 26%, rgba(34, 211, 238, 0.20), transparent 70%);
+  animation: fx-drift-a 22s ease-in-out infinite;
+}
+[data-theme="fx-neon"] #fx-layer::after {
+  background: radial-gradient(40% 36% at 60% 86%, rgba(232, 121, 249, 0.14), transparent 72%);
+  animation: fx-drift-b 27s ease-in-out infinite;
+}
+[data-theme="fx-neon"] #sidebar { border-color: color-mix(in srgb, var(--mh-accent) 40%, var(--mh-border)); }
+/* 黑客帝国：绿色字符雨带 + 扫描线 + 微闪 */
+[data-theme="fx-matrix"] #fx-layer { background: #050a05; animation: fx-flicker 12s steps(1) infinite; }
+[data-theme="fx-matrix"] #fx-layer::before {
+  background:
+    linear-gradient(180deg, rgba(34, 197, 94, 0) 0%, rgba(34, 197, 94, 0.20) 8%, rgba(34, 197, 94, 0) 30%),
+    linear-gradient(180deg, rgba(74, 222, 128, 0) 35%, rgba(74, 222, 128, 0.14) 44%, rgba(74, 222, 128, 0) 66%),
+    linear-gradient(180deg, rgba(34, 197, 94, 0) 70%, rgba(34, 197, 94, 0.16) 78%, rgba(34, 197, 94, 0) 96%);
+  background-size: 100% 300%;
+  animation: fx-rise 14s linear infinite;
+}
+[data-theme="fx-matrix"] #fx-layer::after {
+  background: repeating-linear-gradient(0deg, rgba(183, 245, 192, 0.05) 0 1px, transparent 1px 5px);
+  animation: fx-scan 1.2s linear infinite;
+}
+/* 星空：星点闪烁 + 深蓝漂移 */
+[data-theme="fx-starry"] #fx-layer { background: radial-gradient(130% 100% at 50% -10%, #17173a 0%, #0a0a1f 70%); }
+[data-theme="fx-starry"] #fx-layer::before {
+  background:
+    radial-gradient(circle at 22px 34px, rgba(255, 255, 255, 0.9) 1px, transparent 1.6px),
+    radial-gradient(circle at 108px 92px, rgba(219, 226, 255, 0.8) 1.2px, transparent 2px),
+    radial-gradient(circle at 186px 40px, rgba(255, 255, 255, 0.65) 1px, transparent 1.6px),
+    radial-gradient(circle at 66px 168px, rgba(196, 181, 253, 0.8) 1.2px, transparent 2px),
+    radial-gradient(circle at 244px 128px, rgba(255, 255, 255, 0.55) 1px, transparent 1.6px),
+    radial-gradient(circle at 150px 216px, rgba(219, 226, 255, 0.6) 1px, transparent 1.6px);
+  background-size: 280px 280px;
+  animation: fx-twinkle 5s ease-in-out infinite, fx-drift-a 90s linear infinite;
+}
+[data-theme="fx-starry"] #fx-layer::after {
+  background: radial-gradient(46% 40% at 74% 80%, rgba(129, 140, 248, 0.16), transparent 72%);
+  animation: fx-drift-b 30s ease-in-out infinite;
+}
+/* 熔岩：底部余烬呼吸 */
+[data-theme="fx-fire"] #fx-layer { background: linear-gradient(180deg, #140a08 40%, #1f0d06 100%); }
+[data-theme="fx-fire"] #fx-layer::before {
+  background: radial-gradient(80% 44% at 50% 108%, rgba(249, 115, 22, 0.34), rgba(239, 68, 68, 0.18) 46%, transparent 72%);
+  animation: fx-pulse 7s ease-in-out infinite;
+}
+[data-theme="fx-fire"] #fx-layer::after {
+  background: radial-gradient(34% 26% at 20% 30%, rgba(239, 68, 68, 0.12), transparent 70%);
+  animation: fx-drift-a 26s ease-in-out infinite;
+}
+/* 复古 CRT：扫描线滚动 + 整屏微闪 */
+[data-theme="fx-crt"] #fx-layer { background: radial-gradient(120% 100% at 50% 0%, #1b2412 0%, #10140a 70%); }
+[data-theme="fx-crt"] #fx-layer::before {
+  background: repeating-linear-gradient(0deg, rgba(163, 230, 53, 0.06) 0 1px, transparent 1px 4px);
+  animation: fx-scan 0.9s linear infinite;
+}
+[data-theme="fx-crt"] #fx-layer::after {
+  background: radial-gradient(90% 60% at 50% 46%, rgba(163, 230, 53, 0.08), transparent 70%);
+  animation: fx-flicker 9s steps(1) infinite;
+}
+/* 蒸汽波：日落渐变 + 色相缓旋 + 细扫描 */
+[data-theme="fx-vapor"] #fx-layer {
+  background: linear-gradient(180deg, #2b1055 0%, #7b2d8b 38%, #b57bd0 55%, #ff9ecd 68%, #38bdf8 100%);
+  animation: fx-hue 40s linear infinite;
+  opacity: 0.9;
+}
+[data-theme="fx-vapor"] #fx-layer::before {
+  background: linear-gradient(180deg, transparent 54%, rgba(23, 15, 43, 0.85) 100%);
+}
+[data-theme="fx-vapor"] #fx-layer::after {
+  background: repeating-linear-gradient(0deg, rgba(240, 230, 255, 0.05) 0 1px, transparent 1px 6px);
+  animation: fx-scan 2.4s linear infinite;
+}
+/* 深海：上升气泡 + 深蓝辉光 */
+[data-theme="fx-deep"] #fx-layer { background: radial-gradient(120% 100% at 50% -10%, #0e2a44 0%, #06121f 70%); }
+[data-theme="fx-deep"] #fx-layer::before {
+  background:
+    radial-gradient(circle at 30px 286px, rgba(103, 232, 249, 0.5) 2.5px, transparent 4px),
+    radial-gradient(circle at 120px 296px, rgba(103, 232, 249, 0.35) 2px, transparent 3px),
+    radial-gradient(circle at 212px 282px, rgba(165, 243, 252, 0.45) 3px, transparent 4.5px),
+    radial-gradient(circle at 74px 270px, rgba(103, 232, 249, 0.3) 2px, transparent 3px),
+    radial-gradient(circle at 268px 292px, rgba(103, 232, 249, 0.4) 2.5px, transparent 4px);
+  background-size: 300px 300px;
+  animation: fx-rise 18s linear infinite;
+}
+[data-theme="fx-deep"] #fx-layer::after {
+  background: radial-gradient(50% 34% at 50% -6%, rgba(8, 145, 178, 0.22), transparent 72%);
+  animation: fx-drift-b 30s ease-in-out infinite;
+}
+/* 水墨：墨晕缓渗 */
+[data-theme="fx-ink"] #fx-layer { background: #101013; }
+[data-theme="fx-ink"] #fx-layer::before {
+  background:
+    radial-gradient(40% 36% at 26% 28%, rgba(168, 162, 158, 0.12), transparent 72%),
+    radial-gradient(34% 30% at 76% 66%, rgba(87, 83, 78, 0.16), transparent 72%);
+  animation: fx-drift-a 36s ease-in-out infinite;
+}
+[data-theme="fx-ink"] #fx-layer::after {
+  background: radial-gradient(30% 26% at 58% 12%, rgba(232, 230, 223, 0.07), transparent 70%);
+  animation: fx-drift-b 44s ease-in-out infinite;
+}
+/* 赛博故障：红青故障条 + 边框脉冲 */
+[data-theme="fx-cyber"] #fx-layer { background: #0c0c14; }
+[data-theme="fx-cyber"] #fx-layer::before {
+  background:
+    linear-gradient(90deg, rgba(244, 63, 94, 0.10) 0 12%, transparent 12% 20%, rgba(6, 182, 212, 0.10) 20% 26%, transparent 26% 55%, rgba(244, 63, 94, 0.08) 55% 60%, transparent 60% 84%, rgba(6, 182, 212, 0.10) 84% 90%, transparent 90%);
+  background-size: 100% 220%;
+  animation: fx-fall 9s steps(12) infinite;
+}
+[data-theme="fx-cyber"] #fx-layer::after {
+  background: radial-gradient(44% 36% at 50% 50%, rgba(6, 182, 212, 0.08), transparent 70%);
+  animation: fx-flicker 6s steps(1) infinite;
+}
+[data-theme="fx-cyber"] #toolbar::after { animation-duration: 3s; }
+/* 量子：锥形光谱旋转 */
+[data-theme="fx-quantum"] #fx-layer { background: #0d1024; }
+[data-theme="fx-quantum"] #fx-layer::before {
+  inset: -120%;
+  background: conic-gradient(from 0deg, rgba(99, 102, 241, 0.20), rgba(45, 212, 191, 0.14), rgba(139, 92, 246, 0.18), rgba(99, 102, 241, 0.20));
+  animation: fx-rotate 46s linear infinite;
+}
+[data-theme="fx-quantum"] #fx-layer::after {
+  background: radial-gradient(60% 50% at 50% 50%, rgba(13, 16, 36, 0.9) 30%, transparent 75%);
+}
+/* 日蚀：金环呼吸 */
+[data-theme="fx-eclipse"] #fx-layer { background: radial-gradient(120% 100% at 50% -10%, #1c1531 0%, #0f0c16 70%); }
+[data-theme="fx-eclipse"] #fx-layer::before {
+  inset: -20%;
+  background: radial-gradient(circle at 50% 34%, transparent 21%, rgba(251, 191, 36, 0.30) 23%, rgba(251, 191, 36, 0.10) 27%, transparent 31%);
+  animation: fx-pulse 11s ease-in-out infinite;
+}
+[data-theme="fx-eclipse"] #fx-layer::after {
+  background: radial-gradient(38% 30% at 72% 78%, rgba(124, 58, 237, 0.16), transparent 72%);
+  animation: fx-drift-a 30s ease-in-out infinite;
+}
+
+/* ---------- 无障碍：系统减少动态时停用全部特效动画（铺面保留） ---------- */
+@media (prefers-reduced-motion: reduce) {
+  [data-theme^="fx-"] #fx-layer,
+  [data-theme^="fx-"] #fx-layer::before,
+  [data-theme^="fx-"] #fx-layer::after,
+  [data-theme^="fx-"] #toolbar::after {
+    animation: none !important;
+  }
+}

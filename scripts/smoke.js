@@ -1696,12 +1696,12 @@ const RENDERER_TEST = `
       : 'saved=' + s.theme + ',attr=' + attr;
   });
 
-  // themeCatalog：主题全集 36 个合法名（含 markhunter-classic、无重复）+ 暗色 14 个
+  // themeCatalog：主题全集 56 个合法名（v0.1.50 起 = 36 + 20 特效款，含 markhunter-classic、无重复）+ 暗色 25 个
   await step('themeCatalog', async () => {
     const names = app.THEME_NAMES || [];
     const dark = app.DARK_THEMES || [];
     const uniq = new Set(names).size === names.length;
-    return names.length === 36 && names.includes('markhunter-classic') && dark.length === 14 && uniq
+    return names.length === 56 && names.includes('markhunter-classic') && dark.length === 25 && uniq
       ? true
       : 'names=' + names.length + ',dark=' + dark.length + ',uniq=' + uniq;
   });
@@ -1984,9 +1984,48 @@ const RENDERER_TEST = `
     const light = groups['浅色'] || [];
     const dark = groups['深色'] || [];
     const total = Object.keys(groups).reduce((n, k) => n + groups[k].length, 0);
-    return !light.includes('aqua') && !light.includes('forest') && dark.includes('aqua') && dark.includes('forest') && total === 36
+    const fxGroup = groups['特效'] || [];
+    const fxOk = fxGroup.length === 20 && fxGroup[0] === 'fx-aurora' && fxGroup.includes('fx-eclipse');
+    return !light.includes('aqua') && !light.includes('forest') && dark.includes('aqua') && dark.includes('forest') && total === 56 && fxOk
       ? true
-      : 'light=' + light.join(',') + ',dark=' + dark.join(',') + ',total=' + total;
+      : 'light=' + light.join(',') + ',dark=' + dark.join(',') + ',fx=' + fxGroup.length + ',total=' + total;
+  });
+
+  // fxTheme（v0.1.50）：特效皮肤 —— 20 款全部可应用、fx-layer 显示且动画运行、
+  // 暗色款防闪白清单生效、settings 白名单持久化往返、切回经典后 fx-layer 隐藏零残留
+  await step('fxTheme', async () => {
+    const fx = app.THEME_NAMES.filter((n) => n.startsWith('fx-'));
+    if (fx.length !== 20) return 'fx count=' + fx.length;
+    const layer = document.getElementById('fx-layer');
+    // 逐款应用：data-theme 正确 + 层可见 + 伪元素动画名非 none（reduced-motion 环境下跳过动画断言）
+    let animOk = true;
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    for (const name of fx) {
+      app.applyTheme(name);
+      if (document.documentElement.getAttribute('data-theme') !== name) return 'attr mismatch ' + name;
+      if (getComputedStyle(layer).display === 'none') return 'layer hidden ' + name;
+      const anim = getComputedStyle(layer, '::before').animationName;
+      const anim2 = getComputedStyle(layer, '::after').animationName;
+      const selfAnim = getComputedStyle(layer).animationName;
+      if (!reduce && anim === 'none' && anim2 === 'none' && selfAnim === 'none') {
+        return 'no animation on ' + name + ' (before=' + anim + ',after=' + anim2 + ')';
+      }
+      animOk = animOk && true;
+    }
+    // 暗色特效款：DARK_THEMES 生效（mermaid 明暗判断源）
+    const darkOk = app.DARK_THEMES.includes('fx-matrix') && app.DARK_THEMES.includes('fx-eclipse') && !app.DARK_THEMES.includes('fx-aurora');
+    // 设置白名单往返：fx-neon 持久化 + 回读
+    await api.setSettings({ theme: 'fx-neon' });
+    const s = await api.getSettings();
+    const persisted = s.theme === 'fx-neon';
+    await api.setSettings({ theme: 'markhunter-classic' });
+    app.applyTheme('markhunter-classic');
+    // 切回经典：fx-layer 恢复隐藏（display:none）
+    const layerHidden = getComputedStyle(layer).display === 'none';
+    const darkBg = getComputedStyle(document.body).backgroundColor;
+    return fx.length === 20 && darkOk && persisted && layerHidden
+      ? true
+      : 'dark=' + darkOk + ',persist=' + persisted + ',hidden=' + layerHidden + ',bg=' + darkBg;
   });
 
   // silentRestore（L6）：lastSession 含不存在文件 → 恢复不弹 alertBox（modal-mask 保持隐藏），其余文件正常恢复并激活

@@ -1,6 +1,6 @@
 # AGENTS.md — MarkHunter 工作区指引
 
-MarkHunter（马克猎手）是 Windows 桌面 Markdown/文本编辑器，Electron 43 + CodeMirror 6 + markdown-it + mermaid + Tailwind v4/daisyUI 5 主题引擎。中文注释与文档，无独立 lint/typecheck，靠 `npm run smoke`（真实窗口端到端，144 项）回归。
+MarkHunter（马克猎手）是 Windows 桌面 Markdown/文本编辑器，Electron 43 + CodeMirror 6 + markdown-it + mermaid + Tailwind v4/daisyUI 5 主题引擎。中文注释与文档，无独立 lint/typecheck，靠 `npm run smoke`（真实窗口端到端，145 项）回归。
 
 ## 常用命令
 
@@ -28,13 +28,13 @@ npm run release      # 本地打 NSIS 安装包（scripts/release.ps1）；加 -
 - **安全模型**（v0.1.39 加固，改动前读 docs/MarkHunter三维度评审报告.md）：渲染进程 sandbox + contextIsolation；主进程文件写/删/改名经 `security.js` 的 `requireApproved`（rootDir 内 or 曾成功 read 过的 approvedSet 路径）；`settings:set` 键白名单 + theme 名单校验；AI baseUrl 仅 https 或 http 回环；CSP `script-src 'self'`（新增脚本只能同源注入，参考 preview.js 动态加载 mermaid chunk 的做法）；`fs:write-external` 仅 dev。
 - **IPC 契约**：主→渲染事件（`file-changed`、`python:*`、`ai:*`、`search:progress`）与 invoke 通道名都在 preload.js 集中声明；search:global 返回 `[{file,line,text,matchIndex}]` 上限 3000。
 - **大文件分段（P7）**：>4MB 文件走 chunked 标签（kind='chunked'），文档尾部有 `<!-- MH-CHUNKED … -->` 占位标记——**任何写盘/预览/AI 读文档路径都必须先 `stripChunkMarkers`（且必要时 `ensureFullyLoaded`）**，否则污染文件。tabs.js `saveNow` 是正确范例。
-- **主题**：36 皮肤清单在 settings.js（主进程）与 app.js（渲染端分组）两处维护，需同步；暗色 14 款 = `DARK_THEMES`。滚动条宽度修复依赖 `styles.css` 的 `:root{scrollbar-color:auto}`，勿删。
+- **主题**：56 皮肤清单在 settings.js（主进程）与 app.js（渲染端分组）两处维护，需同步；暗色 25 款 = `DARK_THEMES`（特效 fx-* 20 款调色板在 tailwind-input.css、动画在 styles.css「特效皮肤」节）。滚动条宽度修复依赖 `styles.css` 的 `:root{scrollbar-color:auto}`，勿删。
 - **mermaid**：lazy 动态加载 `window.__mermaid`，SVG 按 src+明暗 缓存（64 条 FIFO），注入前 `uniquifySvg` 唯一化 id；`renderToken` 协议丢弃过期渲染。
 - **文件监听**：`fs.watch` 失败自动回退 `fs.watchFile` 1000ms 轮询；自写识别靠 `markSelfWrite`（写后 stat mtime 一次性匹配）。
 
 ## 已知未修问题（2026-08-22 审计，修复后请删条目）
 
-（空 —— 2026-08-22 审计的 5 项 + 验证期新发现的分段保存竞态已在 v0.1.46 全部修复，高频编辑误报外部修改已在 v0.1.47 修复，新建落错位置/树不刷新已在 v0.1.48 修复，明细见 CHANGELOG；修复验证口径：`npm run smoke` 全部通过（v0.1.49 起 144 项），其中 5 项为信息型结果（`detectPython`/`runPython`/`findAll`/`pyUI`/`bundleSplit` 返回携带信息的真值串，非失败）。冒烟窗口运行在真实桌面：偶发外部鼠标点击/负载抖动可能误报 UI 类用例，重跑即可；`largeFileChunk`/`menuPaste*` 已内置自适应轮询与重试。）
+（空 —— 2026-08-22 审计的 5 项 + 验证期新发现的分段保存竞态已在 v0.1.46 全部修复，高频编辑误报外部修改已在 v0.1.47 修复，新建落错位置/树不刷新已在 v0.1.48 修复，明细见 CHANGELOG；修复验证口径：`npm run smoke` 全部通过（v0.1.49 起 145 项），其中 5 项为信息型结果（`detectPython`/`runPython`/`findAll`/`pyUI`/`bundleSplit` 返回携带信息的真值串，非失败）。冒烟窗口运行在真实桌面：偶发外部鼠标点击/负载抖动可能误报 UI 类用例，重跑即可；`largeFileChunk`/`menuPaste*` 已内置自适应轮询与重试。）
 
 ## 文档索引（改敏感区前先读）
 

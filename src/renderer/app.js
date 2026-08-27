@@ -41,10 +41,18 @@ async function boot() {
     'wireframe', 'cmyk', 'autumn', 'acid', 'lemonade', 'winter', 'nord',
     'caramellatte', 'silk', 'dark', 'synthwave', 'halloween', 'forest', 'aqua',
     'black', 'luxury', 'dracula', 'business', 'night', 'coffee', 'dim', 'sunset', 'abyss',
+    // v0.1.50 特效皮肤 20 款（调色板 tailwind-input.css，动画 styles.css「特效皮肤」节）
+    'fx-aurora', 'fx-sakura', 'fx-ocean', 'fx-ice', 'fx-rainbow', 'fx-glass',
+    'fx-forest', 'fx-lavender', 'fx-gold',
+    'fx-neon', 'fx-matrix', 'fx-starry', 'fx-fire', 'fx-crt', 'fx-vapor',
+    'fx-deep', 'fx-ink', 'fx-cyber', 'fx-quantum', 'fx-eclipse',
   ];
   const DARK_THEMES = [
     'dark', 'synthwave', 'halloween', 'forest', 'aqua', 'black', 'luxury',
     'dracula', 'business', 'night', 'coffee', 'dim', 'sunset', 'abyss',
+    // 特效暗色 11 款（防闪白底色 + mermaid dark 同步）
+    'fx-neon', 'fx-matrix', 'fx-starry', 'fx-fire', 'fx-crt', 'fx-vapor',
+    'fx-deep', 'fx-ink', 'fx-cyber', 'fx-quantum', 'fx-eclipse',
   ];
   // 设置下拉分组（label = 下拉显示文案，格式「名 · 中文」）
   const THEME_GROUPS = [
@@ -98,6 +106,31 @@ async function boot() {
         // L1（v0.1.44）：aqua/forest 实为 color-scheme:dark（DARK_THEMES 已含），自浅色组移入深色组
         { name: 'aqua', label: 'aqua · 水蓝' },
         { name: 'forest', label: 'forest · 森林' },
+      ],
+    },
+    {
+      label: '特效',
+      items: [
+        { name: 'fx-aurora', label: '🟣 极光 · 三色漂移' },
+        { name: 'fx-sakura', label: '🌸 樱花 · 花瓣飘落' },
+        { name: 'fx-ocean', label: '🌊 海洋 · 波光流动' },
+        { name: 'fx-ice', label: '❄️ 冰晶 · 冷光斜掠' },
+        { name: 'fx-rainbow', label: '🌈 彩虹 · 流光变色' },
+        { name: 'fx-glass', label: '🪟 玻璃 · 毛玻璃光斑' },
+        { name: 'fx-forest', label: '🌿 晨雾 · 绿雾横漂' },
+        { name: 'fx-lavender', label: '💜 薰衣草 · 紫晕呼吸' },
+        { name: 'fx-gold', label: '✨ 鎏金 · 金辉扫掠' },
+        { name: 'fx-neon', label: '💫 霓虹 · 双色辉光' },
+        { name: 'fx-matrix', label: '🟩 黑客帝国 · 字符雨' },
+        { name: 'fx-starry', label: '⭐ 星空 · 星点闪烁' },
+        { name: 'fx-fire', label: '🔥 熔岩 · 余烬呼吸' },
+        { name: 'fx-crt', label: '📺 复古CRT · 扫描线' },
+        { name: 'fx-vapor', label: '🌴 蒸汽波 · 日落渐变' },
+        { name: 'fx-deep', label: '🫧 深海 · 气泡上升' },
+        { name: 'fx-ink', label: '🖌️ 水墨 · 墨晕缓渗' },
+        { name: 'fx-cyber', label: '⚡ 赛博 · 故障闪条' },
+        { name: 'fx-quantum', label: '🌀 量子 · 光谱旋转' },
+        { name: 'fx-eclipse', label: '🌘 日蚀 · 金环呼吸' },
       ],
     },
   ];
@@ -585,11 +618,11 @@ async function boot() {
     const s = state.settings;
     const body = document.createElement('div');
 
-    // 主题（36 款皮肤，按「经典 / 推荐 / 浅色 / 深色」四组；切换即整窗即时预览，取消/关闭还原）
+    // 主题（56 款皮肤，按「经典 / 推荐 / 浅色 / 深色 / 特效」五组；切换即整窗即时预览，取消/关闭还原）
     const themeField = document.createElement('div');
     themeField.className = 'field';
     const themeLabel = document.createElement('label');
-    themeLabel.textContent = '主题（36 款皮肤，切换即时预览）';
+    themeLabel.textContent = '主题（56 款皮肤，切换即时预览；特效组含动态背景）';
     const themeSelect = document.createElement('select');
     themeSelect.className = 'field-select';
     themeSelect.id = 'theme-select';
