@@ -319,17 +319,28 @@ export function createPreview(getEditor, getTab, getIsDark) {
   function applyMode() {
     const tab = getTab();
     const imageHost = $('#image-host');
+    const diffHostEl = $('#diff-host');
     const viewerBar = $('#viewer-bar');
+    if (viewerBar) viewerBar.classList.add('hidden');
     if (tab && tab.kind === 'image') {
       // 图片标签页：编辑区显示图片，隐藏编辑器/预览/分隔条
       editorHost.classList.add('hidden');
       previewHost.classList.add('hidden');
       divider.classList.add('hidden');
       imageHost.classList.remove('hidden');
-      if (viewerBar) viewerBar.classList.add('hidden');
+      if (diffHostEl) diffHostEl.classList.add('hidden');
       return;
     }
     imageHost.classList.add('hidden');
+    if (tab && tab.kind === 'diff') {
+      // 对比标签页：双栏 diff 独占编辑区（tabs.js renderDiff 已渲染内容）
+      editorHost.classList.add('hidden');
+      previewHost.classList.add('hidden');
+      divider.classList.add('hidden');
+      if (diffHostEl) diffHostEl.classList.remove('hidden');
+      return;
+    }
+    if (diffHostEl) diffHostEl.classList.add('hidden');
     // viewer-lg：编辑区只读显示 + 查看器横幅；无 markdown 预览
     if (viewerBar) viewerBar.classList.toggle('hidden', !(tab && tab.kind === 'viewer-lg'));
     const canPreview = tab && tab.kind !== 'viewer-lg' && isMarkdown(tab.name);

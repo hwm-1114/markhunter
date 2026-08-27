@@ -2591,6 +2591,128 @@ const RENDERER_TEST = `
     return true;
   });
 
+  // ============ v0.2.0 阶段三：多文档对比 ============
+
+  // diffBasic：双栏行级 diff —— 修改/新增/删除行数与统计正确，diff-host 独占编辑区
+  await step('diffBasic', async () => {
+    const left = 'l1\\nl2\\nl3\\nl4\\nl5\\n';
+    const right = 'l1\\nL2-mod\\nl3\\nn4a\\nn4b\\nl5\\n';
+    const tab = app.editor.openDiffTab({ leftLabel: 'a.md', leftContent: left, rightLabel: 'b.md', rightContent: right });
+    await new Promise((r) => setTimeout(r, 300));
+    const host = document.getElementById('diff-host');
+    const visible = !host.classList.contains('hidden');
+    const modN = host.querySelectorAll('.diff-row.mod').length;
+    const addN = host.querySelectorAll('.diff-row.add').length;
+    const delN = host.querySelectorAll('.diff-row.del').length;
+    const stats = (host.querySelector('.diff-stats') || {}).textContent || '';
+    const model = tab._model;
+    // 语义：l2→L2-mod（改）；l4→n4a（改）+ n4b（增）—— jsdiff LCS 分块
+    const okStats = stats.includes('+1') && stats.includes('−0') && stats.includes('~2') && stats.includes('2 处');
+    return tab.kind === 'diff' && visible && modN === 2 && addN === 1 && delN === 0 && okStats && model.blocks.length === 2
+      ? true
+      : 'kind=' + tab.kind + ',vis=' + visible + ',mod=' + modN + ',add=' + addN + ',del=' + delN + ',stats=' + stats;
+  });
+
+  // diffWords：修改行词级高亮 —— 左右单元格各有 .dw-hl 差异片段
+  await step('diffWords', async () => {
+    const tab = app.editor.findTabByPath ? app.editor.getActiveTab() : null;
+    const host = document.getElementById('diff-host');
+    const modRow = host.querySelector('.diff-row.mod');
+    if (!modRow) {
+      app.editor.closeAll();
+      return 'no mod row';
+    }
+    const lHl = modRow.querySelector('.diff-l .dw-hl');
+    const rHl = modRow.querySelector('.diff-r .dw-hl');
+    const lTxt = lHl ? lHl.textContent : '';
+    const rTxt = rHl ? rHl.textContent : '';
+    app.editor.closeAll();
+    return lHl && rHl && lTxt === 'l2' && rTxt === 'L2-mod' ? true : 'l=' + lTxt + ',r=' + rTxt;
+  });
+
+  // diffNav：变更块导航 —— 下一处/上一处循环高亮当前块，序号徽标正确
+  await step('diffNav', async () => {
+    app.editor.openDiffTab({ leftLabel: 'a.md', leftContent: 'x\\ny\\nz\\n', rightLabel: 'b.md', rightContent: 'X\\ny\\nZ\\n' });
+    await new Promise((r) => setTimeout(r, 300));
+    const host = document.getElementById('diff-host');
+    const btnNext = Array.from(host.querySelectorAll('.diff-bar .tbtn')).find((b) => b.textContent.includes('下一处'));
+    const btnPrev = Array.from(host.querySelectorAll('.diff-bar .tbtn')).find((b) => b.textContent.includes('上一处'));
+    if (!btnNext || !btnPrev) {
+      app.editor.closeAll();
+      return 'no nav buttons';
+    }
+    btnNext.click();
+    await new Promise((r) => setTimeout(r, 150));
+    const cur1 = host.querySelectorAll('.diff-row.current').length;
+    const badge1 = (host.querySelector('.diff-cur') || {}).textContent || '';
+    btnNext.click();
+    await new Promise((r) => setTimeout(r, 150));
+    const badge2 = (host.querySelector('.diff-cur') || {}).textContent || '';
+    btnPrev.click();
+    await new Promise((r) => setTimeout(r, 150));
+    const badge3 = (host.querySelector('.diff-cur') || {}).textContent || '';
+    app.editor.closeAll();
+    return cur1 === 1 && badge1 === '1/2' && badge2 === '2/2' && badge3 === '1/2'
+      ? true
+      : 'cur=' + cur1 + ',b1=' + badge1 + ',b2=' + badge2 + ',b3=' + badge3;
+  });
+
+  // diffUnsaved：工具栏「对比」对话框 + 磁盘版本 —— 未保存改动在 diff 中可见
+  await step('diffUnsaved', async () => {
+    await api.writeFile(root + '/dv.md', 'original line 1\\noriginal line 2\\n');
+    await app.editor.openFile(root + '/dv.md');
+    await new Promise((r) => setTimeout(r, 300));
+    const view = app.editor.getView();
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: 'original line 1\\nEDITED line 2\\nextra line 3\\n' } });
+    await new Promise((r) => setTimeout(r, 150));
+    document.getElementById('btn-diff').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const sel = document.querySelector('#modal-body select');
+    if (!sel) {
+      app.editor.closeAll();
+      return 'no dialog';
+    }
+    sel.value = '__disk__';
+    const btns = Array.from(document.querySelectorAll('#modal-actions .tbtn'));
+    btns[btns.length - 1].click(); // 开始对比
+    await new Promise((r) => setTimeout(r, 400));
+    const host = document.getElementById('diff-host');
+    const modN = host.querySelectorAll('.diff-row.mod').length;
+    const addN = host.querySelectorAll('.diff-row.add').length;
+    const t = app.editor.getActiveTab();
+    const isDiff = t && t.kind === 'diff';
+    app.editor.closeAll();
+    await api.remove(root + '/dv.md', false);
+    return isDiff && modN === 1 && addN === 1 ? true : 'diff=' + isDiff + ',mod=' + modN + ',add=' + addN;
+  });
+
+  // diffLimits：单侧超 20MB 拒绝（.diff-truncated 提示，不渲染）
+  await step('diffLimits', async () => {
+    const big = 'x'.repeat(21 * 1024 * 1024);
+    app.editor.openDiffTab({ leftLabel: 'big-l', leftContent: big, rightLabel: 'big-r', rightContent: 'small' });
+    await new Promise((r) => setTimeout(r, 300));
+    const host = document.getElementById('diff-host');
+    const tip = host.querySelector('.diff-truncated');
+    const noRows = host.querySelectorAll('.diff-row').length === 0;
+    const msgOk = tip && tip.textContent.includes('超出上限');
+    app.editor.closeAll();
+    return tip && noRows && msgOk ? true : 'tip=' + !!tip + ',noRows=' + noRows + ',msg=' + (tip && tip.textContent.slice(0, 20));
+  });
+
+  // diffSessionExcluded：对比标签不入会话（重启不恢复临时视图）
+  await step('diffSessionExcluded', async () => {
+    await api.writeFile(root + '/dv-keep.md', 'keep');
+    await app.editor.openFile(root + '/dv-keep.md');
+    app.editor.openDiffTab({ leftLabel: 'l', leftContent: 'a\\n', rightLabel: 'r', rightContent: 'b\\n' });
+    await new Promise((r) => setTimeout(r, 200));
+    const s = app.editor.getSession();
+    const noNull = s.paths.every((p) => !!p);
+    const onlyFile = s.paths.length === 1 && s.paths[0] === root + '/dv-keep.md';
+    app.editor.closeAll();
+    await api.remove(root + '/dv-keep.md', false);
+    return noNull && onlyFile ? true : 'paths=' + JSON.stringify(s.paths);
+  });
+
   return results;
 })()
 `;

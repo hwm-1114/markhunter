@@ -7,6 +7,7 @@ import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
 import { langFor, baseName, escapeHtml, showContextMenu, hideContextMenu, formatSize, stripChunkMarkers, CHUNK_MARKER_RE, showPrompt, toast } from './ui.js';
 import { pathToFileUrl } from './viewer.js';
+import { renderDiffTab, buildDiffReport } from './diffview.js';
 
 // ---------- P7：大文件分段模式 ----------
 // 超过 CHUNK_THRESHOLD 的文件走「分段模式」：先读首段（CHUNK_SIZE）进 CM，
@@ -273,6 +274,7 @@ export function createEditor(callbacks) {
   );
 
   const imageHost = document.getElementById('image-host');
+  const diffHost = document.getElementById('diff-host'); // v0.2.0 对比标签内容区
   const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'pdf'];
 
   // ---------- 打开 / 切换 / 关闭 ----------
@@ -766,12 +768,15 @@ export function createEditor(callbacks) {
   }
 
   function switchTab(tab) {
-    // 记住离开标签的滚动位置（编辑器 / 图片视图），切回时恢复；
+    // 记住离开标签的滚动位置（编辑器 / 图片视图 / 对比视图），切回时恢复；
     // onTabLeave 供上层同步保存预览区滚动等视图级状态
     if (activeTab && activeTab !== tab) {
       const leaving = activeTab;
       if (leaving.kind === 'image') {
         leaving.scrollTop = imageHost.scrollTop;
+      } else if (leaving.kind === 'diff') {
+        const sc = diffHost.querySelector('.diff-scroller');
+        leaving.scrollTop = sc ? sc.scrollTop : 0;
       } else {
         leaving.scrollTop = view.scrollDOM.scrollTop;
       }
@@ -782,6 +787,10 @@ export function createEditor(callbacks) {
       // 图片标签：编辑区显示图片视图
       view.setState(makeState('', 'text'));
       renderImageTab(tab);
+    } else if (tab.kind === 'diff') {
+      // 对比标签：编辑器让位，渲染双栏 diff（applyMode 负责显隐）
+      view.setState(makeState('', 'text'));
+      renderDiff(tab);
     } else {
       view.setState(tab.state);
       // 对齐换行设置（viewer-lg 例外：强制不换行——超长单行 wrap 测量复杂度失控）
@@ -805,11 +814,12 @@ export function createEditor(callbacks) {
     if (onSessionChange) onSessionChange();
   }
 
-  /** 多帧恢复 tab 滚动位置（编辑器或图片视图）。
+  /** 多帧恢复 tab 滚动位置（编辑器或图片视图；diff 由 renderDiff 内部恢复）。
    *  setState 重建视口后 CM 的高度测量会异步修正 scrollTop，单次赋值会被"弹回"，
    *  需连续多帧压回目标值（~100ms，测量完成后即稳定）；期间切换标签则放弃。
    *  无记录 → 顶部。 */
   function restoreTabScroll(tab) {
+    if (tab.kind === 'diff') return; // renderDiff 已恢复
     const el = tab.kind === 'image' ? imageHost : view.scrollDOM;
     const target = typeof tab.scrollTop === 'number' ? tab.scrollTop : 0;
     const step = (n) => {
@@ -835,10 +845,16 @@ export function createEditor(callbacks) {
     const sbPos = document.getElementById('sb-pos');
     const sbLen = document.getElementById('sb-len');
     if (!sbPos) return;
-    if (!activeTab || activeTab.kind === 'image') {
+    if (!activeTab || activeTab.kind === 'image' || activeTab.kind === 'diff') {
       sbFile.textContent = activeTab ? activeTab.name : '未打开文件';
-      sbPos.textContent = activeTab ? (activeTab.lang === 'image' ? '图片预览' : '') : '';
-      sbLen.textContent = '';
+      if (activeTab && activeTab.kind === 'diff') {
+        sbPos.textContent = '对比视图（只读）';
+        const m = activeTab._model;
+        sbLen.textContent = m ? `+${m.stats.add} −${m.stats.del} ~${m.stats.mod}` : '';
+      } else {
+        sbPos.textContent = activeTab ? (activeTab.lang === 'image' ? '图片预览' : '') : '';
+        sbLen.textContent = '';
+      }
       return;
     }
     if (activeTab.kind === 'viewer-lg') {
@@ -1200,12 +1216,17 @@ export function createEditor(callbacks) {
     }
   }
 
-  /** 滚动到顶部（状态栏按钮）：编辑器 / 图片视图通用，不改光标 */
+  /** 滚动到顶部（状态栏按钮）：编辑器 / 图片视图 / 对比视图通用，不改光标 */
   function scrollToTop() {
     const t = activeTab;
     if (!t) return;
     if (t.kind === 'image') {
       imageHost.scrollTop = 0;
+      return;
+    }
+    if (t.kind === 'diff') {
+      const sc = diffHost && diffHost.querySelector('.diff-scroller');
+      if (sc) sc.scrollTop = 0;
       return;
     }
     view.scrollDOM.scrollTop = 0;
@@ -1232,16 +1253,88 @@ export function createEditor(callbacks) {
     set(4);
   }
 
+  // ---------- v0.2.0：对比标签 ----------
+  /** 打开（或激活）一个对比标签：左右内容只读双栏 diff。
+   *  opts: { leftLabel, leftContent, rightLabel, rightContent }；同参数组合已开则激活。 */
+  function openDiffTab(opts) {
+    const key = 'diff://' + opts.leftLabel + '⟷' + opts.rightLabel;
+    const existing = tabs.find((t) => t.kind === 'diff' && t.diffKey === key);
+    if (existing) {
+      existing.leftContent = opts.leftContent;
+      existing.rightContent = opts.rightContent;
+      switchTab(existing);
+      renderDiff(existing); // 内容可能已变，重渲染
+      return existing;
+    }
+    const tab = {
+      id: ++idSeq,
+      path: null, // 不参与会话持久化与文件监听
+      name: '🔀 ' + opts.leftLabel + ' ↔ ' + opts.rightLabel,
+      diffKey: key,
+      kind: 'diff',
+      leftLabel: opts.leftLabel,
+      rightLabel: opts.rightLabel,
+      leftContent: opts.leftContent,
+      rightContent: opts.rightContent,
+      exportDir: opts.exportDir || '', // 报告导出目录（app.js 传入当前工作目录）
+      state: null,
+      dirty: false,
+      saveTimer: null,
+      pinned: false,
+      scrollTop: 0,
+    };
+    tabs.push(tab);
+    switchTab(tab);
+    if (onSessionChange) onSessionChange();
+    return tab;
+  }
+
+  /** 渲染对比标签内容（交换/导出回调闭环在此） */
+  function renderDiff(tab) {
+    if (!diffHost) return;
+    renderDiffTab(tab, diffHost, {
+      onSwap: () => {
+        const l = tab.leftContent, ll = tab.leftLabel;
+        tab.leftContent = tab.rightContent;
+        tab.leftLabel = tab.rightLabel;
+        tab.rightContent = l;
+        tab.rightLabel = ll;
+        tab.scrollTop = 0;
+        renderDiff(tab);
+        updateStatusBar();
+      },
+      onExport: async () => {
+        // 导出 Markdown 报告（有工作目录则保存并打开，无目录仅提示）
+        const dir = tab.exportDir;
+        const suggested = 'diff-report-' + Date.now() + '.md';
+        showPrompt('导出对比报告', '文件名（保存到当前工作目录）', suggested, async (val) => {
+          const report = buildDiffReport(tab);
+          try {
+            await window.api.writeFile((dir ? dir + '\\' : '') + val, report);
+            toast('报告已导出：' + val);
+            if (dir) openFile(dir + '\\' + val);
+          } catch (err) {
+            toast('导出失败：' + (err.message || err));
+          }
+        });
+      },
+    });
+  }
+
   function getActiveTab() {
     return activeTab;
   }
 
   /** 会话快照：所有标签路径（含图片/PDF，保持顺序）+ 活动标签下标 + pinned 下标数组 */
   function getSession() {
+    // 对比标签（kind='diff'）为临时视图：不入会话（path 为 null，重启不恢复）；
+    // active/pinned 下标按过滤后的列表语义计算
+    const persist = tabs.filter((t) => !!t.path);
+    const activePersisted = persist.indexOf(activeTab);
     return {
-      paths: tabs.map((t) => t.path),
-      active: tabs.indexOf(activeTab),
-      pinned: tabs.map((t, i) => (t.pinned ? i : -1)).filter((i) => i >= 0),
+      paths: persist.map((t) => t.path),
+      active: activePersisted,
+      pinned: persist.map((t, i) => (t.pinned ? i : -1)).filter((i) => i >= 0),
     };
   }
 
@@ -1559,5 +1652,5 @@ export function createEditor(callbacks) {
     if (activeTab && activeTab.kind === 'viewer-lg') slideViewer(activeTab, +1);
   });
 
-  return { openFile, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs, scrollToTop, scrollToBottom, viewerJump, setViewerEditing, revealViewerAt, slideViewerWindow: slideViewer, setTabReadOnly, toggleReadOnly };
+  return { openFile, openDiffTab, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs, scrollToTop, scrollToBottom, viewerJump, setViewerEditing, revealViewerAt, slideViewerWindow: slideViewer, setTabReadOnly, toggleReadOnly };
 }

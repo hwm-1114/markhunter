@@ -29,6 +29,7 @@
     </div>
     <div class="toolbar-group">
       <button id="btn-preview-mode" class="tbtn" title="切换预览模式">👁 预览</button>
+      <button id="btn-diff" class="tbtn" title="对比：当前文档 ↔ 其它标签 / 剪贴板 / 磁盘版本">🔀 对比</button>
       <button id="btn-run-py" class="tbtn accent" title="运行当前 Python 文件">▶ 运行</button>
       <button id="btn-ai" class="tbtn" title="AI 助手（读/改文档）">🤖 AI</button>
       <button id="btn-settings" class="tbtn" title="设置">⚙ 设置</button>
@@ -80,6 +81,8 @@
       <div id="editor-wrap" class="editor-wrap">
         <div id="editor-host" class="editor-host"></div>
         <div id="image-host" class="image-host hidden"></div>
+        <!-- 对比标签内容区（双栏 diff，v0.2.0） -->
+        <div id="diff-host" class="diff-host hidden"></div>
         <!-- 大文件查看器横幅：位置/百分比 + 翻页 + 跳转 + 区域编辑开关（>256MB 标签显示） -->
         <div id="viewer-bar" class="viewer-bar hidden">
           <button id="btn-viewer-prev" class="tbtn small" title="上一窗口">⏪</button>

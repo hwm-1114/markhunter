@@ -904,6 +904,106 @@ async function boot() {
     if (!mode) toast('当前文件不是 Markdown，无法预览');
     else btnPreview.textContent = previewModeNames[mode];
   });
+  $('#btn-diff').addEventListener('click', () => openCompareDialog());
+
+  /** 对比入口：选择对比目标（其它打开的标签 / 剪贴板 / 磁盘版本）→ 打开对比标签 */
+  function openCompareDialog() {
+    const cur = getActiveTab();
+    if (!cur || cur.kind || !cur.state) {
+      toast('请先打开一个可编辑的文本文档再对比');
+      return;
+    }
+    if (cur.state.doc.length > 20 * 1024 * 1024) {
+      toast('当前文档超过对比上限（单侧 20MB）');
+      return;
+    }
+    const body = document.createElement('div');
+    const field = document.createElement('div');
+    field.className = 'field';
+    const lbl = document.createElement('label');
+    lbl.textContent = `将「${cur.name}」与以下内容对比：`;
+    const sel = document.createElement('select');
+    sel.className = 'field-select';
+    // 候选：其它文本标签 / 磁盘版本（未保存改动） / 剪贴板
+    const others = editor.getSession().paths
+      .map((p) => editor.findTabByPath(p))
+      .filter((t) => t && t !== cur && (!t.kind || t.kind === 'chunked') && t.state);
+    const optDisk = document.createElement('option');
+    optDisk.value = '__disk__';
+    optDisk.textContent = '💾 磁盘版本（查看未保存的改动）';
+    sel.appendChild(optDisk);
+    const optClip = document.createElement('option');
+    optClip.value = '__clip__';
+    optClip.textContent = '📋 剪贴板内容';
+    sel.appendChild(optClip);
+    for (const t of others) {
+      if (t.state.doc.length > 20 * 1024 * 1024) continue;
+      const o = document.createElement('option');
+      o.value = String(t.id);
+      o.textContent = '📑 ' + t.name;
+      sel.appendChild(o);
+    }
+    field.append(lbl, sel);
+    body.appendChild(field);
+    openModal({
+      title: '文档对比',
+      body,
+      actions: [
+        { label: '取消', onClick: () => closeModal() },
+        {
+          label: '开始对比',
+          primary: true,
+          onClick: async () => {
+            closeModal();
+            const v = sel.value;
+            const rightContent = cur.state.doc.toString();
+            const rightLabel = cur.name + '（当前）';
+            let leftContent = null;
+            let leftLabel = '';
+            try {
+              if (v === '__disk__') {
+                const data = await window.api.readFile(cur.path);
+                leftContent = data.content;
+                leftLabel = cur.name + '（磁盘）';
+              } else if (v === '__clip__') {
+                leftContent = await window.api.readClipboardText();
+                leftLabel = '剪贴板';
+                if (!leftContent) {
+                  toast('剪贴板为空或不是文本');
+                  return;
+                }
+              } else {
+                const t = tabsById(String(v));
+                if (!t) return;
+                leftContent = t.state.doc.toString();
+                leftLabel = t.name;
+              }
+            } catch (err) {
+              toast('读取对比内容失败：' + (err.message || err));
+              return;
+            }
+            editor.openDiffTab({
+              leftLabel,
+              leftContent,
+              rightLabel,
+              rightContent,
+              exportDir: state.rootDir || '',
+            });
+          },
+        },
+      ],
+    });
+  }
+
+  /** 按 id 找已打开标签（对话框选项值用 id 字符串） */
+  function tabsById(idStr) {
+    for (const p of editor.getSession().paths) {
+      const t = editor.findTabByPath(p);
+      if (t && String(t.id) === idStr) return t;
+    }
+    return null;
+  }
+
   $('#btn-run-py').addEventListener('click', () => {
     switchPanel('python');
     python.run();
