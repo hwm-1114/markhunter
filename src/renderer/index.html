@@ -78,6 +78,14 @@
       <div id="editor-wrap" class="editor-wrap">
         <div id="editor-host" class="editor-host"></div>
         <div id="image-host" class="image-host hidden"></div>
+        <!-- 大文件查看器横幅：位置/百分比 + 翻页 + 跳转 + 区域编辑开关（>256MB 标签显示） -->
+        <div id="viewer-bar" class="viewer-bar hidden">
+          <button id="btn-viewer-prev" class="tbtn small" title="上一窗口">⏪</button>
+          <span id="viewer-pos" class="viewer-pos"></span>
+          <button id="btn-viewer-next" class="tbtn small" title="下一窗口">⏩</button>
+          <button id="btn-viewer-jump" class="tbtn small" title="跳转到百分比或字节偏移">📍 跳转</button>
+          <button id="btn-viewer-edit" class="tbtn small" title="编辑当前窗口内容（保存时写回原位置）">✏️ 启用区域编辑</button>
+        </div>
         <div id="split-divider" class="split-divider hidden"></div>
         <div id="preview-host" class="preview-host hidden">
           <div id="zoom-badge" class="zoom-badge hidden">100%</div>

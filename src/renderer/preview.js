@@ -283,7 +283,8 @@ export function createPreview(getEditor, getTab, getIsDark) {
   function render() {
     renderCount++;
     const tab = getTab();
-    if (!tab || !isMarkdown(tab.name)) {
+    // viewer-lg（>256MB 大文件查看器）：窗口内容不做 markdown 渲染（整窗 toString 亦应避免放大）
+    if (!tab || tab.kind === 'viewer-lg' || !isMarkdown(tab.name)) {
       contentEl.innerHTML = '';
       return;
     }
@@ -318,16 +319,20 @@ export function createPreview(getEditor, getTab, getIsDark) {
   function applyMode() {
     const tab = getTab();
     const imageHost = $('#image-host');
+    const viewerBar = $('#viewer-bar');
     if (tab && tab.kind === 'image') {
       // 图片标签页：编辑区显示图片，隐藏编辑器/预览/分隔条
       editorHost.classList.add('hidden');
       previewHost.classList.add('hidden');
       divider.classList.add('hidden');
       imageHost.classList.remove('hidden');
+      if (viewerBar) viewerBar.classList.add('hidden');
       return;
     }
     imageHost.classList.add('hidden');
-    const canPreview = tab && isMarkdown(tab.name);
+    // viewer-lg：编辑区只读显示 + 查看器横幅；无 markdown 预览
+    if (viewerBar) viewerBar.classList.toggle('hidden', !(tab && tab.kind === 'viewer-lg'));
+    const canPreview = tab && tab.kind !== 'viewer-lg' && isMarkdown(tab.name);
     // 非 Markdown 文件（txt/json/py 等）编辑器始终显示，仅 Markdown 参与分屏/仅预览切换
     previewHost.classList.toggle('hidden', !canPreview || mode === 'edit');
     previewHost.classList.toggle('full', canPreview && mode === 'preview');
@@ -339,7 +344,7 @@ export function createPreview(getEditor, getTab, getIsDark) {
 
   function cycleMode() {
     const tab = getTab();
-    if (!tab || !isMarkdown(tab.name)) return;
+    if (!tab || tab.kind === 'viewer-lg' || !isMarkdown(tab.name)) return;
     const order = ['edit', 'split', 'preview'];
     mode = order[(order.indexOf(mode) + 1) % order.length];
     applyMode();

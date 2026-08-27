@@ -247,6 +247,115 @@ function registerFileIpc(getWindow) {
     await fsp.writeFile(filePath, content, 'utf8');
     return true;
   });
+
+  // ---------- 1B-7：超大文档分块流式写（write-stream 三通道） ----------
+  // 动机：单串 IPC 受 V8 字符串上限（≈5.36 亿字符）与结构化克隆内存峰值约束；
+  // >64M 字符的保存改走 open → append×N（16M 字符/块）→ close，close 时统一 markSelfWrite。
+  const writeStreams = new Map(); // id -> { fh, path }
+  let writeStreamSeq = 0;
+
+  ipcMain.handle('fs:write-stream-open', async (_e, filePath) => {
+    requireApproved(filePath, '路径不在当前工作目录内，操作已拒绝');
+    const fh = await fsp.open(filePath, 'w');
+    const id = ++writeStreamSeq;
+    writeStreams.set(id, { fh, path: filePath });
+    return id;
+  });
+
+  ipcMain.handle('fs:write-stream-append', async (_e, id, content) => {
+    const ws = writeStreams.get(Number(id));
+    if (!ws) throw new Error('写入流不存在或已关闭');
+    const buf = Buffer.from(String(content), 'utf8');
+    await ws.fh.write(buf, null); // position=null：从当前位置顺序追加
+    return true;
+  });
+
+  ipcMain.handle('fs:write-stream-close', async (_e, id) => {
+    const ws = writeStreams.get(Number(id));
+    if (!ws) return false;
+    writeStreams.delete(Number(id));
+    await ws.fh.close();
+    await markSelfWrite(ws.path); // close 时统一标记自写（宽限窗口吸收期间的事件回声）
+    return true;
+  });
+
+  // ---------- 1B-2：大文件查看器区域写回（splice） ----------
+  // 把 [offset, offset+oldLength) 字节替换为新内容：临时文件流式拷贝 前段+新内容+后段 →
+  // 校验大小 → rename 原子覆盖。区域内容单串传输（≤48MB 上限），头尾拷贝在主进程流式进行。
+  ipcMain.handle('fs:splice-file', async (_e, filePath, offset, oldLength, content) => {
+    requireApproved(filePath, '路径不在当前工作目录内，操作已拒绝');
+    const st = await fsp.stat(filePath);
+    if (!st.isFile()) throw new Error('目标不是文件');
+    const off = Math.max(0, Math.floor(Number(offset) || 0));
+    const oldLen = Math.max(0, Math.floor(Number(oldLength) || 0));
+    if (off + oldLen > st.size) throw new Error('区域越界（文件可能已被外部修改）');
+    const buf = Buffer.from(String(content), 'utf8');
+    if (buf.length > 48 * 1024 * 1024) throw new Error('区域内容过大（上限 48MB）');
+    const tmp = filePath + '.mh-splice-' + Date.now() + '.tmp';
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(tmp);
+      out.on('error', reject);
+      const copyRange = (start, end) =>
+        new Promise((res, rej) => {
+          if (end <= start) return res();
+          const src = fs.createReadStream(filePath, { start, end: end - 1 });
+          src.on('error', rej);
+          src.on('end', res);
+          src.pipe(out, { end: false });
+        });
+      (async () => {
+        try {
+          await copyRange(0, off);
+          await new Promise((res, rej) => out.write(buf, (e) => (e ? rej(e) : res())));
+          await copyRange(off + oldLen, st.size);
+          out.end(resolve);
+        } catch (e) {
+          try { out.destroy(); } catch { /* 已销毁 */ }
+          reject(e);
+        }
+      })().catch(reject);
+    }).catch(async (err) => {
+      try { await fsp.unlink(tmp); } catch { /* 清理失败忽略 */ }
+      throw err;
+    });
+    const newSize = st.size - oldLen + buf.length;
+    const tmpSt = await fsp.stat(tmp);
+    if (tmpSt.size !== newSize) {
+      await fsp.unlink(tmp);
+      throw new Error(`拼接校验失败：${tmpSt.size} ≠ ${newSize}`);
+    }
+    await fsp.rename(tmp, filePath);
+    await markSelfWrite(filePath);
+    return { size: newSize, bytes: buf.length };
+  });
+
+  // ---------- 1B-5：行号 → 字节偏移（全局搜索命中大文件定位用） ----------
+  // 流式统计换行：返回第 line 行行首的字节偏移（utf-8 语义近似：按字节扫描 \n，行号对
+  // ASCII/UTF-8 均准确——多字节字符不含 0x0A 字节；GBK 理论含 0x0A 的尾字节概率极低，可接受）
+  ipcMain.handle('fs:find-line-offset', async (_e, filePath, line) => {
+    const target = Math.max(1, Math.floor(Number(line) || 1)) - 1; // 需要越过 target 个换行
+    if (target === 0) return 0;
+    return await new Promise((resolve, reject) => {
+      const rs = fs.createReadStream(filePath, { highWaterMark: 4 * 1024 * 1024 });
+      let passed = 0; // 已越过的换行数
+      let offset = 0;
+      rs.on('data', (chunk) => {
+        for (let i = 0; i < chunk.length; i++) {
+          if (chunk[i] === 0x0a) {
+            passed++;
+            if (passed >= target) {
+              rs.destroy();
+              resolve(offset + i + 1);
+              return;
+            }
+          }
+        }
+        offset += chunk.length;
+      });
+      rs.on('end', () => resolve(offset));
+      rs.on('error', reject);
+    });
+  });
 }
 
 module.exports = { registerFileIpc, isInside };

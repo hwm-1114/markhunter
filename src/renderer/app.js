@@ -211,13 +211,19 @@ async function boot() {
   async function executeAiTool(name, args) {
     const tab = getActiveTab();
     const view = editor.getView();
+    const isViewer = tab && tab.kind === 'viewer-lg';
     switch (name) {
       case 'read_document': {
         if (!tab) return '（当前无打开的文档）';
         if (!tab.state) return '（当前为图片/PDF 等非文本文件，无法读取文字内容）';
+        if (isViewer) {
+          // 大文件查看器：只提供当前窗口内容（截断 20 万字符），避免整窗放大与全文误读
+          return `（当前为大文件查看器，仅加载了窗口内容；全文 ${Math.round(tab.vwin.size / 1048576)} MB）\n\n[窗口内容（截断）]\n` + tab.state.doc.toString().slice(0, 200000);
+        }
         return tab.state.doc.toString();
       }
       case 'replace_selection': {
+        if (isViewer) throw new Error('大文件查看器不支持该操作（可在查看器横幅开启区域编辑）');
         if (!tab || !tab.state) throw new Error('当前无可编辑的文本文档');
         const sel = view.state.selection.main;
         if (sel.from === sel.to) throw new Error('未选中文字');
@@ -226,12 +232,14 @@ async function boot() {
         return '已替换选中文字';
       }
       case 'insert_text': {
+        if (isViewer) throw new Error('大文件查看器不支持该操作（可在查看器横幅开启区域编辑）');
         if (!tab || !tab.state) throw new Error('当前无可编辑的文本文档');
         await maybeConfirm('在光标处插入文字？', args.text);
         await editor.applySnippet(String(args.text || ''), 'insert', view.state.selection.main.head);
         return '已插入文字';
       }
       case 'replace_document': {
+        if (isViewer) throw new Error('大文件查看器不支持该操作（可在查看器横幅开启区域编辑）');
         if (!tab || !tab.state) throw new Error('当前无可编辑的文本文档');
         await maybeConfirm('替换整个文档内容？', args.text);
         await editor.applySnippet(String(args.text || ''), 'full');
@@ -390,10 +398,10 @@ async function boot() {
   async function restoreSession() {
     const ls = state.settings.lastSession;
     if (!ls || !Array.isArray(ls.paths) || ls.paths.length === 0) return;
-    const paths = ls.paths.slice(0, 50);
-    // P9：固定并发 3 的限流池 —— 每个 openFile 各自 readFile（IPC）为主，CPU 侧轻；
-    // 并发过多会让大量 readFile 同时排队抢占主进程 IPC，3 路是启动速度与平稳性的折中。
-    const CONCURRENCY = 3;
+    // O2：会话上限 50 → 200（配合标签徽标增量化，100+ 标签的打开与恢复均可接受）
+    const paths = ls.paths.slice(0, 200);
+    // P9/O2：固定并发 6 的限流池（原 3；大标签数会话下恢复时间减半，主进程 IPC 仍可控）
+    const CONCURRENCY = 6;
     let cursor = 0;
     const workers = Array.from({ length: Math.min(CONCURRENCY, paths.length) }, async () => {
       while (cursor < paths.length) {
@@ -540,8 +548,20 @@ async function boot() {
     const tab = await editor.openFile(file);
     tree.reveal(file).catch(() => {}); // 全局搜索跳转：树跟随定位
     if (!tab) return;
-    // 先定位（switchTab 激活视图），再高亮关键词，避免视图重建丢失高亮
-    if (line) editor.jumpToLine(tab, line);
+    // 大文件查看器：行号 → 字节偏移（主进程流式统计换行）→ 居中开窗
+    if (tab.kind === 'viewer-lg') {
+      if (line) {
+        try {
+          const off = await window.api.findLineOffset(file, line);
+          await editor.revealViewerAt(tab, off);
+        } catch (err) {
+          console.warn('[gs-jump] 大文件定位失败:', file, err && err.message ? err.message : err);
+        }
+      }
+    } else if (line) {
+      // 先定位（switchTab 激活视图），再高亮关键词，避免视图重建丢失高亮
+      editor.jumpToLine(tab, line);
+    }
     if (query) {
       switchPanel('find');
       find.setQuery(query, true);
@@ -646,8 +666,8 @@ async function boot() {
     });
     pyField.append(pyLabel, pyRow, pyHint);
 
-    // 大文件上限（1 ~ 2048 MB）
-    const MAX_SIZE_MB = 2048;
+    // 大文件上限（1 ~ 4096 MB；v0.1.49 起支持 4GB 以下分层：>256MB 进只读查看器+区域编辑）
+    const MAX_SIZE_MB = 4096;
     const sizeField = document.createElement('div');
     sizeField.className = 'field';
     const sizeLabel = document.createElement('label');
@@ -659,7 +679,7 @@ async function boot() {
     sizeInput.value = s.maxFileSizeMB;
     const sizeHint = document.createElement('div');
     sizeHint.className = 'hint';
-    sizeHint.textContent = `可调整范围 1 ~ ${MAX_SIZE_MB} MB（超过上限的文件将被拒绝打开，防止卡死）`;
+    sizeHint.textContent = `可调整范围 1 ~ ${MAX_SIZE_MB} MB（超过上限拒绝打开）。≤256MB 直接编辑（>64MB 保存走流式写）；>256MB 以只读查看器打开（可切换区域编辑）`;
     sizeField.append(sizeLabel, sizeInput, sizeHint);
 
     // 自动保存间隔
@@ -805,7 +825,7 @@ async function boot() {
             const patch = {
               theme: themeSelect.value,
               pythonPath: pyInput.value.trim(),
-              maxFileSizeMB: Math.min(2048, Math.max(1, parseInt(sizeInput.value, 10) || 50)),
+              maxFileSizeMB: Math.min(4096, Math.max(1, parseInt(sizeInput.value, 10) || 50)),
               autoSaveDelay: Math.max(100, parseInt(saveInput.value, 10) || 800),
               scrollbarWidth: Math.min(40, Math.max(6, parseInt(sbInput.value, 10) || 10)),
               indentSize: Math.min(8, Math.max(1, parseInt(indentInput.value, 10) || 4)),

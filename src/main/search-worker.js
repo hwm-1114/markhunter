@@ -14,6 +14,7 @@
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
+const readline = require('readline');
 
 const SKIP_DIRS = new Set([
   'node_modules', '.git', '.svn', '.hg', '.idea', '.vscode',
@@ -27,8 +28,37 @@ const TEXT_EXT = new Set([
   '.cpp', '.hpp', '.java', '.go', '.rs', '.rb', '.php', '.sql', '.vue', '.svelte',
 ]);
 
-const MAX_SEARCH_FILE_MB = 10; // 全局搜索跳过超大文件（与原 search.js 一致）
-const PROGRESS_EVERY = 25;     // 每扫描 25 个文件回传一次进度（1GB 工程 ≈ 数千文件 → 数百条进度）
+const MAX_SEARCH_FILE_MB = 10;      // 小文件路径上限：整读进内存逐行匹配
+const MAX_STREAM_FILE_MB = 4096;    // 1B-4：大文件流式扫描上限（readline 流式逐行，内存有界）
+const PROGRESS_EVERY = 25;          // 每扫描 25 个文件回传一次进度（1GB 工程 ≈ 数千文件 → 数百条进度）
+
+/** 大文件流式行扫描（>10MB）：readline 逐行（8MB 高水位），行号全局精确；
+ *  结果行文本截断 1000 字符防超长行撑爆结果集。返回是否达到 maxResults。 */
+async function scanStream(file, q, results, maxResults, isCancelled) {
+  const rl = readline.createInterface({
+    input: fs.createReadStream(file, { encoding: 'utf8', highWaterMark: 8 * 1024 * 1024 }),
+    crlfDelay: Infinity,
+  });
+  let ln = 0;
+  let check = 0;
+  try {
+    for await (const line of rl) {
+      ln++;
+      if (++check >= 50000) {
+        check = 0;
+        if (isCancelled()) return true; // 任务被替换/取消：停止扫描本文件
+      }
+      const idx = line.toLowerCase().indexOf(q);
+      if (idx >= 0) {
+        results.push({ file, line: ln, text: line.length > 1000 ? line.slice(0, 1000) : line, matchIndex: idx });
+        if (results.length >= maxResults) return true;
+      }
+    }
+  } finally {
+    rl.close();
+  }
+  return false;
+}
 
 let currentId = null;   // 当前任务 id（新 search 覆盖旧任务，旧任务在下次迭代点自行退出）
 let cancelled = false;  // 取消标记（cancel 消息置位，walk/行扫描间隙检查）
@@ -55,10 +85,11 @@ async function* walk(dir) {
 /** 单任务执行：返回 { results } 或 { cancelled: true }（任务被替换/取消时提前退出） */
 async function runSearch(id, dir, query, maxResults) {
   const q = String(query).toLowerCase();
+  const isCancelled = () => cancelled || currentId !== id;
   const results = [];
   let scanned = 0;
   for await (const file of walk(dir)) {
-    if (cancelled || currentId !== id) return { cancelled: true };
+    if (isCancelled()) return { cancelled: true };
     scanned++;
     if (scanned % PROGRESS_EVERY === 0) {
       process.parentPort.postMessage({ id, type: 'progress', scanned, matches: results.length });
@@ -71,7 +102,15 @@ async function runSearch(id, dir, query, maxResults) {
     } catch {
       continue;
     }
-    if (st.size === 0 || st.size > MAX_SEARCH_FILE_MB * 1024 * 1024) continue;
+    if (st.size === 0) continue;
+    if (st.size > MAX_SEARCH_FILE_MB * 1024 * 1024) {
+      // 1B-4：大文件走流式扫描（≤4GB），不再整体跳过
+      if (st.size > MAX_STREAM_FILE_MB * 1024 * 1024) continue;
+      const full = await scanStream(file, q, results, maxResults, isCancelled);
+      if (isCancelled()) return { cancelled: true };
+      if (full) return { results };
+      continue;
+    }
     let content;
     try {
       content = await fsp.readFile(file, 'utf8');

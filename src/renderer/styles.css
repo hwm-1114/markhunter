@@ -427,6 +427,32 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .editor-host { flex: 1; min-width: 0; overflow: hidden; }
 .editor-host.half { flex: 1; }
 
+/* 大文件查看器横幅（>256MB 标签；悬浮于编辑区顶部中央） */
+.viewer-bar {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border: 1px solid var(--mh-border);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--mh-bg-panel) 88%, transparent);
+  box-shadow: 0 4px 16px rgba(16, 42, 84, 0.18);
+  backdrop-filter: blur(4px);
+  max-width: 80%;
+}
+.viewer-bar .viewer-pos {
+  font-size: 11.5px;
+  color: var(--mh-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* 图片标签页（文件树点击图片在编辑区查看） */
 .image-host {
   flex: 1;

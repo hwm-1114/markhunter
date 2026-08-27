@@ -5,7 +5,7 @@ import { Decoration, keymap } from '@codemirror/view';
 import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { json } from '@codemirror/lang-json';
-import { langFor, baseName, escapeHtml, showContextMenu, hideContextMenu, formatSize, stripChunkMarkers, CHUNK_MARKER_RE } from './ui.js';
+import { langFor, baseName, escapeHtml, showContextMenu, hideContextMenu, formatSize, stripChunkMarkers, CHUNK_MARKER_RE, showPrompt, toast } from './ui.js';
 import { pathToFileUrl } from './viewer.js';
 
 // ---------- P7：大文件分段模式 ----------
@@ -16,6 +16,15 @@ export const CHUNK_THRESHOLD = 4 * 1024 * 1024;      // 超过 4MB 走分段模�
 const CHUNK_SIZE = 2 * 1024 * 1024;                  // 每段 2MB
 const CHUNK_PREFETCH_MARGIN = 256 * 1024;            // 距底部 <256px 触发预读
 const CHUNK_MAX_BLOCKS = 4096;                       // 单文件最多分段数兜底（4096×2MB = 8GB）
+
+// ---------- 1B-2：大文件查看器（viewer-lg） ----------
+// >256MB 文件进入：只读滑窗查看（默认 ~8MB/窗，滚动到边缘自动翻页、百分比/字节偏移跳转）；
+// 「启用区域编辑」把当前窗口转为可编辑（≤40MB），保存时按字节偏移拼接写回原文件（fs:splice-file）。
+// 理由：CM6 全量驻留内存 + V8 单字符串上限，>256MB 全文编辑不可行（见开发计划 C1/C2）。
+const VIEWER_THRESHOLD = 256 * 1024 * 1024;   // >256MB → 查看器
+const VIEWER_WINDOW = 8 * 1024 * 1024;        // 窗口大小（字节）
+const VIEWER_STEP = 6 * 1024 * 1024;          // 翻页步进（字节，2MB 重叠）
+const VIEWER_EDIT_MAX = 40 * 1024 * 1024;     // 区域编辑窗口上限（字节）
 
 function chunkMarker(tab) {
   const c = tab && tab.chunk;
@@ -101,6 +110,7 @@ export function createEditor(callbacks) {
   const langCompartment = new Compartment();
   const wrapCompartment = new Compartment();
   const indentCompartment = new Compartment();
+  const readOnlyCompartment = new Compartment(); // viewer-lg 只读 ↔ 区域编辑切换
 
   function trailingSpaces(text, max) {
     let n = 0;
@@ -197,15 +207,19 @@ export function createEditor(callbacks) {
     ];
   }
 
-  function makeState(doc, lang) {
+  function makeState(doc, lang, readOnly = false, wrap = null) {
+    // wrap：null=跟随全局设置；false=强制不换行（viewer-lg —— 超长单行在 wrap 模式下
+    // CM 视口测量复杂度爆炸，8MB 单行曾致渲染进程内存失控）
+    const wrapOn = wrap === null ? wordWrapOn : wrap;
     return EditorState.create({
       doc,
       extensions: [
         basicSetup,
         lightTheme,
         langCompartment.of(langExt(lang)),
-        wrapCompartment.of(wordWrapOn ? EditorView.lineWrapping : []),
+        wrapCompartment.of(wrapOn ? EditorView.lineWrapping : []),
         indentCompartment.of(indentExtensions(indentSize)),
+        readOnlyCompartment.of(EditorState.readOnly.of(readOnly)),
         // 查找替换统一走底部大面板（find.js）：拦截 CM 内置搜索小窗（Mod-f 默认弹右上角小框，
         // 返回 true 仅阻止默认行为、不拦截冒泡 → app.js 的 document 级 Ctrl+F 处理仍会打开底部面板）
         Prec.highest(keymap.of([{ key: 'Mod-f', run: () => true }])),
@@ -215,7 +229,7 @@ export function createEditor(callbacks) {
             try {
               activeTab.state = u.state;
               activeTab.dirty = true;
-              renderTabs();
+              updateTabBadges(); // O1：只更新圆点/激活态，不重建标签栏
               updateStatusBar();
               onDocChanged(activeTab);
             } catch (err) {
@@ -246,11 +260,14 @@ export function createEditor(callbacks) {
     });
   }
 
-  // P7：分段模式预读 —— 活动标签滚动接近底部时自动加载下一段（dispatch 追加，保持光标/滚动）
+  // P7：分段模式预读 —— 活动标签滚动接近底部时自动加载下一段（dispatch 追加，保持光标/滚动）；
+  // viewer-lg：滚动到窗口边缘自动翻页
   view.scrollDOM.addEventListener(
     'scroll',
     () => {
-      if (activeTab && activeTab.kind === 'chunked') maybeAutoLoad(activeTab);
+      if (!activeTab) return;
+      if (activeTab.kind === 'chunked') maybeAutoLoad(activeTab);
+      else if (activeTab.kind === 'viewer-lg') maybeSlideViewer(activeTab);
     },
     { passive: true }
   );
@@ -283,6 +300,9 @@ export function createEditor(callbacks) {
         alertBox('打开文件失败', String(err.message || err));
       }
       return null;
+    }
+    if (st.size > VIEWER_THRESHOLD) {
+      return openViewerTab(path, st, opts); // 1B-2：>256MB 只读查看器（可区域编辑）
     }
     if (st.size > CHUNK_THRESHOLD) {
       return openChunkedTab(path, st, opts);
@@ -324,6 +344,241 @@ export function createEditor(callbacks) {
     window.api.watchFile(path, data.mtime); // 监听外部修改
     if (onSessionChange) onSessionChange();
     return tab;
+  }
+
+  // ---------- 1B-2：大文件查看器 ----------
+  /** 打开超大文件（>256MB）：只读滑窗查看；「启用区域编辑」后在窗口内编辑并按偏移写回 */
+  async function openViewerTab(path, st, opts) {
+    const tab = {
+      id: ++idSeq,
+      path,
+      name: baseName(path),
+      lang: langFor(path),
+      kind: 'viewer-lg',
+      state: null,
+      dirty: false,
+      saveTimer: null,
+      pinned: false,
+      editing: false,
+      lastSavedAt: 0,
+      vwin: { size: st.size, offset: 0, byteLen: 0, encoding: null, inflight: false },
+    };
+    try {
+      await loadViewerWindow(tab, 0);
+    } catch (err) {
+      if (opts.silent) {
+        console.warn('[openFile] 打开失败（已静默跳过）:', path, err && err.message ? err.message : err);
+      } else {
+        const { alertBox } = await import('./ui.js');
+        alertBox('打开文件失败', String(err.message || err));
+      }
+      return null;
+    }
+    tabs.push(tab);
+    switchTab(tab);
+    tab.dirty = false; // 加载窗口不是用户编辑
+    clearTimeout(tab.saveTimer);
+    if (onSessionChange) onSessionChange();
+    return tab;
+  }
+
+  /** 加载指定字节偏移的窗口内容到 tab（活动标签直接替换 view 文档，非活动标签重建 state）。
+   *  各窗口独立解码：窗口边界可能截断多字节字符（显示为替换符），查看语义可接受。 */
+  async function loadViewerWindow(tab, offset) {
+    const c = tab.vwin;
+    if (c.inflight) return;
+    c.inflight = true;
+    try {
+      const len = Math.min(VIEWER_WINDOW, c.size - offset);
+      const r = await window.api.readFileRange(tab.path, offset, len);
+      if (!c.encoding) {
+        try {
+          new TextDecoder('utf-8', { fatal: true }).decode(r.bytes);
+          c.encoding = 'utf-8';
+        } catch {
+          try {
+            new TextDecoder('gbk').decode(r.bytes);
+            c.encoding = 'gbk';
+          } catch {
+            c.encoding = 'latin1';
+          }
+        }
+      }
+      let text;
+      try {
+        text = new TextDecoder(c.encoding).decode(r.bytes);
+      } catch {
+        c.encoding = 'latin1';
+        text = new TextDecoder('latin1').decode(r.bytes);
+      }
+      // 二进制内容防护：控制字符（NUL 等）替换为 '·' 显示；窗口标记 binary → 禁止区域编辑
+      // （写回会失真）。真实文本大文件（日志等）不含控制字符，不受影响。
+      if (/[\u0000-\u0008\u000b-\u001f\u007f]/.test(text.slice(0, 1 << 20))) {
+        text = text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '·');
+        c.binary = true;
+      } else {
+        c.binary = false;
+      }
+      c.offset = r.start;
+      c.byteLen = r.end - r.start;
+      const isActive = activeTab === tab;
+      if (isActive) {
+        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+        tab.state = view.state;
+      } else {
+        tab.state = makeState(text, tab.lang, true, false); // viewer：只读 + 强制不换行
+      }
+      tab.dirty = false;
+      clearTimeout(tab.saveTimer);
+      if (isActive) {
+        updateViewerBar(tab);
+        updateStatusBar();
+      }
+    } finally {
+      c.inflight = false;
+    }
+  }
+
+  /** 滚动到窗口边缘时自动翻页（前进到顶 24px / 后退到底-24px，留边防止误触发反向翻页） */
+  async function slideViewer(tab, dir) {
+    const c = tab.vwin;
+    const maxOff = Math.max(0, c.size - VIEWER_WINDOW);
+    const target = Math.max(0, Math.min(c.offset + dir * VIEWER_STEP, maxOff));
+    if (target === c.offset || c.inflight) return;
+    await loadViewerWindow(tab, target);
+    const el = view.scrollDOM;
+    const to = dir > 0 ? 24 : Math.max(0, el.scrollHeight - el.clientHeight - 24);
+    const set = (n) => {
+      if (activeTab !== tab) return;
+      el.scrollTop = to;
+      if (n > 0) requestAnimationFrame(() => set(n - 1));
+    };
+    set(3);
+  }
+
+  /** 活动查看器标签的滚动边缘检测（编辑态禁止翻页，窗口即编辑边界） */
+  function maybeSlideViewer(tab) {
+    if (!tab || tab.kind !== 'viewer-lg' || tab.editing || tab.vwin.inflight) return;
+    if (activeTab !== tab) return;
+    const el = view.scrollDOM;
+    if (!el) return;
+    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (remaining < 8 && tab.vwin.offset < tab.vwin.size - VIEWER_WINDOW) {
+      slideViewer(tab, +1);
+    } else if (el.scrollTop <= 0 && tab.vwin.offset > 0) {
+      slideViewer(tab, -1);
+    }
+  }
+
+  /** 跳转：接受 百分比（42% / 42）或字节偏移（1.5G / 500M / 1600000000），窗口居中定位 */
+  async function viewerJump(tab, input) {
+    if (!tab || tab.kind !== 'viewer-lg') return false;
+    if (tab.editing && tab.dirty) {
+      toast('正在区域编辑且有未保存修改，请先保存或退出编辑');
+      return false;
+    }
+    const s = String(input || '').trim();
+    if (!s) return false;
+    let target = -1;
+    const m = s.match(/^([\d.]+)\s*%$/);
+    const g = s.match(/^([\d.]+)\s*([KMG]B?)$/i);
+    try {
+      if (/^[0-9]+$/.test(s)) target = parseInt(s, 10); // 纯数字 = 字节偏移
+      else if (g) {
+        const unit = g[2].toUpperCase().startsWith('G') ? 1024 ** 3 : g[2].toUpperCase().startsWith('M') ? 1024 ** 2 : 1024;
+        target = Math.round(parseFloat(g[1]) * unit);
+      } else if (m) {
+        target = Math.round((parseFloat(m[1]) / 100) * tab.vwin.size);
+      }
+    } catch {
+      target = -1;
+    }
+    if (target < 0 || target > tab.vwin.size) {
+      toast('无法识别的跳转位置（示例：50%、1.5G、500M、1600000000 字节）');
+      return false;
+    }
+    if (tab.editing) await setViewerEditing(tab, false); // 跳转前退出区域编辑
+    const center = Math.max(0, Math.min(target - Math.floor(VIEWER_WINDOW / 2), Math.max(0, tab.vwin.size - VIEWER_WINDOW)));
+    await loadViewerWindow(tab, center);
+    const set = (n) => {
+      if (activeTab === tab) {
+        view.scrollDOM.scrollTop = 0;
+        if (n > 0) requestAnimationFrame(() => set(n - 1));
+      }
+    };
+    set(3);
+    return true;
+  }
+
+  /** 区域编辑开关：开启后当前窗口可编辑（≤40MB）；关闭时若有未保存修改先保存 */
+  async function setViewerEditing(tab, on) {
+    if (!tab || tab.kind !== 'viewer-lg' || activeTab !== tab) return false;
+    if (on === tab.editing) return true;
+    if (on) {
+      if (tab.vwin.binary) {
+        toast('当前窗口含二进制/控制字符，不支持区域编辑（写回会失真）');
+        return false;
+      }
+      if (tab.vwin.byteLen > VIEWER_EDIT_MAX) {
+        toast(`当前窗口 ${formatSize(tab.vwin.byteLen)} 超过区域编辑上限（40MB），请先跳转到文件其它位置`);
+        return false;
+      }
+      view.dispatch({ effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(false)) });
+      tab.editing = true;
+      toast('区域编辑已启用：编辑当前窗口内容，保存（Ctrl+S）将写回文件原位置');
+    } else {
+      if (tab.dirty) {
+        const ok = await saveNow(tab);
+        if (!ok) return false; // 保存失败留在编辑态
+      }
+      view.dispatch({ effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(true)) });
+      tab.editing = false;
+    }
+    updateViewerBar(tab);
+    return true;
+  }
+
+  /** 查看器区域保存：当前窗口内容替换文件 [offset, offset+byteLen) 字节（流式拼接写回） */
+  async function saveViewerRegion(t) {
+    if (!t.dirty) return true;
+    if (!t.editing) return true;
+    const content = t.state.doc.toString();
+    try {
+      const r = await window.api.spliceFile(t.path, t.vwin.offset, t.vwin.byteLen, content);
+      t.vwin.size = r.size;
+      t.vwin.byteLen = r.bytes;
+      t.dirty = false;
+      t.lastSavedAt = Date.now();
+      if (onSaveStatus) onSaveStatus(`已保存区域 ${t.name}`);
+      updateTabBadges();
+      updateViewerBar(t);
+      return true;
+    } catch (err) {
+      if (onSaveStatus) onSaveStatus(`保存失败：${err.message || err}`);
+      return false;
+    }
+  }
+
+  /** 更新查看器横幅（位置/百分比 + 编辑按钮文案） */
+  function updateViewerBar(tab) {
+    const bar = document.getElementById('viewer-bar');
+    const pos = document.getElementById('viewer-pos');
+    const btnEdit = document.getElementById('btn-viewer-edit');
+    if (!bar || !tab || tab.kind !== 'viewer-lg') return;
+    const c = tab.vwin;
+    const pct = c.size > 0 ? Math.floor((c.offset / c.size) * 100) : 0;
+    if (pos) pos.textContent = `${formatSize(c.offset)} ~ ${formatSize(c.offset + c.byteLen)} / ${formatSize(c.size)}（${pct}%${tab.editing ? ' · 区域编辑中' : ' · 只读'}）`;
+    if (btnEdit) {
+      btnEdit.textContent = tab.editing ? '✅ 退出区域编辑' : '✏️ 启用区域编辑';
+      btnEdit.classList.toggle('danger', !!tab.editing);
+    }
+  }
+
+  // 全局搜索命中大文件：按字节偏移居中开窗（globalsearch → findLineOffset 后调用）
+  async function revealViewerAt(tab, byteOffset) {
+    if (!tab || tab.kind !== 'viewer-lg') return;
+    const center = Math.max(0, Math.min(byteOffset - Math.floor(VIEWER_WINDOW / 2), Math.max(0, tab.vwin.size - VIEWER_WINDOW)));
+    await loadViewerWindow(tab, center);
   }
 
   // ---------- P7：大文件分段模式 ----------
@@ -529,9 +784,10 @@ export function createEditor(callbacks) {
       renderImageTab(tab);
     } else {
       view.setState(tab.state);
-      // 对齐换行设置
+      // 对齐换行设置（viewer-lg 例外：强制不换行——超长单行 wrap 测量复杂度失控）
       wordWrapOn = getWordWrap();
-      view.dispatch({ effects: wrapCompartment.reconfigure(wordWrapOn ? EditorView.lineWrapping : []) });
+      const wrapOn = tab.kind === 'viewer-lg' ? false : wordWrapOn;
+      view.dispatch({ effects: wrapCompartment.reconfigure(wrapOn ? EditorView.lineWrapping : []) });
       // 对齐缩进设置（设置变更后，已开标签切换时也按当前 indentSize 生效）
       view.dispatch({ effects: indentCompartment.reconfigure(indentExtensions(indentSize)) });
       tab.state = view.state;
@@ -540,7 +796,8 @@ export function createEditor(callbacks) {
     // 若期间位置被其它力量移动（用户滚动/测量修正超出容差）则停止校正，不与用户抢滚动条。
     // 新标签 / 无记录 → 顶部。
     restoreTabScroll(tab);
-    renderTabs();
+    renderTabs(); // 切换可能伴随新增标签（openFile→switchTab）：结构渲染（低频路径；高频 docChanged 才走 updateTabBadges）
+    if (tab.kind === 'viewer-lg') updateViewerBar(tab);
     updateStatusBar();
     onTabSwitch(tab);
     if (onSessionChange) onSessionChange();
@@ -580,6 +837,13 @@ export function createEditor(callbacks) {
       sbFile.textContent = activeTab ? activeTab.name : '未打开文件';
       sbPos.textContent = activeTab ? (activeTab.lang === 'image' ? '图片预览' : '') : '';
       sbLen.textContent = '';
+      return;
+    }
+    if (activeTab.kind === 'viewer-lg') {
+      const c = activeTab.vwin;
+      sbFile.textContent = activeTab.name;
+      sbPos.textContent = `窗口偏移 ${formatSize(c.offset)} / ${formatSize(c.size)}（${c.size > 0 ? Math.floor((c.offset / c.size) * 100) : 0}%）`;
+      sbLen.textContent = `${formatSize(activeTab.state.doc.length)} 已加载`;
       return;
     }
     const pos = view.state.selection.main.head;
@@ -772,11 +1036,11 @@ export function createEditor(callbacks) {
         });
         el.appendChild(pin);
       }
-      if (tab.dirty) {
-        const dot = document.createElement('span');
-        dot.className = 'tab-dot';
-        el.appendChild(dot);
-      }
+      // 未保存圆点：常驻元素 + hidden 切换（增量化更新用，见 updateTabBadges）
+      const dot = document.createElement('span');
+      dot.className = 'tab-dot';
+      if (!tab.dirty) dot.classList.add('hidden');
+      el.appendChild(dot);
       const close = document.createElement('span');
       close.className = 'tab-close';
       close.textContent = '✕';
@@ -793,8 +1057,25 @@ export function createEditor(callbacks) {
         showTabCtx(e.clientX, e.clientY, tab);
       });
       tabsEl.appendChild(el);
+      tabBadges.set(tab, el); // O1：结构渲染时登记元素，供徽标级增量更新
     }
     updateEmpty();
+  }
+
+  // ---------- O1：标签徽标增量更新 ----------
+  // docChanged / 保存 / 切换等高频路径只改 active 类与 dirty 圆点，不再全量重建标签 DOM ——
+  // 100+ 标签时每击键的 O(N) DOM 重建是键入延迟的主要来源
+  const tabBadges = new Map(); // tab -> 元素
+  function updateTabBadges() {
+    for (const [tab, el] of tabBadges) {
+      if (!el.isConnected) {
+        tabBadges.delete(tab);
+        continue;
+      }
+      el.classList.toggle('active', tab === activeTab);
+      const dot = el.querySelector('.tab-dot');
+      if (dot) dot.classList.toggle('hidden', !tab.dirty);
+    }
   }
 
   function updateEmpty() {
@@ -822,20 +1103,45 @@ export function createEditor(callbacks) {
   async function doSaveNow(tab) {
     const t = tab || activeTab;
     if (!t || !t.dirty) return true;
+    if (t.kind === 'viewer-lg') {
+      return saveViewerRegion(t); // 区域编辑内容按字节偏移拼接写回
+    }
     if (t.kind === 'chunked' && !t.chunk.complete) {
       await ensureFullyLoaded(t); // P7：先补齐剩余分段再写盘，防止只写已加载部分造成截断
     }
     const content = stripChunkMarkers(t.state.doc.toString()); // 剥离占位标记，不污染文件内容
     try {
-      await window.api.writeFile(t.path, content);
+      if (t.state.doc.length > 64_000_000) {
+        await saveStreamed(t); // 超大文档：分块流式写（避免单串 IPC 的内存/长度悬崖）
+      } else {
+        await window.api.writeFile(t.path, content);
+      }
       t.dirty = false;
       t.lastSavedAt = Date.now(); // 自写回声双保险：file-changed 通知到达时据此忽略刚保存后的回声
       if (onSaveStatus) onSaveStatus(`已保存 ${t.name}`);
-      renderTabs();
+      updateTabBadges();
       return true;
     } catch (err) {
       if (onSaveStatus) onSaveStatus(`保存失败：${err.message || err}`);
       return false;
+    }
+  }
+
+  /** 超大文档分块流式写：16M 字符一块经 write-stream 通道落盘，避免 doc.toString() 单串
+   *  （V8 单字符串上限 ≈ 5.36 亿字符）与结构化克隆的整串内存峰值。 */
+  async function saveStreamed(t) {
+    const total = t.state.doc.length;
+    const id = await window.api.writeStreamOpen(t.path);
+    try {
+      const CHUNK = 16_000_000;
+      for (let pos = 0; pos < total; pos += CHUNK) {
+        const piece = t.state.doc.sliceString(pos, Math.min(pos + CHUNK, total));
+        await window.api.writeStreamAppend(id, piece);
+      }
+      await window.api.writeStreamClose(id);
+    } catch (err) {
+      try { await window.api.writeStreamClose(id); } catch { /* fd 已失效 */ }
+      throw err;
     }
   }
 
@@ -1040,6 +1346,10 @@ export function createEditor(callbacks) {
   }
 
   function insertAtCursor(text) {
+    if (view.state.readOnly) {
+      toast('只读内容不可编辑（大文件查看器请先启用区域编辑）');
+      return;
+    }
     const pos = view.state.selection.main.head;
     view.dispatch({
       changes: { from: pos, insert: text },
@@ -1155,5 +1465,37 @@ export function createEditor(callbacks) {
     toast(`已从外部重新加载 ${tab.name}`);
   });
 
-  return { openFile, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs, scrollToTop, scrollToBottom };
+  // ---------- 查看器横幅按钮（DOM 在 index.html，逻辑归编辑器模块） ----------
+  const viewerBar = document.getElementById('viewer-bar');
+  const btnViewerJump = document.getElementById('btn-viewer-jump');
+  const btnViewerEdit = document.getElementById('btn-viewer-edit');
+  const btnViewerPrev = document.getElementById('btn-viewer-prev');
+  const btnViewerNext = document.getElementById('btn-viewer-next');
+  if (btnViewerJump) {
+    btnViewerJump.addEventListener('click', () => {
+      const t = activeTab;
+      if (!t || t.kind !== 'viewer-lg') return;
+      showPrompt(
+        '跳转位置',
+        '百分比（如 50%）或字节偏移（如 1.5G / 500M / 1600000000）',
+        '',
+        (v) => viewerJump(t, v)
+      );
+    });
+  }
+  if (btnViewerEdit) {
+    btnViewerEdit.addEventListener('click', () => {
+      const t = activeTab;
+      if (!t || t.kind !== 'viewer-lg') return;
+      setViewerEditing(t, !t.editing);
+    });
+  }
+  if (btnViewerPrev) btnViewerPrev.addEventListener('click', () => {
+    if (activeTab && activeTab.kind === 'viewer-lg') slideViewer(activeTab, -1);
+  });
+  if (btnViewerNext) btnViewerNext.addEventListener('click', () => {
+    if (activeTab && activeTab.kind === 'viewer-lg') slideViewer(activeTab, +1);
+  });
+
+  return { openFile, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, applySnippet, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs, scrollToTop, scrollToBottom, viewerJump, setViewerEditing, revealViewerAt, slideViewerWindow: slideViewer };
 }

@@ -100,12 +100,13 @@ const RENDERER_TEST = `
     results.push(['runPython', false, 'no python']);
   }
 
-  // 8. 删除
+  // 8. 删除（v0.1.49 起主进程 setup 会在 build/ 预置大文件材料 → 断言"目标项已删除"而非"目录为空"）
   await api.remove(f1, false);
   await api.remove(root + '/sub', true);
   await api.remove(root + '/hello.py', false);
   tree = await api.readTree(root);
-  results.push(['remove', tree.length === 0]);
+  const names = tree.map((e) => e.name);
+  results.push(['remove', !names.includes('hello.py') && !names.includes('sub') && !names.some((n) => n === f1.split('/').pop())]);
 
   // ---- UI 级验证 ----
   const app = window.__app;
@@ -555,11 +556,11 @@ const RENDERER_TEST = `
     await new Promise((r) => setTimeout(r, 200));
     const visible = !document.querySelector('#modal-mask').classList.contains('hidden');
     const inputs = document.querySelectorAll('#modal-body input').length;
-    // 范围提示应显示大文件上限最大值与滚动条宽度最大值
+    // 范围提示应显示大文件上限最大值（v0.1.49 起 4096）与滚动条宽度最大值
     const hints = Array.from(document.querySelectorAll('#modal-body .hint'))
       .map((h) => h.textContent)
       .join('|');
-    const rangeOk = hints.includes('2048') && hints.includes('40');
+    const rangeOk = hints.includes('4096') && hints.includes('40');
     // 取消关闭
     const cancelBtn = document.querySelector('#modal-actions .tbtn');
     if (cancelBtn) cancelBtn.click();
@@ -2366,6 +2367,191 @@ const RENDERER_TEST = `
       : 'mermaid=' + (typeof window.__mermaid) + ',svg=' + !!svg + ',err=' + (err ? err.textContent : 'none');
   });
 
+  // ============ v0.1.49 阶段一：可靠性压测 + 大文件分层（材料由主进程预置在 build/ 下） ============
+
+  // bigFileSetup：大文件上限 50MB → 4096MB（块内用例共用；Teardown 恢复）
+  await step('bigFileSetup', async () => {
+    await api.setSettings({ maxFileSizeMB: 4096 });
+    app.state.settings = await api.getSettings();
+    return app.state.settings.maxFileSizeMB === 4096 ? true : 'set failed';
+  });
+
+  // stressTabs100：100 标签打开耗时 / 切换 / 键入延迟 / 堆内存（信息型 + 软断言；上限报告数据源）
+  await step('stressTabs100', async () => {
+    const t0 = performance.now();
+    for (let i = 0; i < 100; i++) {
+      await api.writeFile(root + '/stress-f' + i + '.txt', 'stress file ' + i + ' ' + 'x'.repeat(200));
+    }
+    const tFiles = performance.now() - t0;
+    const t1 = performance.now();
+    for (let i = 0; i < 100; i++) await app.editor.openFile(root + '/stress-f' + i + '.txt');
+    const tOpen = performance.now() - t1;
+    await app.editor.openFile(root + '/stress-f0.txt'); // 切回首标签
+    await new Promise((r) => setTimeout(r, 300));
+    const view = app.editor.getView();
+    const t2 = performance.now();
+    for (let k = 0; k < 20; k++) view.dispatch({ changes: { from: view.state.doc.length, insert: 'y' } });
+    const avgInput = (performance.now() - t2) / 20;
+    const heapMB = performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : -1;
+    await app.editor.closeAll();
+    console.log('[stress-tabs] create100=' + Math.round(tFiles) + 'ms open100=' + Math.round(tOpen) + 'ms avgInput=' + avgInput.toFixed(1) + 'ms heap=' + heapMB + 'MB');
+    const ok = tOpen < 60000 && avgInput < 400;
+    return ok ? true : 'open=' + Math.round(tOpen) + 'ms,avgInput=' + avgInput.toFixed(1) + 'ms（超阈值）';
+  });
+
+  // stressSession120：120 标签会话恢复（顺序/数量正确；上限 200、并发 6 的验证）
+  await step('stressSession120', async () => {
+    const paths = [];
+    for (let i = 0; i < 120; i++) {
+      const p = root + '/stress-s' + i + '.txt';
+      await api.writeFile(p, 'session stress ' + i);
+      paths.push(p);
+    }
+    await api.setSettings({ lastSession: { paths, active: 0, pinned: [] } });
+    app.state.settings = await api.getSettings();
+    const t0 = performance.now();
+    await app.session.restore();
+    const tRestore = performance.now() - t0;
+    const s = app.editor.getSession();
+    const countOk = s.paths.length === 120;
+    const orderOk = s.paths[0] === paths[0] && s.paths[119] === paths[119];
+    console.log('[stress-session] restore120=' + Math.round(tRestore) + 'ms count=' + s.paths.length);
+    await app.editor.closeAll();
+    await api.setSettings({ lastSession: null });
+    app.state.settings = await api.getSettings();
+    for (let i = 0; i < 120; i++) await api.remove(root + '/stress-s' + i + '.txt', false);
+    return countOk && orderOk ? true : 'count=' + s.paths.length + ',order=' + orderOk;
+  });
+
+  // stressLarge3：两个 60MB 分段大文件同开 + 切换 + 滚动预读（内存信息型）
+  await step('stressLarge3', async () => {
+    const a = await app.editor.openFile(root + '/build/big-a.bin');
+    const b = await app.editor.openFile(root + '/build/big-b.bin');
+    const kinds = a && a.kind === 'chunked' && b && b.kind === 'chunked';
+    await app.editor.openFile(root + '/build/big-a.bin'); // 切回 a
+    await new Promise((r) => setTimeout(r, 400));
+    const view = app.editor.getView();
+    const initLen = view.state.doc.length;
+    view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight;
+    view.scrollDOM.dispatchEvent(new Event('scroll'));
+    let grew = false;
+    for (let i = 0; i < 16 && !grew; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      view.scrollDOM.scrollTop = view.scrollDOM.scrollHeight;
+      view.scrollDOM.dispatchEvent(new Event('scroll'));
+      grew = view.state.doc.length > initLen;
+    }
+    const heapMB = performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : -1;
+    await app.editor.closeAll();
+    console.log('[stress-large3] 2x60MB heap=' + heapMB + 'MB');
+    return kinds && grew ? true : 'kinds=' + kinds + ',grew=' + grew;
+  });
+
+  // boundaryViewer：3.9GB 只读查看器（滑页/跳转）+ 512MB 同档 + 4.1GB 拒绝
+  await step('boundaryViewer', async () => {
+    const tab = await app.editor.openFile(root + '/build/bd-3g9.bin');
+    const kindOk = tab && tab.kind === 'viewer-lg';
+    const barVisible = !document.getElementById('viewer-bar').classList.contains('hidden');
+    const posText = (document.getElementById('viewer-pos').textContent || '').includes('%');
+    const size0 = tab.vwin.size;
+    // 翻页按钮路径（滑窗 API）：offset 0 → 6MB（稀疏 NUL 单行无纵向滚动，滚动触发不适用）
+    await app.editor.slideViewerWindow(tab, 1);
+    let slid = false;
+    for (let i = 0; i < 10 && !slid; i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      slid = tab.vwin.offset > 0;
+    }
+    // 二进制窗口（NUL）：区域编辑应被拒绝
+    const binaryGuard = (await app.editor.setViewerEditing(tab, true)) === false;
+    // 跳转 50%：窗口居中
+    const jumped = await app.editor.viewerJump(tab, '50%');
+    const target = Math.max(0, Math.floor(size0 / 2 - 4 * 1024 * 1024));
+    const jumpOk = jumped && Math.abs(tab.vwin.offset - target) < 1024 * 1024;
+    // 512MB 同为查看器
+    const t512 = await app.editor.openFile(root + '/build/bd-512mb.bin');
+    const ok512 = t512 && t512.kind === 'viewer-lg';
+    // 4.1GB 超限拒绝（alertBox 弹窗需关闭）
+    const t41 = await app.editor.openFile(root + '/build/bd-4g1.bin');
+    const rejected = t41 === null;
+    const mask = document.getElementById('modal-mask');
+    const modalShown = !mask.classList.contains('hidden');
+    const btn = document.querySelector('#modal-actions .tbtn');
+    if (btn) btn.click();
+    await app.editor.closeAll();
+    return kindOk && barVisible && posText && slid && binaryGuard && jumpOk && ok512 && rejected && modalShown
+      ? true
+      : 'kind=' + kindOk + ',bar=' + barVisible + ',pos=' + posText + ',slid=' + slid + ',binGuard=' + binaryGuard + ',jump=' + jumpOk + ',512=' + ok512 + ',rej=' + rejected + '/' + modalShown;
+  });
+
+  // viewerRegionEdit：280MB 查看器区域编辑 → 拼接写回（大小 + 内容校验）
+  await step('viewerRegionEdit', async () => {
+    const path = root + '/build/bd-280mb.bin';
+    const st0 = await api.stat(path);
+    const tab = await app.editor.openFile(path);
+    if (!tab || tab.kind !== 'viewer-lg') {
+      await app.editor.closeAll();
+      return 'kind=' + (tab && tab.kind);
+    }
+    const on = await app.editor.setViewerEditing(tab, true);
+    const view = app.editor.getView();
+    view.dispatch({ changes: { from: 0, insert: 'REGION_EDIT_OK_7788' } });
+    await new Promise((r) => setTimeout(r, 100));
+    const saved = await app.editor.saveNow(tab);
+    const st1 = await api.stat(path);
+    const sizeOk = st1.size === st0.size + 'REGION_EDIT_OK_7788'.length;
+    const r = await api.readFileRange(path, 0, 64);
+    const head = new TextDecoder('utf-8').decode(r.bytes);
+    const contentOk = head.includes('REGION_EDIT_OK_7788');
+    const off = await app.editor.setViewerEditing(tab, false);
+    await app.editor.closeAll();
+    return on && saved && sizeOk && contentOk && off ? true : 'on=' + on + ',saved=' + saved + ',size=' + sizeOk + '(' + st1.size + '/' + (st0.size + 14) + '),content=' + contentOk + ',off=' + off;
+  });
+
+  // bigSearchStream：15MB 文件流式搜索（原 >10MB 整档跳过；行号全局精确）
+  await step('bigSearchStream', async () => {
+    const t0 = performance.now();
+    const results = await api.globalSearch(root + '/build', 'ZZSTREAM_MARKER_ZZ');
+    const ms = Math.round(performance.now() - t0);
+    const hit = results.length >= 1 && String(results[0].file).includes('search15.txt') && (results[0].text || '').includes('ZZSTREAM_MARKER_ZZ');
+    const lineOk = results.length >= 1 && results[0].line > 100000;
+    return hit && lineOk ? true : 'hit=' + hit + ',line=' + (results[0] && results[0].line) + ',n=' + results.length;
+  });
+
+  // saveStreamBig：65MB 多行文件编辑 → 分块流式保存（>64M 字符路径）→ 大小与尾部内容校验
+  await step('saveStreamBig', async () => {
+    const path = root + '/build/big-w.txt';
+    const st0 = await api.stat(path);
+    const tab = await app.editor.openFile(path);
+    if (!tab || tab.kind !== 'chunked') {
+      await app.editor.closeAll();
+      return 'kind=' + (tab && tab.kind);
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    const view = app.editor.getView();
+    view.dispatch({ changes: { from: view.state.doc.length, insert: 'EOT' } });
+    await new Promise((r) => setTimeout(r, 150));
+    const t0 = performance.now();
+    const saved = await app.editor.saveNow(tab);
+    const ms = Math.round(performance.now() - t0);
+    const st1 = await api.stat(path);
+    const sizeOk = st1.size === st0.size + 3;
+    const tail = await api.readFileRange(path, 2097150, 16);
+    const tailText = new TextDecoder('utf-8').decode(tail.bytes);
+    // EOT 插在打开时的文档末尾（= 首段 2MB 处；后续分段追加会移除占位标记接在其后）
+    const tailOk = tailText.includes('EOT');
+    await app.editor.closeAll();
+    console.log('[stress-savestream] 65MB save=' + ms + 'ms size=' + st1.size);
+    return saved && sizeOk && tailOk ? true : 'saved=' + saved + ',size=' + sizeOk + '(' + st1.size + '/' + (st0.size + 3) + '),tail=' + tailOk;
+  });
+
+  // bigFileTeardown：恢复默认上限与干净会话
+  await step('bigFileTeardown', async () => {
+    await app.editor.closeAll();
+    await api.setSettings({ maxFileSizeMB: 50, lastSession: null });
+    app.state.settings = await api.getSettings();
+    return true;
+  });
+
   return results;
 })()
 `;
@@ -2452,6 +2638,40 @@ async function runSmoke(win) {
       fs.mkdirSync(EXT_ROOT, { recursive: true });
       fs.writeFileSync(path.join(EXT_ROOT, 'note.md'), '# 外部笔记\n内容', 'utf8');
       fs.writeFileSync(path.join(EXT_ROOT, 'run.py'), 'print("EXT_RUN_OK")', 'utf8');
+      // 1A/1B：大文件与边界测试材料 —— 放 build/ 子目录（全局搜索 walk 跳过 SKIP_DIRS 中的 build，
+      // 避免边界大文件拖慢其它搜索用例）。查看器边界档用稀疏文件（ftruncate 秒建不占盘，内容为 NUL，
+      // 查看器按二进制窗口只读显示）；编辑/分段档用真实多行内容（NUL 单行会触发 CM 超长行测量失控）。
+      {
+        const bigDir = path.join(TEST_ROOT, 'build');
+        fs.mkdirSync(bigDir, { recursive: true });
+        const mkSparse = (p, size) => {
+          const fd = fs.openSync(p, 'w');
+          fs.ftruncateSync(fd, size);
+          fs.closeSync(fd);
+        };
+        const writeLines = (p, totalBytes) => {
+          const line = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ,.!?- \n';
+          const parts = new Array(Math.ceil(totalBytes / line.length)).fill(line);
+          fs.writeFileSync(p, parts.join(''));
+        };
+        mkSparse(path.join(bigDir, 'bd-512mb.bin'), 512 * 1024 * 1024); // 查看器边界内（二进制只读档）
+        writeLines(path.join(bigDir, 'bd-280mb.bin'), 280 * 1024 * 1024); // 区域编辑用（真实文本）
+        mkSparse(path.join(bigDir, 'bd-3g9.bin'), Math.floor(3.9 * 1024 * 1024 * 1024)); // 4GB 内最大档
+        mkSparse(path.join(bigDir, 'bd-4g1.bin'), Math.floor(4.1 * 1024 * 1024 * 1024)); // 超限拒绝档
+        writeLines(path.join(bigDir, 'big-a.bin'), 60 * 1024 * 1024); // chunked 多大文件同开
+        writeLines(path.join(bigDir, 'big-b.bin'), 60 * 1024 * 1024);
+        // 流式写用：真实多行内容 65MB（>64M 字符触发 write-stream 路径）
+        writeLines(path.join(bigDir, 'big-w.txt'), 65 * 1024 * 1024);
+        // 流式搜索用：真实内容 15MB（>10MB 原跳过档），中部埋标记行
+        {
+          const line = Buffer.from('the quick brown fox jumps over the lazy dog 0123456789\n');
+          const total = 15 * 1024 * 1024;
+          const buf = Buffer.alloc(total);
+          for (let off = 0; off + line.length <= total; off += line.length) buf.fill(line, off, off + line.length);
+          Buffer.from('ZZSTREAM_MARKER_ZZ\n').copy(buf, Math.floor(total / 2));
+          fs.writeFileSync(path.join(bigDir, 'search15.txt'), buf);
+        }
+      }
       const results = await win.webContents.executeJavaScript(RENDERER_TEST);
       // 需求3：剪贴板读写由主进程控制（渲染进程仅经 window.api.readClipboardText 读取）
       clipboard.writeText('纯文本测试 123');

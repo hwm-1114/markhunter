@@ -14,6 +14,14 @@ contextBridge.exposeInMainWorld('api', {
   readFile: (p) => ipcRenderer.invoke('fs:read-file', p),
   // P7：按 range 分段读取大文件（返回 { bytes: ArrayBuffer, start, end, size, mtime }，渲染端流式解码）
   readFileRange: (p, start, length) => ipcRenderer.invoke('fs:read-file-range', p, start, length),
+  // 1B-7：超大文档分块流式写（open → append×N → close；close 时主进程统一标记自写）
+  writeStreamOpen: (p) => ipcRenderer.invoke('fs:write-stream-open', p),
+  writeStreamAppend: (id, content) => ipcRenderer.invoke('fs:write-stream-append', id, content),
+  writeStreamClose: (id) => ipcRenderer.invoke('fs:write-stream-close', id),
+  // 1B-2：大文件查看器区域写回（[offset, offset+oldLength) 替换为 content，流式拼接后原子覆盖）
+  spliceFile: (p, offset, oldLength, content) => ipcRenderer.invoke('fs:splice-file', p, offset, oldLength, content),
+  // 1B-5：行号 → 字节偏移（流式统计换行；全局搜索命中大文件定位用）
+  findLineOffset: (p, line) => ipcRenderer.invoke('fs:find-line-offset', p, line),
   setRootDir: (dir) => ipcRenderer.invoke('fs:set-root', dir),
   writeFile: (p, c) => ipcRenderer.invoke('fs:write-file', p, c),
   writeExternal: (p, c) => ipcRenderer.invoke('fs:write-external', p, c), // 测试用

@@ -187,6 +187,10 @@ export function createFind(getEditor, getTab) {
 
   /** 替换当前选中匹配（无选中时替换第一处），替换后跳到下一处 */
   function replaceCurrent() {
+    if (getView().state.readOnly) {
+      toast('只读内容不可替换');
+      return 0;
+    }
     if (current < 0 || current >= matches.length) {
       if (matches.length > 0) jumpTo(0);
       return 0;
@@ -202,6 +206,10 @@ export function createFind(getEditor, getTab) {
 
   /** 替换当前文件中全部匹配（一次 dispatch，多处原子生效），返回替换处数 */
   function replaceAll() {
+    if (getView().state.readOnly) {
+      toast('只读内容不可替换');
+      return 0;
+    }
     const tab = getTab();
     if (!query || !tab || !tab.state || matches.length === 0) return 0;
     const rep = replaceInput.value;
