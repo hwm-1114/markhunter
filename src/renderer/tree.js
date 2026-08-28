@@ -1,5 +1,7 @@
 // 左侧文件树
-import { $, formatSize, escapeHtml, showPrompt, confirmDialog, toast, showContextMenu, hideContextMenu, baseName } from './ui.js';
+// v0.2.3 多目录：侧栏可同时打开多个目录（roots 列表，每个根一个树分支），
+// 目录树行可拖拽传输：拖到任意目录行 = 移动（Ctrl+拖 = 复制），跨目录/跨根均可。
+import { $, formatSize, escapeHtml, showPrompt, confirmDialog, toast, showContextMenu, hideContextMenu, baseName, openModal, closeModal } from './ui.js';
 
 const FILE_ICONS = {
   md: '📝', markdown: '📝', json: '🧾', py: '🐍', txt: '📄',
@@ -63,13 +65,17 @@ function realSegs(dirPath, drv) {
 export function createTree() {
   const container = $('#file-tree');
 
-  let rootDir = null;
+  let roots = [];              // v0.2.3 多目录：侧栏打开的全部根（渲染顺序 = 列表顺序）
+  let rootDir = null;          // 活动工作目录（须含于 roots；全局搜索/新建等默认目标）
   let selectedPath = null;
   let expanded = new Set(); // 展开的目录集合
   let onOpenFile = null;
   let onOpenDir = null;
   let onClosePath = null; // 删除/重命名后关闭或更新已打开标签
   let onSwitchRoot = null; // 需求1：外部区目录行「切换工作目录到此目录」
+  let onRootClose = null;  // v0.2.3 多目录：关闭侧栏某个根
+  let onActivateRoot = null; // v0.2.3 多目录：把某根设为活动目录
+  let getOpenPaths = null;   // v0.2.3 拖拽移动后同步已打开标签（app.js 提供）
   let compareBase = null; // v0.2.1 对比基准（右键「设为对比基准」→ 另一文件右键「与基准对比」）
 
   const nodeMap = new Map(); // path -> { row, children, isDir }
@@ -86,29 +92,66 @@ export function createTree() {
     onClosePath = cbs.onClosePath;
     onSwitchRoot = cbs.onSwitchRoot;
     onCompareFiles = cbs.onCompareFiles;
+    onRootClose = cbs.onRootClose;
+    onActivateRoot = cbs.onActivateRoot;
+    getOpenPaths = cbs.getOpenPaths;
   }
 
+  /** 旧接口（单目录语义）：设唯一根并重置展开态（冒烟/简单场景仍使用） */
   function setRoot(dir) {
-    rootDir = dir;
-    expanded = new Set([dir]);
+    roots = dir ? [dir] : [];
+    rootDir = dir || null;
+    expanded = new Set(dir ? [dir] : []);
     selectedPath = null;
     return render(); // 返回渲染完成 Promise（供 await）
+  }
+
+  /** v0.2.3 多目录：整表设置根列表 + 活动目录；已展开目录的展开态保留（新根默认展开） */
+  function setRoots(dirs, activeDir) {
+    roots = Array.isArray(dirs) ? dirs.slice() : [];
+    rootDir = activeDir || roots[0] || null;
+    for (const d of roots) expanded.add(d);
+    selectedPath = null;
+    return render();
   }
 
   function render() {
     container.innerHTML = '';
     nodeMap.clear();
-    if (!rootDir) {
+    if (!roots.length) {
       renderExternal();
       if (container.childElementCount === 0) {
         container.innerHTML = '<div class="tree-empty">点击「选择目录」打开一个本地文件夹</div>';
       }
       return Promise.resolve();
     }
-    const rootRow = makeRow({ name: rootDir.split(/[\\/]/).pop(), path: rootDir, isDir: true, root: true });
-    container.appendChild(rootRow.row);
-    container.appendChild(rootRow.children);
-    return expandNode(rootDir, rootRow).then(() => renderExternal());
+    const loads = [];
+    for (const dir of roots) {
+      const rootRow = makeRow({ name: dir.split(/[\\/]/).pop() || dir, path: dir, isDir: true, root: true });
+      // 活动根标记（视觉高亮 + 「活动」徽标）
+      if (rootDir && normalizeKey(rootDir) === normalizeKey(dir)) {
+        rootRow.row.classList.add('active-root');
+        const badge = document.createElement('span');
+        badge.className = 'root-badge';
+        badge.textContent = '活动';
+        badge.title = '当前活动目录（全局搜索 / 新建等操作的默认目标）';
+        rootRow.row.appendChild(badge);
+      }
+      // 根行关闭按钮（仅从侧栏移除，不删除磁盘文件）
+      const close = document.createElement('span');
+      close.className = 'root-close';
+      close.textContent = '✕';
+      close.title = '关闭此目录（不会删除磁盘文件）';
+      close.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (onRootClose) onRootClose(dir);
+      });
+      rootRow.row.appendChild(close);
+      container.appendChild(rootRow.row);
+      container.appendChild(rootRow.children);
+      loads.push(expandNode(dir, rootRow));
+    }
+    return Promise.all(loads).then(() => renderExternal());
   }
 
   function makeRow(node, opts = {}) {
@@ -171,6 +214,8 @@ export function createTree() {
       showCtx(e.clientX, e.clientY, node);
     });
 
+    attachDrag(row, node, opts);
+
     return { row, children };
   }
 
@@ -218,7 +263,7 @@ export function createTree() {
         const sub = makeRow(
           it,
           external
-            ? { onContext: (x, y, node) => (node.isDir ? showExternalDirCtx(x, y, node) : showExternalFileCtx(x, y, node)) }
+            ? { external: true, onContext: (x, y, node) => (node.isDir ? showExternalDirCtx(x, y, node) : showExternalFileCtx(x, y, node)) }
             : {}
         );
         entry.children.appendChild(sub.row);
@@ -289,6 +334,7 @@ export function createTree() {
   function renderExternal() {
     if (externalOpen.size === 0) return Promise.resolve();
     const extRootRow = makeRow({ name: '外部文件', path: EXT_ROOT_KEY, isDir: true, root: true }, {
+      external: true, // 合成行（非真实路径）：不参与拖拽
       onClick: () => toggleSynth(EXT_ROOT_KEY, extRootRow.row),
       onContext: () => {},
     });
@@ -308,6 +354,7 @@ export function createTree() {
     for (const drv of drvs) {
       const driveKey = synthDriveKey(drv);
       const driveRow = makeRow({ name: driveLabel(drv), path: driveKey, isDir: true }, {
+        external: true, // 合成行（非真实路径）：不参与拖拽
         onClick: () => {
           if (expanded.has(driveKey)) {
             expanded.delete(driveKey);
@@ -344,6 +391,7 @@ export function createTree() {
     }
     for (const topPath of topDirs.values()) {
       const sub = makeRow({ name: baseName(topPath), path: topPath, isDir: true }, {
+        external: true,
         onContext: (x, y, node) => showExternalDirCtx(x, y, node),
       });
       childrenEl.appendChild(sub.row);
@@ -351,6 +399,7 @@ export function createTree() {
     }
     for (const f of topFiles) {
       const sub = makeRow({ name: baseName(f), path: f, isDir: false, size: -1 }, {
+        external: true,
         onContext: (x, y, node) => showExternalFileCtx(x, y, node),
       });
       childrenEl.appendChild(sub.row);
@@ -379,6 +428,138 @@ export function createTree() {
     showContextMenu(x, y, items);
   }
 
+  // ---------- v0.2.3 跨目录拖拽传输 ----------
+  // HTML5 DnD：行 draggable，目录行接收放置。拖拽 = 移动，Ctrl+拖拽 = 复制（Windows 资源管理器习惯）。
+  // 权限：源与目标都必须在侧栏根集合内（或外部已打开过的文件），主进程 fs:transfer 再校验一次。
+  let dragSrc = null; // { path, isDir } 当前拖拽源（单行；树无多选，与现有单选语义一致）
+
+  /** 放置守卫：同位置 / 拖进自身子目录 / 原地拖放 均不可落 */
+  function dropGuard(srcPath, destDir) {
+    const sk = normalizeKey(srcPath);
+    const dk = normalizeKey(destDir);
+    if (!sk || !dk) return false;
+    if (sk === dk) return false;
+    if (dk.startsWith(sk + '/')) return false;
+    if (normalizeKey(dirOf(srcPath)) === dk) return false;
+    return true;
+  }
+
+  function clearDropMarks() {
+    for (const el of container.querySelectorAll('.tree-node.drop-target')) {
+      el.classList.remove('drop-target');
+    }
+  }
+
+  /** 为行挂接拖拽：外部区目录行不可拖（未批准路径传输必被拒）；根行可作放置目标但不可被拖 */
+  function attachDrag(row, node, opts = {}) {
+    if (opts.external && node.isDir) return; // 外部文件链的目录行：不拖不收
+    row.draggable = !node.root;
+    row.addEventListener('dragstart', (e) => {
+      if (node.root) {
+        e.preventDefault();
+        return;
+      }
+      dragSrc = { path: node.path, isDir: node.isDir };
+      try {
+        e.dataTransfer.setData('text/plain', node.path);
+        e.dataTransfer.effectAllowed = 'copyMove';
+      } catch { /* 冒烟合成事件可能无 dataTransfer */ }
+    });
+    row.addEventListener('dragend', () => {
+      dragSrc = null;
+      clearDropMarks();
+    });
+    if (!node.isDir) return; // 仅目录行（含根行）接收放置
+    row.addEventListener('dragover', (e) => {
+      if (!dragSrc || !dropGuard(dragSrc.path, node.path)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        e.dataTransfer.dropEffect = e.ctrlKey ? 'copy' : 'move';
+      } catch { /* 合成事件无 dataTransfer */ }
+      row.classList.add('drop-target');
+    });
+    row.addEventListener('dragleave', (e) => {
+      if (!e.relatedTarget || !row.contains(e.relatedTarget)) row.classList.remove('drop-target');
+    });
+    row.addEventListener('drop', (e) => {
+      row.classList.remove('drop-target');
+      if (!dragSrc) return;
+      const src = dragSrc.path;
+      if (!dropGuard(src, node.path)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      let mode = 'move';
+      try {
+        mode = e.ctrlKey ? 'copy' : 'move';
+      } catch { /* 合成事件无属性时取默认移动 */ }
+      dragSrc = null;
+      transferEntry(src, node.path, mode);
+    });
+  }
+
+  /** 冲突弹窗（应用内 modal，不用原生对话框）：返回 'overwrite' | 'dedupe' | null（取消） */
+  function overwriteDialog(src, mode) {
+    return new Promise((resolve) => {
+      const body = document.createElement('div');
+      const p = document.createElement('p');
+      p.style.cssText = 'line-height:1.7;word-break:break-all;';
+      p.textContent = `目标位置已存在同名项「${baseName(src)}」。`;
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent = '覆盖：替换/合并目标；保留两者：自动改名为「名 (2).扩展名」';
+      body.append(p, hint);
+      openModal({
+        title: mode === 'move' ? '移动冲突' : '复制冲突',
+        body,
+        actions: [
+          { label: '取消', onClick: () => { closeModal(); resolve(null); } },
+          { label: '保留两者', onClick: () => { closeModal(); resolve('dedupe'); } },
+          { label: '覆盖', primary: true, danger: true, onClick: () => { closeModal(); resolve('overwrite'); } },
+        ],
+      });
+    });
+  }
+
+  /** 传输后的树刷新：先刷源父目录（为根时全量重建），再刷目标目录 */
+  async function refreshAfterTransfer(src, destDir) {
+    const srcParent = dirOf(src);
+    if (srcParent) await refreshNode(srcParent, true);
+    await refreshNode(destDir, true);
+  }
+
+  /** 执行一次传输（drop 入口）：冲突走应用内弹窗；移动后同步已打开标签路径 */
+  async function transferEntry(src, destDir, mode) {
+    const label = mode === 'move' ? '移动' : '复制';
+    try {
+      let res = await window.api.transferFiles(src, destDir, mode, { conflict: 'ask' });
+      if (res && res.conflict) {
+        const choice = await overwriteDialog(src, mode);
+        if (!choice) return;
+        res = await window.api.transferFiles(src, destDir, mode, {
+          overwrite: choice === 'overwrite',
+          conflict: choice,
+        });
+      }
+      const dest = res && res.dest;
+      if (!dest) return;
+      // 移动：已打开标签跟随（复用 onClosePath 的重命名路径——更新标签 + 重挂文件监听）
+      if (mode === 'move' && typeof getOpenPaths === 'function' && onClosePath) {
+        const sk = normalizeKey(src);
+        for (const p of getOpenPaths() || []) {
+          const pk = normalizeKey(p);
+          if (pk === sk || pk.startsWith(sk + '/')) {
+            onClosePath(p, dest + pk.slice(sk.length)); // 相对段按规范化 key 截取（大小写/分隔符差异安全）
+          }
+        }
+      }
+      toast(`${label}成功：${baseName(src)}`);
+      await refreshAfterTransfer(src, destDir);
+    } catch (err) {
+      toast(`${label}失败：${err.message || err}`);
+    }
+  }
+
   // ---------- 右键菜单（委托 ui.js 通用菜单；items 结构与原 renderCtxMenu 一致） ----------
   function showCtx(x, y, node) {
     const items = [];
@@ -387,9 +568,18 @@ export function createTree() {
       items.push({ label: '📂 新建目录', onClick: () => createEntry(node.path, 'dir') });
       items.push({ sep: true });
       items.push({ label: '🔄 刷新', onClick: () => refreshNode(node.path) });
-      items.push({ label: '✏️ 重命名', onClick: () => renameEntry(node.path, node.name) });
-      items.push({ sep: true });
-      items.push({ label: '🗑 删除目录', danger: true, onClick: () => removeEntry(node.path, true) });
+      if (node.root) {
+        // v0.2.3 多目录：根行菜单 —— 活动切换 + 关闭（根目录本体不允许「删除」，改提供「关闭」）
+        const isActive = rootDir && normalizeKey(rootDir) === normalizeKey(node.path);
+        if (!isActive && typeof onActivateRoot === 'function') {
+          items.push({ label: '📌 设为活动目录', onClick: () => onActivateRoot(node.path) });
+        }
+        items.push({ label: '✕ 关闭此目录', onClick: () => onRootClose && onRootClose(node.path) });
+      } else {
+        items.push({ label: '✏️ 重命名', onClick: () => renameEntry(node.path, node.name) });
+        items.push({ sep: true });
+        items.push({ label: '🗑 删除目录', danger: true, onClick: () => removeEntry(node.path, true) });
+      }
     } else {
       items.push({ label: '📄 打开', onClick: () => onOpenFile && onOpenFile(node.path) });
       items.push({ sep: true });
@@ -475,18 +665,18 @@ export function createTree() {
     }
   }
 
-  /** 刷新某个目录节点（root 特殊处理）。
+  /** 刷新某个目录节点（根节点特殊处理：任一侧栏根 → 全量重建）。
    *  目标行不在当前 nodeMap（全量 render 后未重走的展开目录 / 外部移动删除导致的陈旧行）
    *  时，向上找最近已渲染祖先刷新，都没有则整树重建 —— 修复「新建成功但树不刷新、看似没创建」。 */
   async function refreshNode(dirPath, expand = false) {
-    if (dirPath === rootDir) {
+    if (roots.some((r) => normalizeKey(r) === normalizeKey(dirPath))) {
       render();
       return;
     }
     let entry = nodeMap.get(dirPath);
     if (!entry) {
       let cur = dirOf(dirPath);
-      while (cur && cur !== rootDir && dirOf(cur) !== cur && !nodeMap.has(cur)) {
+      while (cur && !roots.some((r) => normalizeKey(r) === normalizeKey(cur)) && dirOf(cur) !== cur && !nodeMap.has(cur)) {
         cur = dirOf(cur);
       }
       if (nodeMap.has(cur)) {
@@ -528,15 +718,17 @@ export function createTree() {
     return rootDir;
   }
 
-  /** 判断路径是否在当前工作目录内（复用 reveal 同款 normalizeKey + / 边界判定） */
+  /** 判断路径是否在任一侧栏根内（复用 reveal 同款 normalizeKey + / 边界判定；
+   *  v0.2.3 多目录：任一根内即算内部，外部文件分支仅收录所有根之外的路径） */
   function isInsideRoot(p) {
-    if (!rootDir || !p) return false;
-    const target = String(p);
-    const rootKey = normalizeKey(rootDir).replace(/\/+$/, '');
-    const targetKey = normalizeKey(target).replace(/\/+$/, '');
-    if (targetKey === rootKey || !targetKey.startsWith(rootKey)) return false;
-    const rest = targetKey.slice(rootKey.length);
-    return rest.startsWith('/'); // 仅接受根内子路径（防 F:/ab 前缀误匹配 F:/a）
+    if (!p || !roots.length) return false;
+    const targetKey = normalizeKey(p).replace(/\/+$/, '');
+    for (const r of roots) {
+      const rootKey = normalizeKey(r).replace(/\/+$/, '');
+      if (targetKey === rootKey || !targetKey.startsWith(rootKey)) continue;
+      if (targetKey.slice(rootKey.length).startsWith('/')) return true; // 仅接受根内子路径（防 F:/ab 前缀误匹配 F:/a）
+    }
+    return false;
   }
 
   /** 按规范化路径在 nodeMap 中查找（兼容大小写差异） */
@@ -551,15 +743,26 @@ export function createTree() {
   let revealSeq = 0;
 
   async function reveal(path) {
-    if (!rootDir || !path) return;
+    if (!path) return;
     if (isInsideRoot(path)) return revealInner(path);
     return revealExternal(path);
   }
 
-  /** 内部路径定位：展开 path 所在各级目录并选中该节点（中间读取失败 / 节点不存在 → 静默返回） */
+  /** 内部路径定位：展开 path 所在各级目录并选中该节点（中间读取失败 / 节点不存在 → 静默返回）。
+   *  v0.2.3 多目录：先解析目标所属的宿主根（添加目录时已禁止根间嵌套，宿主唯一），再沿该根展开。 */
   async function revealInner(target) {
-    const rootKey = normalizeKey(rootDir).replace(/\/+$/, '');
-    const targetKey = normalizeKey(target).replace(/\/+$/, '');
+    const targetKey0 = normalizeKey(target).replace(/\/+$/, '');
+    let hostKey = null;
+    for (const r of roots) {
+      const rk = normalizeKey(r).replace(/\/+$/, '');
+      if (targetKey0.startsWith(rk + '/')) {
+        hostKey = rk;
+        break;
+      }
+    }
+    if (!hostKey) return;
+    const rootKey = hostKey;
+    const targetKey = targetKey0;
     const rest = targetKey.slice(rootKey.length);
     const segs = rest.replace(/^\/+/, '').split('/').filter(Boolean);
     if (!segs.length) return;
@@ -648,5 +851,5 @@ export function createTree() {
     fileEntry.row.scrollIntoView({ block: 'nearest' });
   }
 
-  return { setRoot, setCallbacks, refreshNode, refreshSelected, getTargetDir, select, hideCtx, reveal, isInsideRoot, setExternalFiles, revealExternal };
+  return { setRoot, setRoots, setCallbacks, refreshNode, refreshSelected, getTargetDir, select, hideCtx, reveal, isInsideRoot, setExternalFiles, revealExternal };
 }

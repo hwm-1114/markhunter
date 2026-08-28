@@ -122,7 +122,18 @@ const RENDERER_TEST = `
   // 保证后续 .tab 数量等断言不受用户历史会话干扰
   await step('sessionClean', async () => {
     app.editor.closeAll();
-    return true;
+    // v0.2.3 多目录：清掉 TEST_ROOT 之外的侧栏目录残留（冒烟共用真实 userData），
+    // 但必须保留 TEST_ROOT 为唯一根 —— 全部关闭会把主进程根集合清空，
+    // 后续所有写操作（S1 路径校验）都会被拒，造成全链路连锁失败
+    const nk = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+    for (let i = 0; i < 15 && app.state.sidebarRoots.some((r) => nk(r) !== nk(root)); i++) {
+      const target = app.state.sidebarRoots.find((r) => nk(r) !== nk(root));
+      await app.closeSidebarRoot(target);
+    }
+    if (app.state.sidebarRoots.length === 0) {
+      await app.openDirFromPath(root);
+    }
+    return app.state.sidebarRoots.length === 1 ? true : 'roots=' + app.state.sidebarRoots.length;
   });
   await step('tabs', async () => {
     await api.writeFile(root + '/ui.md', '一行一\\n二行二\\n三行三');
@@ -671,19 +682,24 @@ const RENDERER_TEST = `
     return names.includes('created.txt') ? true : 'names=' + names.join(',');
   });
 
-  // ---- 右键菜单打开目录（openDirFromPath） ----
+  // ---- 右键菜单打开目录（openDirFromPath，v0.2.3 多目录语义） ----
   await step('openDirFromPath', async () => {
-    // 通过外部路径打开目录（模拟右键菜单 --dir 传入）
-    const ok = await window.__app.openDirFromPath(root + '/tree-sub');
+    // v0.2.3：嵌套目录（tree-sub 在 root 内）被拒 —— 根间嵌套会让树归属判定歧义
+    const nestRejected = (await window.__app.openDirFromPath(root + '/tree-sub')) === false;
+    await window.__app.openDirFromPath(root); // 确保侧栏含 root（sessionClean 可能已清空）
+    // 通过非嵌套目录打开（模拟右键菜单 --dir 传入）：加入侧栏并激活
+    const ok = await window.__app.openDirFromPath(extRoot);
     const label = document.querySelector('#dir-label').textContent;
     const treeHas = Array.from(document.querySelectorAll('#file-tree .tree-node .name')).some(
       (n) => n.textContent === 'note.md'
     );
-    // S1：切回 root 作为工作目录（后续用例仍以 root 内文件为操作对象）
-    await window.__app.openDirFromPath(root);
-    return ok && label === root + '/tree-sub' && treeHas
+    // S1：关闭 ext 根收回单目录侧栏（后续用例仍以 root 为唯一工作目录）
+    await window.__app.closeSidebarRoot(extRoot);
+    await new Promise((r) => setTimeout(r, 400));
+    const labelAfter = document.querySelector('#dir-label').textContent;
+    return nestRejected && ok && label === extRoot && treeHas && labelAfter === root
       ? true
-      : 'ok=' + ok + ',label=' + label + ',tree=' + treeHas;
+      : 'nest=' + nestRejected + ',ok=' + ok + ',label=' + label + ',tree=' + treeHas + ',after=' + labelAfter;
   });
 
   // ---- 外部修改自动同步（其他编辑器改文件 → MarkHunter 刷新，光标位置不变） ----
@@ -1621,20 +1637,21 @@ const RENDERER_TEST = `
   await step('extSwitchRoot', async () => {
     await app.editor.openFile(extRoot + '/note.md');
     await new Promise((r) => setTimeout(r, 300));
-    await app.openDirFromPath(extRoot); // 外部变内部
+    await app.openDirFromPath(extRoot); // 外部变内部（v0.2.3：ext 根加入侧栏并激活）
     await new Promise((r) => setTimeout(r, 600));
     const label = document.querySelector('#dir-label').textContent;
     const tabOk = !!app.editor.findTabByPath(extRoot + '/note.md');
     const node = Array.from(document.querySelectorAll('#file-tree .tree-node')).find((n) => normP(n.dataset.path) === normP(extRoot + '/note.md'));
     const selected = !!node && node.classList.contains('selected');
     const extGone = !Array.from(document.querySelectorAll('#file-tree .tree-node')).some((n) => n.querySelector('.name').textContent === '外部文件');
-    await app.openDirFromPath(root); // 切回：外部区恢复
+    await app.closeSidebarRoot(extRoot); // v0.2.3：关闭 ext 根（活动转回 root），外部区恢复
     await new Promise((r) => setTimeout(r, 600));
     const tabStill = !!app.editor.findTabByPath(extRoot + '/note.md');
     const extBack = Array.from(document.querySelectorAll('#file-tree .tree-node')).some((n) => n.querySelector('.name').textContent === '外部文件');
-    return label === extRoot && tabOk && selected && extGone && tabStill && extBack
+    const rootBack = app.state.rootDir && normP(app.state.rootDir) === normP(root);
+    return label === extRoot && tabOk && selected && extGone && tabStill && extBack && rootBack
       ? true
-      : 'label=' + label + ',tab=' + tabOk + ',sel=' + selected + ',gone=' + extGone + ',still=' + tabStill + ',back=' + extBack;
+      : 'label=' + label + ',tab=' + tabOk + ',sel=' + selected + ',gone=' + extGone + ',still=' + tabStill + ',back=' + extBack + ',rootBack=' + rootBack;
   });
 
   await step('extSessionRestore', async () => {
@@ -1675,6 +1692,145 @@ const RENDERER_TEST = `
     await api.setSettings({ lastSession: lastSessionOrig }); // 收尾恢复现场
     app.state.settings = await api.getSettings();
     return fOk && dOk ? true : 'f=' + items1.join('|') + ',d=' + items2.join('|');
+  });
+
+  // ================= v0.2.3 多目录侧栏 + 跨目录拖拽传输 =================
+  // 拖拽模拟：DragEvent + DataTransfer 合成事件（Chromium 支持 dataTransfer 注入）；
+  // drop 走 tree.js attachDrag 的行级处理器，传输经主进程 fs:transfer 真实落盘
+  const mdRow = (p) => Array.from(document.querySelectorAll('#file-tree .tree-node')).find((n) => normP(n.dataset.path) === normP(p));
+  const rootRowOf = (dir) => Array.from(document.querySelectorAll('#file-tree > .tree-node')).find((n) => normP(n.dataset.path) === normP(dir) && n.querySelector('.root-close'));
+  const fireDrag = async (srcPath, destPath, ctrl) => {
+    const s = mdRow(srcPath);
+    const d = mdRow(destPath);
+    if (!s || !d) return 'no row: src=' + !!s + ',dst=' + !!d;
+    const dt = new DataTransfer();
+    s.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    d.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, ctrlKey: !!ctrl, bubbles: true, cancelable: true }));
+    s.dispatchEvent(new DragEvent('dragend', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 700)); // fs:transfer + 双侧树刷新
+    return true;
+  };
+
+  await step('multiRootOpen', async () => {
+    await app.editor.closeAll();
+    await app.openDirFromPath(root);
+    const n0 = app.state.sidebarRoots.length;
+    const ok = await app.openDirFromPath(extRoot); // 第二根：加入侧栏并激活
+    await new Promise((r) => setTimeout(r, 500));
+    const rows = Array.from(document.querySelectorAll('#file-tree > .tree-node')).filter((n) => n.querySelector('.root-close'));
+    const label = document.querySelector('#dir-label').textContent;
+    const badge = !!document.querySelector('#file-tree .root-badge');
+    const saved = (await api.getSettings()).sidebarRoots || [];
+    return ok && n0 === 1 && app.state.sidebarRoots.length === 2 && rows.length === 2 && label === extRoot && badge && saved.length === 2
+      ? true
+      : 'n0=' + n0 + ',ok=' + ok + ',roots=' + app.state.sidebarRoots.length + ',rows=' + rows.length + ',label=' + label + ',badge=' + badge + ',saved=' + saved.length;
+  });
+
+  await step('multiRootNestRejected', async () => {
+    await api.create(extRoot, 'nested', 'dir'); // extRoot 已是根 → 建目录放行
+    const before = app.state.sidebarRoots.length;
+    const ok = await app.openDirFromPath(extRoot + '/nested');
+    return ok === false && app.state.sidebarRoots.length === before
+      ? true
+      : 'ok=' + ok + ',roots=' + app.state.sidebarRoots.length;
+  });
+
+  await step('multiRootDropCopy', async () => {
+    await api.writeFile(extRoot + '/drag-cp.md', '# 复制测试\\n');
+    await app.tree.refreshNode(extRoot, true);
+    await new Promise((r) => setTimeout(r, 300));
+    const r1 = await fireDrag(extRoot + '/drag-cp.md', root, true); // Ctrl+拖 = 复制
+    if (r1 !== true) return r1;
+    const inRoot = (await api.readTree(root)).some((e) => e.name === 'drag-cp.md');
+    const inExt = (await api.readTree(extRoot)).some((e) => e.name === 'drag-cp.md');
+    return inRoot && inExt ? true : 'inRoot=' + inRoot + ',inExt=' + inExt;
+  });
+
+  await step('multiRootDropDir', async () => {
+    await api.create(extRoot, 'drag-dir', 'dir');
+    await api.writeFile(extRoot + '/drag-dir/inner.md', '递归内容\\n');
+    await app.tree.refreshNode(extRoot, true);
+    await new Promise((r) => setTimeout(r, 300));
+    const r1 = await fireDrag(extRoot + '/drag-dir', root, true); // Ctrl+拖目录 = 递归复制
+    if (r1 !== true) return r1;
+    const copied = await api.readFile(root + '/drag-dir/inner.md');
+    const srcSt = await api.stat(extRoot + '/drag-dir/inner.md'); // 源仍在（复制）
+    return copied.content.includes('递归内容') && srcSt.isFile ? true : 'content=' + copied.content.slice(0, 20);
+  });
+
+  await step('multiRootDropMove', async () => {
+    // 打开文件 → 移动 → 标签路径应跟随（onClosePath 重挂监听）
+    await api.writeFile(extRoot + '/drag-mv.md', '移动测试\\n');
+    await app.editor.openFile(extRoot + '/drag-mv.md');
+    await app.tree.refreshNode(extRoot, true);
+    await new Promise((r) => setTimeout(r, 300));
+    const r1 = await fireDrag(extRoot + '/drag-mv.md', root, false); // 拖 = 移动
+    if (r1 !== true) return r1;
+    let srcGone = false;
+    try { await api.stat(extRoot + '/drag-mv.md'); } catch { srcGone = true; }
+    const dst = await api.readFile(root + '/drag-mv.md');
+    // 主进程返回的目标路径为反斜杠真实路径，标签查找须两种分隔符都试（findTabByPath 精确匹配）
+    const movedFwd = root + '/drag-mv.md';
+    const tabFollowed = !!(app.editor.findTabByPath(movedFwd) || app.editor.findTabByPath(movedFwd.replace(/\\//g, '\\\\')));
+    return srcGone && dst.content.includes('移动测试') && tabFollowed
+      ? true
+      : 'srcGone=' + srcGone + ',tab=' + tabFollowed;
+  });
+
+  await step('multiRootConflictDedupe', async () => {
+    // root 已有 drag-cp.md（复制用例产物）→ 再拖同名 → 冲突弹窗 → 「保留两者」→ 自动改名 (2)
+    await app.tree.refreshNode(root, true);
+    await new Promise((r) => setTimeout(r, 300));
+    const s = mdRow(extRoot + '/drag-cp.md');
+    const d = mdRow(root);
+    if (!s || !d) return 'no row';
+    const dt = new DataTransfer();
+    s.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    d.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, ctrlKey: true, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 600)); // 等冲突弹窗出现
+    const keepBtn = Array.from(document.querySelectorAll('#modal-actions .tbtn')).find((b) => b.textContent === '保留两者');
+    if (!keepBtn) return 'no conflict dialog';
+    keepBtn.click();
+    await new Promise((r) => setTimeout(r, 700));
+    const dedup = (await api.readTree(root)).some((e) => e.name === 'drag-cp (2).md');
+    const orig = (await api.readTree(root)).some((e) => e.name === 'drag-cp.md');
+    return dedup && orig ? true : 'dedup=' + dedup + ',orig=' + orig;
+  });
+
+  await step('multiRootDeleteProtected', async () => {
+    let rejected = false;
+    try {
+      await api.remove(extRoot, true);
+    } catch (e) {
+      rejected = String(e.message).indexOf('不能删除') >= 0;
+    }
+    return rejected;
+  });
+
+  await step('multiRootClose', async () => {
+    // 根行 ✕ 关闭 ext 根：侧栏回到单根、活动转回 root、主进程根集合同步（收尾恢复外部语义现场）
+    const row = rootRowOf(extRoot);
+    if (!row) return 'no ext root row';
+    row.querySelector('.root-close').click();
+    await new Promise((r) => setTimeout(r, 500));
+    const rows = Array.from(document.querySelectorAll('#file-tree > .tree-node')).filter((n) => n.querySelector('.root-close'));
+    const label = document.querySelector('#dir-label').textContent;
+    const saved = (await api.getSettings()).sidebarRoots || [];
+    return app.state.sidebarRoots.length === 1 && rows.length === 1 && label === root && saved.length === 1
+      ? true
+      : 'roots=' + app.state.sidebarRoots.length + ',rows=' + rows.length + ',label=' + label + ',saved=' + saved.length;
+  });
+
+  await step('multiRootTransferReject', async () => {
+    // 权限口径：外部未批准路径作为传输目标/源必须被拒（extRoot 已不再是根）
+    await app.editor.closeAll();
+    let rejected = false;
+    try {
+      await api.transferFiles(root + '/drag-cp.md', extRoot, 'copy', {});
+    } catch (e) {
+      rejected = String(e.message).indexOf('不在已打开目录内') >= 0;
+    }
+    return rejected;
   });
 
   // ================= 多主题皮肤（阶段2：主题下拉 / 持久化 / 白名单 / 防闪白 / 明暗适配） =================

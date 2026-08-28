@@ -20,6 +20,7 @@ const ALLOWED_KEYS = new Set([
   'aiApiKeyClear',
   'favoriteDirs',
   'lastSession',
+  'sidebarRoots',
 ]);
 
 // 主题引擎：36 个合法主题名（daisyUI 5.7.18 内置 35 + 自研经典 markhunter-classic；实证 theme/*.css = 35）
@@ -60,6 +61,7 @@ const DEFAULTS = {
   lastDirectory: '',     // 上次打开的工作目录
   lastSession: null,     // 上次会话快照（打开过的标签路径 + 活动标签下标；跨重启恢复）
   favoriteDirs: [],      // 收藏的本地目录（最多 50 个，保持添加顺序）
+  sidebarRoots: [],      // v0.2.3 侧栏多目录根列表（最多 12 个；活动目录由 lastDirectory 记录）
   // AI 大模型配置（OpenAI 兼容接口，DeepSeek 预置）
   aiApiKey: '',          // API Key（S5：存盘前经 safeStorage/DPAPI 加密，形如 enc:v1:<base64>）
   aiBaseUrl: 'https://api.deepseek.com', // 服务地址
@@ -69,6 +71,22 @@ const DEFAULTS = {
 };
 
 const AI_KEY_PREFIX = 'enc:v1:';
+
+/** v0.2.3 sidebarRoots 规范化：仅保留字符串项、去重（Windows 大小写不敏感）、上限 12 */
+function normalizeSidebarRoots(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const d of list) {
+    if (typeof d !== 'string' || !d) continue;
+    const key = process.platform === 'win32' ? d.toLowerCase() : d;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(d);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
 
 let cache = null;
 
@@ -122,6 +140,8 @@ function loadSettings() {
   }
   // 主题名校验（S6 延续）：非法/旧值静默回退默认，防止脏数据进入渲染层
   if (!THEME_NAMES.includes(cache.theme)) cache.theme = DEFAULTS.theme;
+  // sidebarRoots 规范化（旧版无此键 → 默认 []；脏数据防御）
+  cache.sidebarRoots = normalizeSidebarRoots(cache.sidebarRoots);
   // API Key 处理：解密供主进程内部使用；检测到旧明文自动迁移为加密并重写文件
   if (cache.aiApiKey) {
     if (cache.aiApiKey.startsWith(AI_KEY_PREFIX)) {
@@ -153,6 +173,7 @@ function saveSettings(patch) {
   const s = loadSettings();
   const clean = sanitizePatch(patch);
   Object.assign(s, clean);
+  s.sidebarRoots = normalizeSidebarRoots(s.sidebarRoots); // v0.2.3：多目录列表落盘前规范化
   if (patch && '_aiKeyPlain' in patch) s._aiKeyPlain = patch._aiKeyPlain; // 内部解密缓存（不落盘）
   cache = s;
   persist(s);

@@ -23,6 +23,9 @@ contextBridge.exposeInMainWorld('api', {
   // 1B-5：行号 → 字节偏移（流式统计换行；全局搜索命中大文件定位用）
   findLineOffset: (p, line) => ipcRenderer.invoke('fs:find-line-offset', p, line),
   setRootDir: (dir) => ipcRenderer.invoke('fs:set-root', dir),
+  // v0.2.3 多目录：整表同步侧栏根集合 + 活动目录；跨目录拖拽传输（复制/移动）
+  setRootDirs: (dirs, active) => ipcRenderer.invoke('fs:set-roots', dirs, active),
+  transferFiles: (src, destDir, mode, opts) => ipcRenderer.invoke('fs:transfer', src, destDir, mode, opts),
   writeFile: (p, c) => ipcRenderer.invoke('fs:write-file', p, c),
   writeExternal: (p, c) => ipcRenderer.invoke('fs:write-external', p, c), // 测试用
   writeBinary: (p, buf) => ipcRenderer.invoke('fs:write-binary', p, buf),

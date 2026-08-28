@@ -4,7 +4,7 @@ const fsp = fs.promises;
 const path = require('path');
 const { getSettings } = require('./settings');
 const { markSelfWrite } = require('./filewatch');
-const { isInside, setRoot, getRoot, approve, isApproved, requireApproved, realpath, dirHasApprovedFile, remapApproved, revokeUnder } = require('./security');
+const { isInside, setRoot, setRoots, getRoot, getRoots, approve, isApproved, requireApproved, realpath, dirHasApprovedFile, remapApproved, revokeUnder, samePath, isUnderDir } = require('./security');
 
 function normalize(p) {
   return path.resolve(p);
@@ -45,6 +45,12 @@ function registerFileIpc(_getWindow) {
   // 设置当前工作目录（渲染进程 openDirFromPath 成功后调用；主进程路径校验基准）
   ipcMain.handle('fs:set-root', (_e, dir) => {
     setRoot(dir || null);
+    return true;
+  });
+
+  // v0.2.3 多目录：整表同步侧栏根集合 + 活动目录（写操作在任一根内放行，见 security.setRoots）
+  ipcMain.handle('fs:set-roots', (_e, dirs, active) => {
+    setRoots(Array.isArray(dirs) ? dirs : [], typeof active === 'string' ? active : null);
     return true;
   });
 
@@ -220,19 +226,94 @@ function registerFileIpc(_getWindow) {
     return target;
   });
 
-  // 删除（前端已确认；禁止删除当前工作目录本身）
+  // 删除（前端已确认；禁止删除任何侧栏根目录本身）
   ipcMain.handle('fs:delete', async (_e, target, isDir) => {
     requireApproved(target, '路径不在当前工作目录内，操作已拒绝');
-    const root = getRoot();
     const samePath = (a, b) =>
       process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
-    if (root && samePath(realpath(target), root)) {
+    const rp = realpath(target);
+    if (getRoot() && samePath(rp, getRoot())) {
       throw new Error('不能删除当前工作目录');
+    }
+    for (const r of getRoots()) {
+      if (samePath(rp, r)) throw new Error('不能删除侧栏已打开的目录（请先关闭该目录）');
     }
     if (isDir) await fsp.rm(target, { recursive: true, force: true });
     else await fsp.unlink(target);
     revokeUnder(target); // 清理批准集合：已删除路径不再保留写权限
     return true;
+  });
+
+  // ---------- v0.2.3 多目录：跨目录拖拽传输（复制/移动） ----------
+  /** 冲突时目标名的「保留两者」去重：name.ext → "name (2).ext"（目录无 ext，直接追加）。
+   *  从 2 起找第一个不存在的序号，与 Explorer 命名习惯一致。 */
+  function dedupeName(dir, name) {
+    const ext = path.extname(name);
+    const stem = name.slice(0, name.length - ext.length);
+    for (let i = 2; ; i++) {
+      const cand = `${stem} (${i})${ext}`;
+      if (!fs.existsSync(path.join(dir, cand))) return cand;
+    }
+  }
+
+  /** 递归复制（目录合并语义：目标已存在时按文件覆盖合并，与 Explorer 一致） */
+  async function copyInto(src, dest) {
+    await fsp.cp(src, dest, { recursive: true, force: true, errorOnExist: false });
+  }
+
+  // src（文件或目录）传输到目录 destDir 下：mode='copy'|'move'。
+  // conflict='ask'（默认）→ 目标已存在时返回 { conflict: true }，渲染层确认后带
+  // overwrite=true 重调；conflict='dedupe' → 自动改名为「name (2).ext」。
+  // 权限口径：源与目标目录都必须在侧栏根集合内（或已批准），与写/删/改名一致；
+  // 移动成功后 remapApproved（外部文件标签保存仍可用）、跨盘回退删除源后 revokeUnder。
+  ipcMain.handle('fs:transfer', async (_e, srcPath, destDir, mode, opts = {}) => {
+    requireApproved(srcPath, '源路径不在已打开目录内，操作已拒绝');
+    requireApproved(destDir, '目标目录不在已打开目录内，操作已拒绝');
+    const src = normalize(srcPath);
+    const dst = normalize(destDir);
+    const srcSt = await fsp.stat(src);
+    if (!srcSt.isDirectory() && !srcSt.isFile()) throw new Error('源既不是文件也不是目录');
+    if (samePath(src, dst)) throw new Error('目标目录与源相同');
+    if (isUnderDir(dst, src)) throw new Error('不能把目录移动/复制到其自身内部');
+    let name = path.basename(src);
+    let dest = path.join(dst, name);
+    if (fs.existsSync(dest)) {
+      // 目标已存在（Windows 下存在性检查天然大小写不敏感）
+      if (samePath(src, dest)) throw new Error('源与目标为同一位置，无需传输');
+      const strategy = opts.conflict || 'ask';
+      if (strategy === 'dedupe') {
+        name = dedupeName(dst, name);
+        dest = path.join(dst, name);
+      } else if (!opts.overwrite) {
+        return { conflict: true, name };
+      }
+      // overwrite=true：文件直接覆盖；目录走合并（cp force / rename 失败回退合并复制）
+      // 目录覆盖文件（或反向）：类型不一致无法合并，先移除目标再传输
+      const destSt = await fsp.stat(dest).catch(() => null);
+      if (destSt && srcSt.isDirectory() !== destSt.isDirectory()) {
+        await fsp.rm(dest, { recursive: true, force: true });
+      }
+    }
+    const isMove = mode === 'move';
+    if (isMove) {
+      try {
+        await fsp.rename(src, dest);
+      } catch (err) {
+        // EXDEV（跨盘）/ EPERM+目录已存在（Windows rename 不覆盖已存在目录）→ 合并复制后删源
+        const crossDevice = err.code === 'EXDEV';
+        const destExistsDir = srcSt.isDirectory() && fs.existsSync(dest);
+        if (!crossDevice && !destExistsDir && !samePath(src, dest)) throw err;
+        await copyInto(src, dest);
+        await fsp.rm(src, { recursive: true, force: true });
+        revokeUnder(src);
+      }
+      remapApproved(src, dest); // 移动后批准集合映射到新路径（外部文件标签保存仍可用）
+    } else {
+      await copyInto(src, dest);
+    }
+    // 目标可能在另一窗口打开过/被监听：标记自写吸收监听回声（源侧移动后监听由渲染端重建）
+    await markSelfWrite(dest);
+    return { dest, name };
   });
 
   // 重命名（旧路径必须已批准）

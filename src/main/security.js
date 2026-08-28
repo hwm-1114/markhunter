@@ -1,9 +1,10 @@
-// 主进程路径安全模块：跟踪当前工作目录（currentRoot）与已批准路径（approvedSet）
-// isApproved(path) = isInside(root, path) || approvedSet.has(realpath(path))
+// 主进程路径安全模块：跟踪当前工作目录（currentRoot）、侧栏多根集合（roots）与已批准路径（approvedSet）
+// isApproved(path) = 任一根内（currentRoot 或 roots 各项） || approvedSet.has(realpath(path))
 const fs = require('fs');
 const path = require('path');
 
-let currentRoot = null;        // 当前工作目录的 realpath（经 IPC fs:set-root 设置）
+let currentRoot = null;        // 当前活动工作目录的 realpath（经 IPC fs:set-root / fs:set-roots 设置）
+const roots = new Set();       // 侧栏打开的全部目录（v0.2.3 多目录：写操作在任一根内均放行）
 const approvedSet = new Set(); // 成功 read 过的路径的 realpath 集合
 
 function normalize(p) {
@@ -35,8 +36,26 @@ function setRoot(dir) {
   currentRoot = dir ? realpath(dir) : null;
 }
 
+/** v0.2.3 多目录：整表同步侧栏根集合 + 活动目录（活动目录必须含于集合）。
+ *  openDirFromPath / 关闭根 / boot 恢复统一走这里；空集合时活动目录一并清空。 */
+function setRoots(dirs, active) {
+  roots.clear();
+  for (const d of Array.isArray(dirs) ? dirs : []) {
+    if (typeof d === 'string' && d) roots.add(realpath(d));
+  }
+  const act = active && typeof active === 'string' ? realpath(active) : null;
+  if (act && roots.has(act)) currentRoot = act;
+  else if (roots.size > 0) currentRoot = null; // 活动不在集合内：宁缺毋滥（写操作仍有 roots 各项兜底）
+  else currentRoot = null;
+}
+
 function getRoot() {
   return currentRoot;
+}
+
+/** 侧栏根集合快照（fs:delete 的「不能删除根目录」保护用） */
+function getRoots() {
+  return [...roots];
 }
 
 /** 记录一次成功读取的路径（拖拽打开的外部文件，保存/运行仍可用） */
@@ -48,11 +67,14 @@ function approve(p) {
   }
 }
 
-/** 判断路径是否允许写入/删除/重命名/运行 */
+/** 判断路径是否允许写入/删除/重命名/运行（v0.2.3 多目录：任一侧栏根内均放行） */
 function isApproved(p) {
   if (!p) return false;
   const rp = realpath(p);
   if (currentRoot && isInside(currentRoot, rp)) return true;
+  for (const r of roots) {
+    if (isInside(r, rp)) return true;
+  }
   return approvedSet.has(rp);
 }
 
@@ -129,4 +151,4 @@ function revokeUnder(targetPath) {
   }
 }
 
-module.exports = { isInside, setRoot, getRoot, approve, isApproved, requireApproved, realpath, dirHasApprovedFile, remapApproved, revokeUnder };
+module.exports = { isInside, setRoot, setRoots, getRoot, getRoots, approve, isApproved, requireApproved, realpath, dirHasApprovedFile, remapApproved, revokeUnder, samePath, isUnderDir };

@@ -21,7 +21,8 @@ async function boot() {
 
   // ---------- 全局状态 ----------
   const state = {
-    rootDir: null,
+    rootDir: null,       // 活动工作目录（全局搜索/新建/AI 工具的默认目标）
+    sidebarRoots: [],    // v0.2.3 侧栏多目录根列表（首目录即活动目录的来源，须非嵌套）
     settings: await window.api.getSettings(),
   };
 
@@ -506,6 +507,10 @@ async function boot() {
       }
     },
     onSwitchRoot: (dir) => openDirFromPath(dir), // 需求1：外部区目录行「切换工作目录到此目录」
+    // v0.2.3 多目录：根行关闭 / 设为活动；拖拽移动后同步已打开标签路径
+    onRootClose: (dir) => closeSidebarRoot(dir),
+    onActivateRoot: (dir) => openDirFromPath(dir), // 已在根列表 → 仅切换活动目录
+    getOpenPaths: () => editor.getSession().paths,
     onClosePath: (p, newPath) => {
       const tab = editor.findTabByPath(p);
       if (tab) {
@@ -532,21 +537,22 @@ async function boot() {
     },
   });
 
-  // ---------- 打开目录 ----------
-  /** 按路径直接打开目录（选择对话框 / 右键菜单 / 启动恢复 / 点击收藏项共用） */
-  function openDirFromPath(dir) {
-    if (!dir) return Promise.resolve(false);
-    return window.api
-      .readTree(dir)
-      .then(() => {
-        state.rootDir = dir;
-        $('#dir-label').textContent = dir;
-        $('#dir-label').title = dir;
-        return tree.setRoot(dir);
-      })
+  // ---------- 打开目录（v0.2.3 多目录侧栏） ----------
+  const normKey = (p) => String(p || '').replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '');
+
+  /** 激活某根为活动目录：重渲染侧栏 + 同步主进程根集合 + 刷新收藏/外部分支（openDirFromPath 公共尾段） */
+  function activateSidebarRoot(dir) {
+    state.rootDir = dir;
+    $('#dir-label').textContent = dir;
+    $('#dir-label').title =
+      state.sidebarRoots.length > 1
+        ? state.sidebarRoots.map((r) => (normKey(r) === normKey(dir) ? '★ ' : '') + r).join('\n')
+        : dir;
+    return tree
+      .setRoots(state.sidebarRoots, dir)
       .then(async () => {
-        window.api.setSettings({ lastDirectory: dir });
-        window.api.setRootDir(dir); // S1：通知主进程当前工作目录（路径校验基准）
+        window.api.setSettings({ lastDirectory: dir, sidebarRoots: state.sidebarRoots });
+        window.api.setRootDirs(state.sidebarRoots, dir); // S1：主进程路径校验基准 = 全部侧栏根
         favorites.syncState(); // 收藏按钮文案 / 列表高亮跟随当前工作目录
         // 需求1：目录切换后外部文件集合变化 → 重建外部分支（幂等）。
         // 必须 await：setExternalFiles 可能触发全量 render()，未等待会导致
@@ -557,6 +563,60 @@ async function boot() {
         return true;
       })
       .catch(() => false);
+  }
+
+  /** 按路径直接打开目录（选择对话框 / 右键菜单 / 启动恢复 / 点击收藏项共用）。
+   *  v0.2.3 多目录：目录加入侧栏根列表（去重、禁嵌套、上限 12）并设为活动目录；
+   *  已在列表中的目录 → 仅切换活动。 */
+  function openDirFromPath(dir) {
+    if (!dir) return Promise.resolve(false);
+    return window.api
+      .readTree(dir) // 可读性预检（无效目录直接失败，不进侧栏）
+      .then(() => {
+        const nd = normKey(dir);
+        const existed = state.sidebarRoots.find((r) => normKey(r) === nd);
+        if (existed) {
+          if (state.rootDir && normKey(state.rootDir) === nd) return true; // 已是活动目录
+          return activateSidebarRoot(existed);
+        }
+        // 嵌套防御：根间嵌套会让 isInsideRoot「任根判定」产生歧义（外部/内部归属不定）
+        for (const r of state.sidebarRoots) {
+          const nr = normKey(r);
+          if (nd.startsWith(nr + '/') || nr.startsWith(nd + '/')) {
+            toast('该目录与侧栏已打开的目录存在嵌套关系，无法同时打开');
+            return false;
+          }
+        }
+        if (state.sidebarRoots.length >= 12) {
+          toast('侧栏目录已达上限（12 个），请先关闭部分目录');
+          return false;
+        }
+        state.sidebarRoots.push(dir);
+        return activateSidebarRoot(dir);
+      })
+      .catch(() => false);
+  }
+
+  /** 关闭侧栏某根（根行 ✕ / 右键菜单）：仅从侧栏移除，不删磁盘文件；关闭活动根时活动转给剩余第一个根 */
+  function closeSidebarRoot(dir) {
+    const i = state.sidebarRoots.findIndex((r) => normKey(r) === normKey(dir));
+    if (i < 0) return Promise.resolve(false);
+    state.sidebarRoots.splice(i, 1);
+    const wasActive = state.rootDir && normKey(state.rootDir) === normKey(dir);
+    if (!wasActive) return activateSidebarRoot(state.rootDir); // 非活动根：重渲染 + 重同步即可
+    const next = state.sidebarRoots[0] || null;
+    if (next) return activateSidebarRoot(next);
+    // 全部关闭：回到空侧栏
+    state.rootDir = null;
+    $('#dir-label').textContent = '未打开目录';
+    $('#dir-label').title = '';
+    window.api.setSettings({ lastDirectory: '', sidebarRoots: [] });
+    window.api.setRootDirs([], null);
+    favorites.syncState();
+    return tree
+      .setRoots([], null)
+      .then(() => syncExternalTree())
+      .then(() => true);
   }
 
   // ---------- 目录收藏 ----------
@@ -1229,8 +1289,22 @@ async function boot() {
   // 右键 --dir 指定目录优先于上次目录（open-dir 事件先到达时已登记到 externalDir）
   if (externalDir) {
     await openDirFromPath(externalDir);
-  } else if (state.settings.lastDirectory) {
-    await openDirFromPath(state.settings.lastDirectory);
+  } else {
+    // v0.2.3 多目录：恢复上次侧栏根列表（失效目录被 readTree 预检静默跳过），
+    // 活动目录取 lastDirectory（不在列表时回退第一个）；无列表时退回单目录恢复
+    const savedRoots = Array.isArray(state.settings.sidebarRoots) ? state.settings.sidebarRoots.slice() : [];
+    const last = state.settings.lastDirectory;
+    if (savedRoots.length > 1 || (savedRoots.length === 1 && last && normKey(savedRoots[0]) !== normKey(last))) {
+      const activeSaved = savedRoots.find((r) => normKey(r) === normKey(last)) || savedRoots[0];
+      for (const d of savedRoots) await openDirFromPath(d); // 逐个加入（每次加入即激活，末尾统一校正活动根）
+      if (!(state.rootDir && normKey(state.rootDir) === normKey(activeSaved))) {
+        await openDirFromPath(activeSaved); // 已在列表 → 仅切换活动
+      }
+    } else if (savedRoots.length === 1) {
+      await openDirFromPath(savedRoots[0]);
+    } else if (last) {
+      await openDirFromPath(last);
+    }
   }
   bootDirSettled = true; // 此后到达的 open-dir（second-instance 新窗口等）直接执行
   await restoreSession(); // 恢复上次会话（先恢复目录，再恢复标签，保证树定位可用）
@@ -1239,7 +1313,7 @@ async function boot() {
   updateRunButton();
   // S10：window.__app 仅开发环境暴露（冒烟/扩展测试在 dev 下运行，不受影响；打包版无此接口）
   if (!(await window.api.isPackaged())) {
-    window.__app = { state, editor, tree, preview, find, globalSearch, python, openDirFromPath, aiPanel, executeAiTool, favorites, syncExternalTree, session: { save: () => persistSession(true), restore: restoreSession }, applyTheme, THEME_NAMES, DARK_THEMES };
+    window.__app = { state, editor, tree, preview, find, globalSearch, python, openDirFromPath, closeSidebarRoot, aiPanel, executeAiTool, favorites, syncExternalTree, session: { save: () => persistSession(true), restore: restoreSession }, applyTheme, THEME_NAMES, DARK_THEMES };
   }
 }
 
