@@ -572,9 +572,15 @@ async function boot() {
     await openDirFromPath(dir);
   }
 
-  // 右键「用 MarkHunter 打开」：以指定目录启动
+  // 右键「用 MarkHunter 打开」：以指定目录启动。
+  // 竞态修复：did-finish-load 发来的 open-dir 事件可能早于 boot 的「上次目录恢复」到达，
+  // 直接调用会被随后的 lastDirectory 恢复覆盖（侧栏停在旧目录）—— 先登记 externalDir，
+  // 由 boot 的恢复段优先采用；boot 完成后再收到的事件（second-instance 新窗口/运行中重开）直通执行。
+  let bootDirSettled = false;
+  let externalDir = null;
   window.api.onOpenDir((dir) => {
-    openDirFromPath(dir);
+    externalDir = dir;
+    if (bootDirSettled) openDirFromPath(dir);
   });
 
   // ---------- 新建 ----------
@@ -1220,9 +1226,13 @@ async function boot() {
 
   // ---------- 恢复上次目录与会话 ----------
   await favorites.load(); // 启动时渲染收藏列表 + 同步按钮状态
-  if (state.settings.lastDirectory) {
+  // 右键 --dir 指定目录优先于上次目录（open-dir 事件先到达时已登记到 externalDir）
+  if (externalDir) {
+    await openDirFromPath(externalDir);
+  } else if (state.settings.lastDirectory) {
     await openDirFromPath(state.settings.lastDirectory);
   }
+  bootDirSettled = true; // 此后到达的 open-dir（second-instance 新窗口等）直接执行
   await restoreSession(); // 恢复上次会话（先恢复目录，再恢复标签，保证树定位可用）
   syncExternalTree(); // 需求1：启动后同步一次外部文件分支（幂等，兜底 restoreSession 提前返回的场景）
 
