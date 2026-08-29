@@ -11,7 +11,7 @@
 | 项 | 现状 | 影响 |
 |---|---|---|
 | GitHub 账号 | `hwm-1114`（Wyman Ho），MCP 已认证 | 可直接操作仓库 |
-| 目标仓库 | `hwm-1114/markhunter` **已存在**（私有，描述"私有备份"，2026-08-16 创建） | 是**更新**现有仓库，不是新建 |
+| 目标仓库 | `hwm-1114/markhunter` **已存在**（2026-08-16 创建；2026-08-29 已转公开） | 是**更新**现有仓库，不是新建 |
 | 仓库内容 | 48 条目，**v0.1.40 时代**源码（.github/workflows/release.yml、README.md、src/、scripts/ 等均在） | 0.1.41/0.1.42 的改动尚未同步 |
 | 打包配置 | `electron-builder.yml` 已配 `publish: {provider: github, owner: hwm-1114, repo: markhunter, private: true}` | 发布链路已接线，需 GH_TOKEN |
 | CI | 仓库已有 `.github/workflows/release.yml`（850B） | 未来打 tag 可自动构建发布 |
@@ -36,7 +36,7 @@
 
 | 编号 | 问题 | 选项 | 建议 |
 |---|---|---|---|
-| Q1 | 仓库可见性 | 私有（现状）/ 公开 | **维持私有**（描述即"私有备份"；公开需另行评估开源运营） |
+| Q1 | 仓库可见性 | 私有（创建时）/ 公开 | **已公开**（2026-08-29 转公开；转公开前完成全历史密钥扫描，未发现泄露） |
 | Q2 | LICENSE 版权方 | VibeCode（package.json author）/ Wyman Ho | **VibeCode**（与 package.json 一致） |
 | Q3 | 是否回填旧版本 Release | 只建 v0.1.42 / 回填 0.1.39~0.1.41（各自独立 Release） | **回填**（"每个版本分开"最彻底，且本地已有全部安装包） |
 | Q4 | README 策略 | 保留 README.md + README.txt / 合并为 README.md | **合并**（README.md 面向 GitHub，README.txt 内容并入后删除，避免双份漂移） |
