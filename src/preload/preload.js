@@ -79,7 +79,8 @@ contextBridge.exposeInMainWorld('api', {
   aiChat: (payload) => ipcRenderer.invoke('ai:chat', payload),
   aiAbort: () => ipcRenderer.invoke('ai:abort'),
   aiToolResult: (results) => ipcRenderer.invoke('ai:tool-result', results),
+  aiListModels: (baseUrl) => ipcRenderer.invoke('ai:list-models', baseUrl), // v0.2.5：拉取服务商模型列表
   onAiToolCall: (cb) => ipcRenderer.on('ai:tool-call', (_e, d) => cb(d)),
+  // v0.2.5：流式输出增量（{text} 正文 / {reasoning} 思考过程）
   onAiChunk: (cb) => ipcRenderer.on('ai:chunk', (_e, d) => cb(d)),
-  onAiDone: (cb) => ipcRenderer.on('ai:done', (_e, d) => cb(d)),
 });

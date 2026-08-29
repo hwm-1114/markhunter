@@ -1133,6 +1133,33 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   margin-top: 2px;
   padding-left: 2px;
 }
+/* v0.2.5：推理模型思考过程（可折叠）+ 流式输出光标 */
+details.ai-reasoning {
+  border: 1px dashed var(--mh-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--mh-text-2);
+}
+details.ai-reasoning summary {
+  cursor: pointer;
+  user-select: none;
+  font-size: 11.5px;
+}
+.ai-reasoning-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  margin-top: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.ai-msg-body.streaming::after {
+  content: '▍';
+  color: var(--mh-accent);
+  animation: mh-blink 0.9s steps(1) infinite;
+}
+@keyframes mh-blink { 50% { opacity: 0; } }
 .ai-header-actions { display: flex; gap: 6px; }
 .ai-messages {
   flex: 1;

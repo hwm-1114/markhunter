@@ -114,12 +114,13 @@
         <div class="ai-header-actions">
           <button id="btn-ai-full" class="tbtn small" title="附加当前文档全文作为上下文">📄 全文</button>
           <button id="btn-ai-sel" class="tbtn small" title="附加选中文字作为上下文">✂ 选中</button>
+          <button id="btn-ai-clear" class="tbtn small" title="清空当前对话（上下文与 tokens 统计复位）">🧹</button>
           <button id="btn-ai-close" class="tbtn small" title="收起 AI 侧栏">✕</button>
         </div>
       </div>
       <div id="ai-messages" class="ai-messages"></div>
       <div class="ai-input-row">
-        <textarea id="ai-input" rows="3" placeholder="向 AI 提问，或让它读取/修改当前文档…"></textarea>
+        <textarea id="ai-input" rows="3" placeholder="向 AI 提问，或让它读取/修改当前文档…（Shift+Enter 换行）"></textarea>
         <button id="btn-ai-send" class="tbtn accent" title="发送">发送</button>
         <button id="btn-ai-stop" class="tbtn danger" title="停止生成">■</button>
       </div>

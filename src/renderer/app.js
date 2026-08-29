@@ -844,14 +844,46 @@ async function boot() {
     indentHint.textContent = `Tab 键插入的空格数，Shift+Tab 反向缩进（可调整范围 1 ~ ${MAX_INDENT} 个空格）`;
     indentField.append(indentLabel, indentInput, indentHint);
 
-    // AI 大模型配置
+    // AI 大模型配置（v0.2.5 通用化：服务商预设一键填入 + 拉取模型列表 + 自定义中转站）
+    const AI_PRESETS = [
+      { id: 'deepseek', label: 'DeepSeek（官方）', baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' },
+      { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+      { id: 'siliconflow', label: '硅基流动 SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3' },
+      { id: 'moonshot', label: '月之暗面 Kimi', baseUrl: 'https://api.moonshot.cn/v1', model: 'kimi-latest' },
+      { id: 'zhipu', label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
+      { id: 'qwen', label: '阿里通义 Qwen', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+      { id: 'ollama', label: 'Ollama（本机）', baseUrl: 'http://localhost:11434/v1', model: '' },
+      { id: 'lmstudio', label: 'LM Studio（本机）', baseUrl: 'http://localhost:1234/v1', model: '' },
+      { id: 'custom', label: '自定义 / 中转站…', baseUrl: '', model: '' },
+    ];
     const aiField = document.createElement('div');
     aiField.className = 'field';
     const aiTitle = document.createElement('label');
-    aiTitle.textContent = 'AI 大模型（OpenAI 兼容接口）';
+    aiTitle.textContent = 'AI 大模型（OpenAI 兼容接口：官方 / 中转站 / 本地模型均可）';
+    // 服务商预设：仅作快速填入（不持久化），保存时以服务地址 + 模型名为准
+    const presetSelect = document.createElement('select');
+    presetSelect.className = 'field-select';
+    presetSelect.style.marginBottom = '6px';
+    for (const p of AI_PRESETS) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.label;
+      presetSelect.appendChild(opt);
+    }
+    const detected = AI_PRESETS.find((p) => p.baseUrl && p.baseUrl.replace(/\/+$/, '') === String(s.aiBaseUrl || '').replace(/\/+$/, ''));
+    presetSelect.value = detected ? detected.id : (s.aiBaseUrl ? 'custom' : 'deepseek');
+    presetSelect.addEventListener('change', () => {
+      const p = AI_PRESETS.find((x) => x.id === presetSelect.value);
+      if (!p) return;
+      if (p.baseUrl) aiBaseInput.value = p.baseUrl;
+      if (p.model) aiModelInput.value = p.model;
+      if (p.id === 'ollama' || p.id === 'lmstudio') {
+        toast('本地服务通常无需 Key：API Key 可填任意非空占位（如 ollama）');
+      }
+    });
     const aiKeyInput = document.createElement('input');
     aiKeyInput.type = 'password'; // S5：密钥不显示明文（经 DPAPI 加密保存）
-    aiKeyInput.placeholder = s.aiApiKeySet ? '已加密保存（留空保持不变）' : 'API Key（DeepSeek 等）';
+    aiKeyInput.placeholder = s.aiApiKeySet ? '已加密保存（留空保持不变）' : 'API Key（本地 Ollama 可填任意占位）';
     aiKeyInput.value = '';
     // S5：清除密钥按钮（保存时提交 aiApiKeyClear:true）
     let aiKeyClear = false;
@@ -870,38 +902,46 @@ async function boot() {
     aiKeyRow.append(aiKeyInput, aiKeyClearBtn);
     const aiBaseInput = document.createElement('input');
     aiBaseInput.type = 'text';
-    aiBaseInput.placeholder = '服务地址';
+    aiBaseInput.placeholder = '服务地址（如 https://your-relay.example.com）';
     aiBaseInput.value = s.aiBaseUrl || 'https://api.deepseek.com';
-    // 模型：中文类型下拉 + 模型名（可自定义具体版本）
+    presetSelect.value = detected ? detected.id : (s.aiBaseUrl ? 'custom' : 'deepseek'); // base 默认值后再校正
     const aiModelRow = document.createElement('div');
     aiModelRow.className = 'field-row';
-    const aiTypeSelect = document.createElement('select');
-    aiTypeSelect.className = 'ai-model-select';
-    const AI_TYPES = [
-      { v: 'latest', label: '最新版' },
-      { v: 'reasoner', label: '推理版' },
-      { v: 'custom', label: '自定义' },
-    ];
-    for (const t of AI_TYPES) {
-      const opt = document.createElement('option');
-      opt.value = t.v;
-      opt.textContent = t.label;
-      aiTypeSelect.appendChild(opt);
-    }
-    aiTypeSelect.value = s.aiModelType || 'latest';
     const aiModelInput = document.createElement('input');
     aiModelInput.type = 'text';
-    aiModelInput.placeholder = '模型名（如 deepseek-v4）';
+    aiModelInput.placeholder = '模型名（可手填，或点「拉取模型列表」选择）';
     aiModelInput.value = s.aiModel || 'deepseek-chat';
-    aiTypeSelect.addEventListener('change', () => {
-      if (aiTypeSelect.value === 'latest') aiModelInput.value = 'deepseek-chat';
-      else if (aiTypeSelect.value === 'reasoner') aiModelInput.value = 'deepseek-reasoner';
-      // 自定义：保留当前值手动修改
+    const modelList = document.createElement('datalist');
+    modelList.id = 'ai-model-datalist';
+    aiModelInput.setAttribute('list', 'ai-model-datalist');
+    const aiModelsBtn = document.createElement('button');
+    aiModelsBtn.className = 'tbtn small';
+    aiModelsBtn.title = '从服务地址拉取可用模型列表（GET /models，OpenAI 兼容端点通用）';
+    aiModelsBtn.textContent = '📋 拉取模型列表';
+    aiModelsBtn.addEventListener('click', async () => {
+      aiModelsBtn.disabled = true;
+      const old = aiModelsBtn.textContent;
+      aiModelsBtn.textContent = '获取中…';
+      try {
+        const ids = await window.api.aiListModels(aiBaseInput.value.trim());
+        modelList.innerHTML = '';
+        for (const id of ids) {
+          const o = document.createElement('option');
+          o.value = id;
+          modelList.appendChild(o);
+        }
+        toast(ids.length ? `已获取 ${ids.length} 个模型：点击模型输入框即可下拉选择` : '服务未返回模型列表，可手动填写模型名');
+      } catch (err) {
+        toast('获取模型列表失败：' + (err.message || err));
+      } finally {
+        aiModelsBtn.disabled = false;
+        aiModelsBtn.textContent = old;
+      }
     });
-    aiModelRow.append(aiTypeSelect, aiModelInput);
+    aiModelRow.append(aiModelInput, aiModelsBtn, modelList);
     const aiHint = document.createElement('div');
     aiHint.className = 'hint';
-    aiHint.textContent = 'API Key 经 Windows DPAPI（safeStorage）加密后保存在本机 settings.json，界面不显示明文；留空表示保持当前密钥不变。默认预置 DeepSeek，可改服务地址接入其它 OpenAI 兼容模型';
+    aiHint.textContent = '支持任意 OpenAI 兼容服务：官方 API、中转站（裸域名自动补 /v1）、局域网 Ollama / LM Studio（http 需本机或 192.168.x / 10.x / 172.16~31.x）。API Key 经 Windows DPAPI 加密保存在本机，界面不显示明文；本地服务无需 Key 时可填任意非空占位';
     const aiAskRow = document.createElement('label');
     aiAskRow.className = 'check-row';
     const aiAskInput = document.createElement('input');
@@ -910,7 +950,7 @@ async function boot() {
     const aiAskText = document.createElement('span');
     aiAskText.textContent = 'AI 修改文档前询问确认';
     aiAskRow.append(aiAskInput, aiAskText);
-    aiField.append(aiTitle, aiKeyRow, aiBaseInput, aiModelRow, aiHint, aiAskRow);
+    aiField.append(aiTitle, presetSelect, aiBaseInput, aiKeyRow, aiModelRow, aiHint, aiAskRow);
 
     // 自动换行
     const wrapRow = document.createElement('label');
@@ -950,7 +990,6 @@ async function boot() {
               ...(aiKeyClear ? { aiApiKeyClear: true } : {}),
               aiBaseUrl: aiBaseInput.value.trim() || 'https://api.deepseek.com',
               aiModel: aiModelInput.value.trim() || 'deepseek-chat',
-              aiModelType: aiTypeSelect.value,
               aiAskBeforeApply: aiAskInput.checked,
             };
             state.settings = await window.api.setSettings(patch);

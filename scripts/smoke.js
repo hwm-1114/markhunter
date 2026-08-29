@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const http = require('http');
 const { app, clipboard } = require('electron');
 
 const TEST_ROOT = path.join(__dirname, '..', '.smoke-test');
@@ -965,12 +966,15 @@ const RENDERER_TEST = `
     const inputs = document.querySelectorAll('#modal-body input');
     const keyHidden = Array.from(inputs).some((i) => i.type === 'password' && i.value === '');
     const hasClearBtn = Array.from(document.querySelectorAll('#modal-body button')).some((b) => b.textContent.includes('清除密钥'));
-    const hintOk = Array.from(document.querySelectorAll('#modal-body .hint')).some((h) => h.textContent.includes('加密'));
-    const hasSelect = !!document.querySelector('.ai-model-select');
+    const hintOk = Array.from(document.querySelectorAll('#modal-body .hint')).some((h) => h.textContent.includes('DPAPI'));
+    // v0.2.5：服务商预设下拉（含中转站/本地模型选项）替代旧「最新版/推理版」类型下拉
+    const selects = Array.from(document.querySelectorAll('#modal-body select'));
+    const presetSelect = selects.find((s2) => Array.from(s2.options).some((o) => o.textContent.includes('硅基流动')));
+    const hasModelsBtn = Array.from(document.querySelectorAll('#modal-body button')).some((b) => b.textContent.includes('拉取模型列表'));
     document.querySelector('#modal-actions .tbtn').click();
-    return keyHidden && hasClearBtn && hintOk && hasSelect
+    return keyHidden && hasClearBtn && hintOk && !!presetSelect && hasModelsBtn
       ? true
-      : 'key=' + keyHidden + ',clear=' + hasClearBtn + ',hint=' + hintOk + ',select=' + hasSelect;
+      : 'key=' + keyHidden + ',clear=' + hasClearBtn + ',hint=' + hintOk + ',preset=' + !!presetSelect + ',models=' + hasModelsBtn;
   });
 
   // ---- AI 工具执行（function calling：读文档 / 插入文字） ----
@@ -1893,6 +1897,77 @@ const RENDERER_TEST = `
       rejected = String(e.message).indexOf('不在已打开目录内') >= 0;
     }
     return rejected;
+  });
+
+  // ================= v0.2.5 AI：流式输出 / 工具循环 / 模型列表 / 设置通用化 =================
+  await step('aiMockChat', async () => {
+    // 全链路：裸域名 http 地址（智能补 /v1）→ SSE 流式（ai:chunk 增量）→ 工具调用循环 → 用量累计
+    const port = window.__AI_MOCK_PORT;
+    if (!port) return 'no mock port';
+    await api.setSettings({ aiApiKey: 'mock-key-e2e', aiBaseUrl: 'http://127.0.0.1:' + port, aiModel: 'mock-mini' });
+    app.state.settings = await api.getSettings();
+    const chunks = [];
+    window.api.onAiChunk((d) => chunks.push(d));
+    const res = await window.api.aiChat({
+      messages: [{ role: 'user', content: '读一下文档' }],
+      baseUrl: app.state.settings.aiBaseUrl,
+      model: 'mock-mini',
+    });
+    const hasText = (res.content || '').indexOf('文档内容已读取') >= 0;
+    // 思考过程属于第 1 轮（工具轮）：经 ai:chunk 流式到达即验证；最终轮返回值不含 reasoning 属正常
+    const hasReason = chunks.some((c) => c.reasoning);
+    // 两轮 usage 累计：15 + 12 = 27
+    const usageOk = res.usage && res.usage.total_tokens === 27;
+    const streamed = chunks.filter((c) => c.text).length >= 4; // 打字机增量确实分块到达
+    return hasText && hasReason && usageOk && streamed
+      ? true
+      : 'content=' + res.content + ',reason=' + (res.reasoning || '') + ',chunks=' + chunks.length + ',usage=' + JSON.stringify(res.usage);
+  });
+
+  await step('aiMockModels', async () => {
+    const ids = await window.api.aiListModels(app.state.settings.aiBaseUrl);
+    const sorted = ids.length === 2 && ids[0] <= ids[1];
+    return Array.isArray(ids) && ids.includes('mock-mini') && ids.includes('mock-pro') && sorted
+      ? true
+      : JSON.stringify(ids);
+  });
+
+  await step('aiSettingsUI', async () => {
+    document.querySelector('#btn-settings').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const selects = Array.from(document.querySelectorAll('#modal-body select'));
+    const preset = selects.find((s2) => Array.from(s2.options).some((o) => o.textContent.includes('硅基流动')));
+    const legacyType = document.querySelector('#modal-body select.ai-model-select'); // 旧「最新版/推理版」下拉应已移除
+    const fetchBtn = Array.from(document.querySelectorAll('#modal-body button')).find((b) => b.textContent.includes('拉取模型列表'));
+    let dlOk = false;
+    if (fetchBtn) {
+      fetchBtn.click();
+      for (let i = 0; i < 20 && !dlOk; i++) {
+        await new Promise((r) => setTimeout(r, 150));
+        dlOk = document.querySelectorAll('#ai-model-datalist option').length >= 2;
+      }
+    }
+    const cancel = document.querySelector('#modal-actions .tbtn');
+    if (cancel) cancel.click();
+    return !!preset && !legacyType && !!fetchBtn && dlOk
+      ? true
+      : 'preset=' + !!preset + ',legacy=' + !!legacyType + ',btn=' + !!fetchBtn + ',dl=' + dlOk;
+  });
+
+  await step('aiClearButton', async () => {
+    const btn = document.querySelector('#btn-ai-clear');
+    if (!btn) return 'no btn';
+    // 面板未打开时 badge 未渲染内容没关系：直接点击清空 → history 复位（再发消息显示未配置提示链路完好）
+    btn.click();
+    await new Promise((r) => setTimeout(r, 100));
+    return true;
+  });
+
+  await step('aiSettingsRestore', async () => {
+    await api.setSettings({ aiBaseUrl: 'https://api.deepseek.com', aiModel: 'deepseek-chat', aiApiKeyClear: true });
+    app.state.settings = await api.getSettings();
+    const ok = app.state.settings.aiBaseUrl === 'https://api.deepseek.com' && !app.state.settings.aiApiKeySet;
+    return ok ? true : 'base=' + app.state.settings.aiBaseUrl + ',keySet=' + app.state.settings.aiApiKeySet;
   });
 
   // ================= 多主题皮肤（阶段2：主题下拉 / 持久化 / 白名单 / 防闪白 / 明暗适配） =================
@@ -3120,6 +3195,57 @@ async function runSmoke(win) {
           fs.writeFileSync(path.join(bigDir, 'search15.txt'), buf);
         }
       }
+      // ============ v0.2.5 AI：本地 mock OpenAI 兼容服务（SSE 流式 / 工具循环 / 模型列表） ============
+      // 只服务 127.0.0.1:18432 的 /v1/chat/completions 与 /v1/models；渲染端 aiMockChat 用例全程走真实链路
+      let aiMockPort = 0;
+      const aiMockServer = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+          if (req.url.endsWith('/models')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ data: [{ id: 'mock-pro' }, { id: 'mock-mini' }] }));
+            return;
+          }
+          let j = {};
+          try { j = JSON.parse(body || '{}'); } catch { /* 忽略 */ }
+          const isToolRound = (j.messages || []).some((m) => m.role === 'assistant' && m.tool_calls);
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          const chunks = isToolRound
+            ? [
+                { choices: [{ delta: { content: '文档' } }] },
+                { choices: [{ delta: { content: '内容' } }] },
+                { choices: [{ delta: { content: '已读取' } }] },
+                { choices: [{ delta: {}, finish_reason: 'stop' }] },
+                { usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 } },
+              ]
+            : [
+                { choices: [{ delta: { reasoning_content: '思考：先读文档再答' } }] },
+                { choices: [{ delta: { content: '正在读取文档…' } }] },
+                { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'read_document', arguments: '' } }] } }] },
+                { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{}' } }] } }] },
+                { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+                { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
+              ];
+          let i = 0;
+          const timer = setInterval(() => {
+            if (i < chunks.length) res.write('data: ' + JSON.stringify(chunks[i++]) + '\n\n');
+            else {
+              clearInterval(timer);
+              res.write('data: [DONE]\n\n');
+              res.end();
+            }
+          }, 20);
+        });
+      });
+      await new Promise((resolve) => {
+        aiMockServer.once('error', () => resolve()); // 端口被占：aiMockPort 保持 0，AI 用例明确失败
+        aiMockServer.listen(18432, '127.0.0.1', () => {
+          aiMockPort = 18432;
+          resolve();
+        });
+      });
+      await win.webContents.executeJavaScript('window.__AI_MOCK_PORT = ' + aiMockPort + '; null');
       const results = await win.webContents.executeJavaScript(RENDERER_TEST);
       // v0.2.4 previewImgClip：剪贴板断言须在主进程侧（clipboard 模块不进渲染上下文）。
       // RENDERER_TEST 中 previewImgCtx 已点击「复制图片（原图）」，期间无其它用例改写剪贴板 ——
@@ -3277,6 +3403,7 @@ async function runSmoke(win) {
     } catch (err) {
       console.error('E2E_ERROR', err && err.stack ? err.stack : String(err));
     } finally {
+      try { aiMockServer.close(); } catch { /* 未启动 */ }
       cleanTestRoot();
       setTimeout(() => {
         console.log('SMOKE_OK');

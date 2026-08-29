@@ -10,7 +10,7 @@ A Windows desktop Markdown / text editor built for large files, multi-window edi
 [![Build & Release](https://github.com/hwm-1114/markhunter/actions/workflows/release.yml/badge.svg)](https://github.com/hwm-1114/markhunter/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/%E8%AE%B8%E5%8F%AF%E8%AF%81-MIT-green.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%2010%2F11%20x64-lightgrey)
-![E2E](https://img.shields.io/badge/%E5%86%92%E7%83%9F%E6%B5%8B%E8%AF%95-174%20%E9%A1%B9%E9%80%9A%E8%BF%87-brightgreen)
+![E2E](https://img.shields.io/badge/%E5%86%92%E7%83%9F%E6%B5%8B%E8%AF%95-179%20%E9%A1%B9%E9%80%9A%E8%BF%87-brightgreen)
 
 [📥 下载安装包](#-安装与下载) · [✨ 功能特性](#-功能特性) · [⌨️ 快捷键](#️-快捷键) · [🛠 参与开发](#-开发运行) · [🔒 隐私与安全](#-隐私与安全) · [📖 更新日志](CHANGELOG.md)
 
@@ -68,8 +68,10 @@ A Windows desktop Markdown / text editor built for large files, multi-window edi
 
 **AI 助手**
 
-- OpenAI 兼容接口（DeepSeek 预置，可自定义服务地址 / 模型），function calling 读取 / 修改文档、搜索、建文件
-- API Key 经 Windows DPAPI 加密存储在本地，界面不显示明文；修改文档前可设置确认提示
+- **任意 OpenAI 兼容服务**：服务商预设一键填入（DeepSeek / OpenAI / 硅基流动 / Kimi / 智谱 / 通义 / Ollama / LM Studio），中转站裸域名自动补 /v1，局域网本机模型可用；「拉取模型列表」在线获取可选模型
+- **流式回复 + 思考过程**：打字机实时输出；推理模型（如 deepseek-reasoner）的思考过程折叠显示
+- function calling 读取 / 修改文档、全局搜索、新建文件；修改前可设置确认提示
+- API Key 经 Windows DPAPI 加密存储在本地，界面不显示明文；支持一键清空对话
 
 **多窗口同时编辑**
 
@@ -131,7 +133,7 @@ cd markhunter
 npm install       # 安装依赖（Electron 走 npmmirror 镜像）
 npm start         # 启动应用
 npm run build     # esbuild 打包渲染进程（改渲染端源码后必须执行）
-npm run smoke     # 端到端冒烟测试（174 项，真实窗口自动化验证）
+npm run smoke     # 端到端冒烟测试（179 项，真实窗口自动化验证）
 npm run release   # 本地打包 NSIS 安装包
 ```
 
