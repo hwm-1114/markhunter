@@ -50,4 +50,4 @@ publish:
   provider: github
   owner: hwm-1114
   repo: markhunter
-  private: true
+  private: false # 仓库已公开（2026-08-29）
