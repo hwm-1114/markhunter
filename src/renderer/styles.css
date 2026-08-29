@@ -455,8 +455,10 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .editor-host { flex: 1; min-width: 0; overflow: hidden; }
 .editor-host.half { flex: 1; }
 
-/* 大文件查看器横幅（>256MB 标签；悬浮于编辑区顶部中央） */
-.viewer-bar {
+/* 大文件查看器横幅（>256MB 标签；悬浮于编辑区顶部中央）。
+   v0.2.4：选择器从 .viewer-bar 收敛为 #viewer-bar —— 原类名同时命中图片查看弹窗的操作条，
+   absolute+top:10px 会把「放大/缩小/重置」钉到弹窗顶部（弹窗操作条样式见 .viewer 栏 1049 行） */
+#viewer-bar {
   position: absolute;
   top: 10px;
   left: 50%;
@@ -473,7 +475,7 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   backdrop-filter: blur(4px);
   max-width: 80%;
 }
-.viewer-bar .viewer-pos {
+#viewer-bar .viewer-pos {
   font-size: 11.5px;
   color: var(--mh-text-2);
   white-space: nowrap;

@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld('api', {
   writeBinary: (p, buf) => ipcRenderer.invoke('fs:write-binary', p, buf),
   stat: (p) => ipcRenderer.invoke('fs:stat', p),
   copyImage: (p) => ipcRenderer.invoke('clipboard:write-image', p),
+  // 在资源管理器中显示文件（预览图片/图片标签页右键菜单用）
+  showInFolder: (p) => ipcRenderer.invoke('shell:show-in-folder', p),
   readClipboardText: () => ipcRenderer.invoke('clipboard:read-text'),
   watchFile: (p, mtime) => ipcRenderer.invoke('fs:watch-file', p, mtime),
   unwatchFile: (p) => ipcRenderer.invoke('fs:unwatch-file', p),

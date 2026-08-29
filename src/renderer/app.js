@@ -1253,7 +1253,9 @@ async function boot() {
       editor.cycleTab(e.shiftKey ? -1 : 1);
     } else if (e.key === 'Escape') {
       tree.hideCtx();
-      if (!$('#bottom-panel').classList.contains('collapsed')) {
+      // v0.2.4：弹窗打开时 Esc 只关弹窗（ui.js 统一处理），不收起底部面板
+      const modalOpen = !$('#modal-mask').classList.contains('hidden');
+      if (!modalOpen && !$('#bottom-panel').classList.contains('collapsed')) {
         $('#bottom-panel').classList.add('collapsed');
       }
     }

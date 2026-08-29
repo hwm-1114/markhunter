@@ -99,8 +99,9 @@ export function openViewer({ kind, src, svgHtml, filePath, title }) {
     });
   }
 
-  // 缩放（Ctrl+滚轮 / Ctrl+左键 / 按钮）
+  // 缩放（直接滚轮 / Ctrl+滚轮 / 按钮；滚轮以光标为锚点，放大对准鼠标位置）
   let zoom = 1;
+  let natural = false; // 1:1 原始尺寸（zoom=1 但解除 max-width/height 限制，大图可滚动查看）
   const MIN = 0.5;
   const MAX = 5;
   const zoomLabel = document.createElement('span');
@@ -109,7 +110,7 @@ export function openViewer({ kind, src, svgHtml, filePath, title }) {
     el.style.zoom = zoom;
     // 图片放大时移除 max-width 限制（否则缩放被容器宽度抵消，无法溢出/平移）
     if (el.classList.contains('viewer-img')) {
-      if (zoom > 1) {
+      if (zoom > 1 || natural) {
         el.style.maxWidth = 'none';
         el.style.maxHeight = 'none';
       } else {
@@ -119,16 +120,52 @@ export function openViewer({ kind, src, svgHtml, filePath, title }) {
     }
     zoomLabel.textContent = Math.round(zoom * 100) + '%';
   };
+  /** 缩放并保持 (cx, cy)（stage 内坐标）下的内容点不动（CSS zoom 后滚动区随之缩放） */
+  const zoomKeep = (before, cx, cy) => {
+    applyZoom();
+    const ratio = zoom / before;
+    if (ratio !== 1) {
+      stage.scrollLeft = Math.max(0, (stage.scrollLeft + cx) * ratio - cx);
+      stage.scrollTop = Math.max(0, (stage.scrollTop + cy) * ratio - cy);
+    }
+  };
+  /** 步进缩放（delta>0 放大）；anchor='cursor' 须配 clientX/clientY，否则锚定 stage 中心 */
+  const stepZoom = (delta, anchor, e) => {
+    const before = zoom;
+    const next = Math.min(MAX, Math.max(MIN, +(zoom + delta).toFixed(2)));
+    if (next === zoom) return;
+    zoom = next;
+    natural = false; // 任意步进缩放退出 1:1 模式（仅双击/1:1 按钮进入）
+    const rect = stage.getBoundingClientRect();
+    const cx = anchor === 'cursor' ? e.clientX - rect.left : rect.width / 2;
+    const cy = anchor === 'cursor' ? e.clientY - rect.top : rect.height / 2;
+    zoomKeep(before, cx, cy);
+  };
   stage.addEventListener(
     'wheel',
     (e) => {
-      // 详情内直接滚轮缩放（无需 Ctrl）
+      // 详情内直接滚轮缩放（无需 Ctrl），以光标为锚点
       e.preventDefault();
-      zoom = Math.min(MAX, Math.max(MIN, +(zoom + (e.deltaY < 0 ? 0.1 : -0.1)).toFixed(2)));
-      applyZoom();
+      stepZoom(e.deltaY < 0 ? 0.1 : -0.1, 'cursor', e);
     },
     { passive: false }
   );
+  /** 1:1 原始尺寸 ↔ 适应窗口（双击图片或按钮触发） */
+  const toggleNatural = () => {
+    natural = !natural;
+    zoom = 1;
+    applyZoom();
+    if (natural) {
+      stage.scrollLeft = (stage.scrollWidth - stage.clientWidth) / 2;
+      stage.scrollTop = (stage.scrollHeight - stage.clientHeight) / 2;
+    }
+  };
+  if (kind === 'image') {
+    el.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      toggleNatural();
+    });
+  }
 
   // 鼠标左键按住拖拽平移查看（放大后查看不同部位）
   // 监听器按需挂载：mousedown 时挂到 document，mouseup 时摘除 —— 多次打开查看器不再累积泄漏
@@ -163,7 +200,7 @@ export function openViewer({ kind, src, svgHtml, filePath, title }) {
     document.addEventListener('mouseup', onDragUp);
   });
 
-  // 操作条
+  // 操作条（.viewer-bar：普通文档流，排在图片下方 —— v0.2.4 修复被大文件横幅样式误定位到弹窗顶部）
   const bar = document.createElement('div');
   bar.className = 'viewer-bar';
   const mkBtn = (text, fn) => {
@@ -173,14 +210,17 @@ export function openViewer({ kind, src, svgHtml, filePath, title }) {
     b.addEventListener('click', fn);
     return b;
   };
-  bar.append(
-    mkBtn('放大', () => { zoom = Math.min(MAX, +(zoom + 0.2).toFixed(2)); applyZoom(); }),
-    mkBtn('缩小', () => { zoom = Math.max(MIN, +(zoom - 0.2).toFixed(2)); applyZoom(); }),
-    mkBtn('重置', () => { zoom = 1; applyZoom(); }),
-    zoomLabel
-  );
+  const barItems = [
+    mkBtn('放大', () => stepZoom(0.2, 'center')),
+    mkBtn('缩小', () => stepZoom(-0.2, 'center')),
+    mkBtn('适应', () => { zoom = 1; natural = false; applyZoom(); }),
+  ];
+  if (kind === 'image') {
+    barItems.push(mkBtn('1:1', () => { if (!natural) toggleNatural(); })); // 原始尺寸（大图可滚动）
+  }
+  barItems.push(zoomLabel);
   if (kind === 'image' && filePath) {
-    bar.append(
+    barItems.push(
       mkBtn('📋 复制', async () => {
         try {
           const r = await window.api.copyImage(filePath);
@@ -192,6 +232,7 @@ export function openViewer({ kind, src, svgHtml, filePath, title }) {
       })
     );
   }
+  bar.append(...barItems);
 
   body.append(stage, info, bar);
 

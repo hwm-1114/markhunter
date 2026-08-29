@@ -297,5 +297,11 @@ document.addEventListener('contextmenu', () => {
   hideContextMenu();
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') hideContextMenu();
+  if (e.key !== 'Escape') return;
+  // v0.2.4：优先关右键菜单，其次关弹窗（图片查看器等）—— Esc 关弹窗走 closeModal 统一钩子
+  if (!ctxMenu.classList.contains('hidden')) {
+    hideContextMenu();
+  } else if (!mask.classList.contains('hidden')) {
+    closeModal();
+  }
 });

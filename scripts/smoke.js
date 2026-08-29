@@ -320,6 +320,68 @@ const RENDERER_TEST = `
     return after > before ? true : 'sw=' + sw + ',cw=' + cw + ',bef=' + before + ',aft=' + after;
   });
 
+  // ---- v0.2.4 预览图片右键菜单：复制原图（不压缩）/ 在文件夹中显示 / 打开查看器 ----
+  await step('previewImgCtx', async () => {
+    const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    const bsRoot = root.replace(/\\//g, '\\\\');
+    await api.writeBinary(bsRoot + '\\\\ctxpic.png', Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+    await api.writeFile(bsRoot + '\\\\ctxmd.md', '# 右键复制\\n\\n![ctx](./ctxpic.png)\\n');
+    await app.editor.openFile(bsRoot + '\\\\ctxmd.md');
+    await new Promise((r) => setTimeout(r, 600));
+    const img = document.querySelector('#preview-content img.preview-img');
+    if (!img) return 'no img';
+    img.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 300 }));
+    await new Promise((r) => setTimeout(r, 120));
+    const els = Array.from(document.querySelectorAll('#ctx-menu .ctx-item'));
+    const labels = els.map((el) => el.textContent);
+    const hasCopy = labels.some((t) => t.includes('复制图片'));
+    const hasFolder = labels.some((t) => t.includes('在文件夹中显示'));
+    const hasViewer = labels.some((t) => t.includes('打开图片查看器'));
+    const copyItem = els.find((el) => el.textContent.includes('复制图片'));
+    if (copyItem) copyItem.click();
+    await new Promise((r) => setTimeout(r, 500));
+    // 剪贴板内容由主进程侧断言（clipboard 模块不进渲染进程）：此处仅验证菜单项与点击链路
+    return hasCopy && hasFolder && hasViewer
+      ? true
+      : 'items=' + labels.join('|');
+  });
+
+  await step('showInFolderIpc', async () => {
+    // 不存在的路径：shell.showItemInFolder 静默无操作（冒烟中不弹资源管理器窗口），仅验证 IPC 通道
+    const r = await api.showInFolder(root + '/__no_such__.png');
+    return r === true ? true : 'r=' + r;
+  });
+
+  // ---- v0.2.4 查看器操作条位于图片下方（类名冲突修复）+ 1:1 原始尺寸 + Esc 关闭 ----
+  await step('viewerBarBelow', async () => {
+    const img = document.querySelector('#preview-content img.preview-img');
+    if (!img) return 'no img';
+    img.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    const open = !document.querySelector('#modal-mask').classList.contains('hidden');
+    const stage = document.querySelector('#modal-body .viewer-stage');
+    const bar = document.querySelector('#modal-body .viewer-bar');
+    if (!stage || !bar) return 'open=' + open + ',stage=' + !!stage + ',bar=' + !!bar;
+    // DOM 顺序：stage 在 bar 之前（操作条在图片下方）；且不再被绝对定位钉到顶部
+    const below = !!(bar.compareDocumentPosition(stage) & Node.DOCUMENT_POSITION_PRECEDING);
+    const pos = getComputedStyle(bar).position;
+    const btns = Array.from(bar.querySelectorAll('button')).map((b) => b.textContent);
+    const idx11 = btns.indexOf('1:1');
+    let naturalOk = false;
+    if (idx11 >= 0) {
+      bar.querySelectorAll('button')[idx11].click();
+      await new Promise((r) => setTimeout(r, 120));
+      const vi = stage.querySelector('.viewer-img');
+      naturalOk = !!vi && vi.style.maxWidth === 'none';
+    }
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 200));
+    const closed = document.querySelector('#modal-mask').classList.contains('hidden');
+    return open && below && pos !== 'absolute' && idx11 >= 0 && naturalOk && closed
+      ? true
+      : 'open=' + open + ',below=' + below + ',pos=' + pos + ',1:1=' + idx11 + ',nat=' + naturalOk + ',closed=' + closed;
+  });
+
   // ---- 详情查看器放大后左右边缘可完整滚动（无裁剪） ----
   await step('viewerScrollFull', async () => {
     await api.writeFile(
@@ -3059,6 +3121,13 @@ async function runSmoke(win) {
         }
       }
       const results = await win.webContents.executeJavaScript(RENDERER_TEST);
+      // v0.2.4 previewImgClip：剪贴板断言须在主进程侧（clipboard 模块不进渲染上下文）。
+      // RENDERER_TEST 中 previewImgCtx 已点击「复制图片（原图）」，期间无其它用例改写剪贴板 ——
+      // 此处读取应得到 1×1 原图（原图字节直写，不压缩不缩放）
+      {
+        const sz = clipboard.readImage().getSize();
+        results.push(['previewImgClip', sz.width === 1 && sz.height === 1, 'clip=' + sz.width + 'x' + sz.height]);
+      }
       // 需求3：剪贴板读写由主进程控制（渲染进程仅经 window.api.readClipboardText 读取）
       clipboard.writeText('纯文本测试 123');
       const r1 = await win.webContents.executeJavaScript(menuClipboardSnippet('text'));

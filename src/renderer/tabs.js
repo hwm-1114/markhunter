@@ -920,6 +920,29 @@ export function createEditor(callbacks) {
     img.alt = tab.name;
     img.title = tab.path;
     img.className = 'image-tab-img';
+    // v0.2.4：右键菜单 —— 复制原图 / 在文件夹中显示（与预览右键一致）
+    img.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      import('./ui.js').then(({ showContextMenu }) => {
+        showContextMenu(e.clientX, e.clientY, [
+          {
+            label: '📋 复制图片（原图）',
+            onClick: async () => {
+              try {
+                const r = await window.api.copyImage(tab.path);
+                const { toast } = await import('./ui.js');
+                toast(`图片已复制（${r.width}×${r.height}）`);
+              } catch (err) {
+                const { toast } = await import('./ui.js');
+                toast('复制失败：' + (err && err.message ? err.message : err));
+              }
+            },
+          },
+          { label: '📁 在文件夹中显示', onClick: () => window.api.showInFolder(tab.path) },
+        ]);
+      });
+    });
     imageHost.appendChild(img);
 
     // 右上角工具栏：复制按钮 + 缩放指示

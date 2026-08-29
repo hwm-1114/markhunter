@@ -143,6 +143,12 @@ app.whenReady().then(() => {
   // 读取剪贴板纯文本（编辑器右键「粘贴为纯文本」用）
   ipcMain.handle('clipboard:read-text', () => clipboard.readText());
 
+  // 在资源管理器中显示文件（预览图片/图片标签页右键菜单用；只读操作不涉路径校验）
+  ipcMain.handle('shell:show-in-folder', (_e, filePath) => {
+    shell.showItemInFolder(filePath);
+    return true;
+  });
+
   createWindow();
 
   app.on('activate', () => {

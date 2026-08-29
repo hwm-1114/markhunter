@@ -5,7 +5,7 @@
 // chunk 内 iife 将 mermaid 实例暴露到 window.__mermaid；就绪前 mermaid 块保持 pre>code 占位，
 // 失败时显示错误占位。异步就绪已融入渲染路径（renderMermaid 内部 await），冒烟用例等待即可。
 import MarkdownIt from 'markdown-it';
-import { $, isMarkdown, stripChunkMarkers } from './ui.js';
+import { $, isMarkdown, stripChunkMarkers, showContextMenu, toast } from './ui.js';
 import { openViewer } from './viewer.js';
 
 const md = new MarkdownIt({
@@ -123,6 +123,35 @@ function showImageDetail(img, tab) {
     filePath: filePath || undefined,
     title: filePath ? filePath.split(/[\\/]/).pop() : img.alt || '图片',
   });
+}
+
+/** 预览图片 file:// URL → 本地磁盘路径（外链 http(s)/data: 返回 null） */
+function imgLocalPath(img) {
+  const src = img.getAttribute('src') || '';
+  return src.startsWith('file:///') ? decodeURIComponent(src.slice('file:///'.length)) : null;
+}
+
+/** 预览图片右键菜单：复制原图（不压缩）/ 在文件夹中显示 / 打开查看器（v0.2.4） */
+function showPreviewImgMenu(e, img, tab) {
+  const filePath = imgLocalPath(img);
+  const items = [];
+  if (filePath) {
+    items.push({
+      label: '📋 复制图片（原图）',
+      onClick: async () => {
+        try {
+          const r = await window.api.copyImage(filePath);
+          toast(`图片已复制（${r.width}×${r.height}）`);
+        } catch (err) {
+          toast('复制失败：' + (err && err.message ? err.message : err));
+        }
+      },
+    });
+    items.push({ label: '📁 在文件夹中显示', onClick: () => { window.api.showInFolder(filePath); } });
+    items.push({ sep: true });
+  }
+  items.push({ label: '🔍 打开图片查看器', onClick: () => showImageDetail(img, tab) });
+  showContextMenu(e.clientX, e.clientY, items);
 }
 
 export function createPreview(getEditor, getTab, getIsDark) {
@@ -299,7 +328,7 @@ export function createPreview(getEditor, getTab, getIsDark) {
         a.rel = 'noopener noreferrer';
       }
     });
-    // 图片：解析为绝对路径 + 双击查看详情
+    // 图片：解析为绝对路径 + 双击查看详情 + 右键菜单（v0.2.4）
     contentEl.querySelectorAll('img').forEach((img) => {
       const src = img.getAttribute('src');
       if (!src) return;
@@ -308,6 +337,11 @@ export function createPreview(getEditor, getTab, getIsDark) {
       img.addEventListener('dblclick', (e) => {
         e.stopPropagation();
         showImageDetail(img, tab);
+      });
+      img.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showPreviewImgMenu(e, img, tab);
       });
     });
     // mermaid 图（P5：仅当文档实际含 mermaid 块才触发惰性加载，避免无图文档白加载 3MB chunk）
