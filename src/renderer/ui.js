@@ -179,9 +179,10 @@ export async function confirmDialog(message, title = '确认操作') {
   return res === 1;
 }
 
-export function toast(text) {
+/** 浮层提示的公共实现（toast / note 只差类名；返回元素，调用方可再挂自己的标记） */
+function floating(text, cls) {
   const el = document.createElement('div');
-  el.className = 'toast';
+  el.className = cls;
   el.textContent = text;
   document.body.appendChild(el);
   setTimeout(() => {
@@ -191,6 +192,20 @@ export function toast(text) {
       setTimeout(() => el.remove(), 300);
     }, 1600);
   }, 10);
+  return el;
+}
+
+export function toast(text) {
+  return floating(text, 'toast');
+}
+
+/** 独立类名的浮层提示（视觉与 toast 完全一致，但**不带 `.toast` 类**）。
+ *  背景：**应用级**后台提示（如崩溃恢复检测到可恢复块表）与当前操作无关，若用 `.toast`，
+ *  会被"按 `.toast` 收集文案"的用例/断言（例如 mwClaimEdit 读「接管」提示）误收成随机红
+ *  —— 任何一次 boot 时恢复区非空（前序大文件编辑留下的分片、或多窗口新开的那个窗口）就会触发。
+ *  样式与 `.toast` 共享同一条 CSS 规则（styles.css 的 `.toast, .mh-note`），不会视觉分叉。 */
+export function note(text) {
+  return floating(text, 'mh-note');
 }
 
 /** 通用分隔条拖拽调整尺寸

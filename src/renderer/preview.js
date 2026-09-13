@@ -154,11 +154,27 @@ function showPreviewImgMenu(e, img, tab) {
   showContextMenu(e.clientX, e.clientY, items);
 }
 
-export function createPreview(getEditor, getTab, getIsDark) {
-  const previewHost = $('#preview-host');
-  const contentEl = $('#preview-content');
-  const editorHost = $('#editor-host');
-  const divider = $('#split-divider');
+/**
+ * @param getEditor 取编辑器模块（tabs.js 的 API 面；只用 getView()）
+ * @param getTab    取**本实例所属栏**的当前活动标签（Phase 2 由 app.js 按栏注入）
+ * @param getIsDark 当前是否暗色主题
+ * @param opt       （可选，0.5.0 多视图 Phase 2）本实例绑定的栏上下文：
+ *                  `{ paneId, els: () => ({previewHost, contentEl, editorHost, divider, imageHost,
+ *                     diffHost, viewerBar, zoomBadge}), getView }`。
+ *                  **不传则逐位退回旧的「全窗口唯一 ID」行为**（单栏路径零变化）；
+ *                  传了则本实例的 mode / 缩放 / 滚动同步都只作用于那一个栏 ——
+ *                  这是「栏内预览模式（edit/split/preview）必须按栏独立」的落点：
+ *                  每个栏一个 preview 实例，`mode` 是实例闭包变量，天然按栏独立。
+ */
+export function createPreview(getEditor, getTab, getIsDark, opt) {
+  /** 本实例绑定的栏元素（Phase 2）；null 表示走旧的全局 ID 查找 */
+  const E = opt && opt.els ? opt.els() : null;
+  const previewHost = (E && E.previewHost) || $('#preview-host');
+  const contentEl = (E && E.contentEl) || $('#preview-content');
+  const editorHost = (E && E.editorHost) || $('#editor-host');
+  const divider = (E && E.divider) || $('#split-divider');
+  /** 本栏的 CodeMirror 视图（滚动跟随用）：注入则用它，否则退回焦点栏 */
+  const viewOf = () => ((opt && opt.getView) ? opt.getView() : getEditor().getView());
 
   let mode = 'split'; // edit | split | preview
 
@@ -313,7 +329,7 @@ export function createPreview(getEditor, getTab, getIsDark) {
     renderCount++;
     const tab = getTab();
     // viewer-lg（>256MB 大文件查看器）：窗口内容不做 markdown 渲染（整窗 toString 亦应避免放大）
-    if (!tab || tab.kind === 'viewer-lg' || !isMarkdown(tab.name)) {
+    if (!tab || (tab.kind === 'viewer-lg' || tab.kind === 'huge') || !isMarkdown(tab.name)) {
       contentEl.innerHTML = '';
       return;
     }
@@ -352,9 +368,10 @@ export function createPreview(getEditor, getTab, getIsDark) {
 
   function applyMode() {
     const tab = getTab();
-    const imageHost = $('#image-host');
-    const diffHostEl = $('#diff-host');
-    const viewerBar = $('#viewer-bar');
+    // 0.5.0 Phase 2：宿主按**本实例所属栏**取（p0 仍是历史 ID #image-host / #diff-host / #viewer-bar）
+    const imageHost = (E && E.imageHost) || $('#image-host');
+    const diffHostEl = (E && E.diffHost) || $('#diff-host');
+    const viewerBar = (E && E.viewerBar) || $('#viewer-bar');
     if (viewerBar) viewerBar.classList.add('hidden');
     if (tab && tab.kind === 'image') {
       // 图片标签页：编辑区显示图片，隐藏编辑器/预览/分隔条
@@ -376,8 +393,8 @@ export function createPreview(getEditor, getTab, getIsDark) {
     }
     if (diffHostEl) diffHostEl.classList.add('hidden');
     // viewer-lg：编辑区只读显示 + 查看器横幅；无 markdown 预览
-    if (viewerBar) viewerBar.classList.toggle('hidden', !(tab && tab.kind === 'viewer-lg'));
-    const canPreview = tab && tab.kind !== 'viewer-lg' && isMarkdown(tab.name);
+    if (viewerBar) viewerBar.classList.toggle('hidden', !(tab && (tab.kind === 'viewer-lg' || tab.kind === 'huge')));
+    const canPreview = tab && tab.kind !== 'viewer-lg' && tab.kind !== 'huge' && isMarkdown(tab.name);
     // 非 Markdown 文件（txt/json/py 等）编辑器始终显示，仅 Markdown 参与分屏/仅预览切换
     previewHost.classList.toggle('hidden', !canPreview || mode === 'edit');
     previewHost.classList.toggle('full', canPreview && mode === 'preview');
@@ -389,7 +406,7 @@ export function createPreview(getEditor, getTab, getIsDark) {
 
   function cycleMode() {
     const tab = getTab();
-    if (!tab || tab.kind === 'viewer-lg' || !isMarkdown(tab.name)) return;
+    if (!tab || (tab.kind === 'viewer-lg' || tab.kind === 'huge') || !isMarkdown(tab.name)) return;
     const order = ['edit', 'split', 'preview'];
     mode = order[(order.indexOf(mode) + 1) % order.length];
     applyMode();
@@ -409,7 +426,8 @@ export function createPreview(getEditor, getTab, getIsDark) {
   let scrollSync = true;
   previewHost.addEventListener('scroll', () => {
     if (!scrollSync) return;
-    const editor = getEditor().getView();
+    const editor = viewOf();
+    if (!editor) return;
     const sp = previewHost;
     const maxP = sp.scrollHeight - sp.clientHeight;
     const maxE = editor.scrollDOM.scrollHeight - editor.scrollDOM.clientHeight;
@@ -425,7 +443,7 @@ export function createPreview(getEditor, getTab, getIsDark) {
   });
 
   // ---------- Ctrl + 滚轮缩放预览（放大查看 mermaid 图等） ----------
-  const zoomBadge = $('#zoom-badge');
+  const zoomBadge = (E && E.zoomBadge) || $('#zoom-badge');
   let previewZoom = 1;
   const MIN_ZOOM = 0.5;
   const MAX_ZOOM = 3;

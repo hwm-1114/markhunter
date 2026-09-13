@@ -42,16 +42,24 @@ export function createPythonPanel(getTab, getSettings, onSave) {
       if (i < lines.length - 1) frag.appendChild(document.createTextNode('\n'));
     }
     if (frag.childElementCount === 0) return; // 纯续接、无新行
-    let excess = output.childElementCount + frag.childElementCount - 3000;
-    while (excess > 0) {
-      output.removeChild(output.firstChild);
-      excess--;
-    }
+    // v0.3.0 上限裁剪修正：旧实现 `excess = 现有 + 本批 - 3000` 在本批行数 > 3000 时
+    // 循环次数超过现有子节点数，removeChild(null) 抛 TypeError → 整批输出丢失
+    // （实测 print 6000 行 → 面板只剩 3 个 span / 22 字符，看起来像"程序没输出"）。
+    const MAX_SPANS = 3000;
+    while (frag.childElementCount > MAX_SPANS) frag.removeChild(frag.firstChild); // 本批自身超限：只留最后 3000 行
+    const excess = Math.min(
+      output.childElementCount + frag.childElementCount - MAX_SPANS,
+      output.childElementCount
+    );
+    for (let i = 0; i < excess; i++) output.removeChild(output.firstChild);
     output.appendChild(frag);
     output.scrollTop = output.scrollHeight; // 批末一次（整批内仅一次强制 layout）
   }
 
-  window.api.onPythonStart(({ interpreter, file }) => {
+  let runToken = 0; // 最近一次运行序号（主进程 python:start 下发）：旧进程迟到的退出事件据此忽略
+
+  window.api.onPythonStart(({ interpreter, file, token }) => {
+    runToken = token === undefined ? runToken : token;
     running = true;
     killBtn.disabled = false;
     append(`\n$ ${interpreter} ${file}\n`, 'sys');
@@ -62,7 +70,9 @@ export function createPythonPanel(getTab, getSettings, onSave) {
     append(data, stream === 'stderr' ? 'stderr' : '');
   });
 
-  window.api.onPythonExit(({ code, duration, error }) => {
+  window.api.onPythonExit(({ code, duration, error, token }) => {
+    // 旧进程（被新一次运行 taskkill）的迟到退出：不要把新进程的"运行中"状态覆盖掉
+    if (token !== undefined && token !== runToken) return;
     running = false;
     killBtn.disabled = true;
     if (error) {

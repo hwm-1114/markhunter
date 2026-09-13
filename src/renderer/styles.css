@@ -4,6 +4,12 @@
    本文件只保留与主题无关的字体令牌，避免覆盖主题值（否则换肤失效）。 */
 :root {
   --mono: "Cascadia Code", Consolas, "Courier New", monospace;
+  /* 0.5.0 Phase 5a B8：字号 / 行高设置（app.js 的 applyFonts 按 settings 覆盖）——
+     默认值 = 改造前的硬编码值，未设置时观感逐位不变。CSS 变量挂在 :root ⇒ 所有栏的
+     CM 与预览实例同时生效（多视图一致性天然满足，无需逐视图派发）。 */
+  --mh-editor-font-size: 13.5px;
+  --mh-editor-line-height: 1.65;
+  --mh-preview-font-size: 14.5px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -226,6 +232,64 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .file-tree { flex: 1; overflow: auto; padding: 2px 6px 8px; }
 .tree-empty { color: var(--mh-text-2); font-size: 12.5px; padding: 18px 12px; line-height: 1.7; text-align: center; }
 
+/* ---------- 0.5.0 Phase 5a E2：侧栏分区标题行与折叠态 ----------
+   三个分区（收藏 / 文件树 / 全局搜索）各自可折叠，折叠态写入 settings.sidebarCollapsed。
+   折叠 = 只给容器加 .collapsed（display:none 子内容），**树内部渲染与展开态恢复逻辑一行不改**
+   （J4 的 expanded 集合与 loadChildren 补载与可见性无关）。 */
+.sect-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mh-text-2);
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--mh-border);
+  background: var(--mh-bg);
+}
+.sect-header:hover { color: var(--mh-text); }
+.sect-header .sect-caret { flex: none; width: 14px; font-size: 9px; text-align: center; }
+/* 树分区折叠：容器整体让位（flex:1 的空间交给其它分区） */
+.file-tree.collapsed { display: none; }
+/* 搜索分区折叠：只留标题行 */
+#sidebar-search.collapsed { max-height: none; }
+#sidebar-search.collapsed .gs-bar,
+#sidebar-search.collapsed .gs-results,
+#sidebar-search.collapsed .gs-count-row { display: none; }
+
+/* ---------- 0.5.0 Phase 5a B1：大纲 / TOC 分区 ---------- */
+.outline-block {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  max-height: 34%;
+  border-bottom: 1px solid var(--mh-border);
+  background: var(--mh-bg);
+}
+.outline-block.hidden { display: none; }
+.outline-block.collapsed .outline-list { display: none; }
+.outline-list { overflow: auto; padding: 4px 6px 8px; }
+.outline-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  font-size: 12.5px;
+  color: var(--mh-text-2);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.outline-item:hover { background: var(--mh-bg-hover); color: var(--mh-text); }
+.outline-item.current { background: var(--mh-bg-active); color: var(--mh-text); font-weight: 600; }
+.outline-item .ol-text { overflow: hidden; text-overflow: ellipsis; }
+.outline-empty { color: var(--mh-text-2); font-size: 12px; padding: 6px 8px 10px; line-height: 1.6; }
+
 /* 侧栏全局搜索区 */
 #sidebar-search {
   flex: none;
@@ -385,18 +449,80 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 /* 编辑区 */
 #workbench { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
+/* ---------- 0.5.0 Phase 2：左右双栏容器（硬上限 2 栏） ----------
+   #editor-panes 是各栏的 flex 行；每栏 .pane 是「标签栏 + 编辑体」的纵向列。
+   单栏时 .pane 占满整行，几何与 Phase 1 的 #tabs + #editor-wrap 完全一致。 */
+.editor-panes { flex: 1; display: flex; min-width: 0; min-height: 0; }
+.pane { flex: 1 1 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
+/* 非焦点栏去饱和：一眼看出键盘输入会落到哪一栏（Ctrl+1/2 切换）。
+   **只在双栏时生效**（tabs.js 在分栏时给 .editor-panes 加 .split）—— 单栏外观与 Phase 1 逐像素一致。
+   刻意不用 filter/opacity 作用于 .pane-body：那会把整栏 CodeMirror 变成合成层（文字发虚），
+   也可能影响绝对定位的 tooltip；只改标签栏的透明度 + 焦点栏一条内阴影指示。 */
+.editor-panes.split .pane:not(.active-pane) .pane-tabs { opacity: 0.66; }
+.editor-panes.split .pane.active-pane .pane-tabs { box-shadow: inset 0 3px 0 0 var(--mh-accent); }
+/* 拖标签到编辑区左/右边缘时的落点提示（tabs.js 的 dragover 切换这两个类） */
+.pane-body.pane-drop-left::before,
+.pane-body.pane-drop-right::after {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 34%;
+  z-index: 9;
+  pointer-events: none;
+  background: color-mix(in oklab, var(--mh-accent) 16%, transparent);
+  border: 1.5px dashed var(--mh-accent);
+}
+.pane-body.pane-drop-left::before { left: 0; border-left: none; }
+.pane-body.pane-drop-right::after { right: 0; border-right: none; }
+/* 两栏之间的分隔条（拖拽改比例；双击等分） */
+.pane-divider {
+  flex: none;
+  width: 6px;
+  cursor: col-resize;
+  position: relative;
+  background: var(--mh-border);
+  transition: background 0.15s;
+}
+.pane-divider:hover,
+.pane-divider.dragging { background: var(--mh-accent); }
+
 .tabs {
   flex: none;
   display: flex;
   align-items: flex-end;
   gap: 2px;
-  padding: 6px 8px 0;
+  /* 右侧 30px 是为 A3 的「▾ 全部标签」按钮**恒定预留**的：按钮是 .pane 上的 absolute 元素，
+     不给滚动内容留白的话，滚到末尾时最后一个标签的 ✕ 会被按钮压住。
+     （恒定值而非"溢出时才加"，避免 padding 变化反过来影响溢出判据造成抖动） */
+  padding: 6px 30px 0 8px;
   background: var(--mh-bg-panel);
   border-bottom: 1px solid var(--mh-border);
   overflow-x: auto;
   scrollbar-width: auto; /* v0.1.44（SB）：thin 会二次劫持 webkit 宽度（探针实证 thin+修复A→10px），改 auto */
   flex-wrap: nowrap; /* 压过 daisyUI .tabs 组件类的 flex-wrap:wrap（撞名泄漏），保持单行横向滚动 */
 }
+
+/* ---------- 0.5.0 多视图 Phase 4：跨窗口编辑权横幅 / 冲突横幅 ----------
+   位置：标签栏之下、编辑体之上（每栏各一份，随该栏活动文档的锁态显隐）。
+   只读横幅是**显性**入口：按钮直接摆在横幅上，不藏在标签右键菜单里（0.3.0 §2.6 的 L2 口径）。
+   两处横幅都是 flex:none 的条状区域，不参与 .pane-body 的高度分配（编辑器几何不受影响）。 */
+.lock-banner,
+.conflict-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  border-bottom: 1px solid var(--mh-border);
+}
+.lock-banner { background: var(--mh-accent-soft); color: var(--mh-text); }
+.lock-banner .lock-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lock-banner .lock-claim { flex: none; }
+.conflict-banner { background: color-mix(in oklab, #e0a800 22%, var(--mh-bg-panel)); color: var(--mh-text); }
+.conflict-banner .conflict-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conflict-banner .tbtn { flex: none; }
 .tab {
   display: inline-flex;
   align-items: center;
@@ -573,9 +699,9 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .editor-empty.hidden, .hidden { display: none !important; }
 
 /* CodeMirror 外观 */
-.cm-editor { height: 100%; font-size: 13.5px; }
+.cm-editor { height: 100%; font-size: var(--mh-editor-font-size); }
 .cm-editor.cm-focused { outline: none; }
-.cm-editor .cm-scroller { font-family: var(--mono); line-height: 1.65; padding: 8px 0; }
+.cm-editor .cm-scroller { font-family: var(--mono); line-height: var(--mh-editor-line-height); padding: 8px 0; }
 .cm-editor .cm-gutters { background: var(--mh-bg); border-right: 1px solid var(--mh-border); color: color-mix(in oklab, var(--mh-text) 55%, transparent); }
 .cm-editor .cm-activeLineGutter { background: var(--mh-bg-hover); color: var(--mh-accent); }
 .cm-editor .cm-activeLine { background: var(--mh-bg-hover); }
@@ -597,6 +723,189 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 }
 .cm-editor .cm-content { cursor: text; }
 
+/* ---------- 0.5.0 Phase 5a A3：标签栏溢出（▾ 全部标签 + Ctrl+Tab 浮层） ----------
+   判据按**每栏各自**的 .tabs scrollWidth/clientWidth（tabs.js 的 updateTabsOverflow）；
+   按钮与菜单挂在 .pane 上（absolute），因此不会被标签栏的横向滚动卷走，也不参与
+   标签栏的重建（renderPaneTabs 每次清空 .tabs 的 innerHTML）。 */
+.tabs-more {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 6;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--mh-text-2);
+  background: var(--mh-bg-panel);
+  border: 1px solid var(--mh-border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.pane.has-tab-overflow .tabs-more { display: inline-flex; }
+.tabs-more:hover { color: var(--mh-text); background: var(--mh-bg-hover); }
+.tabs-menu {
+  position: absolute;
+  top: 30px;
+  right: 6px;
+  z-index: 40;
+  min-width: 200px;
+  max-width: 340px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 4px;
+  background: var(--mh-bg-panel);
+  border: 1px solid var(--mh-border);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+.tabs-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--mh-text-2);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.tabs-menu-item:hover { background: var(--mh-bg-hover); color: var(--mh-text); }
+.tabs-menu-item.current { background: var(--mh-bg-active); color: var(--mh-text); font-weight: 600; }
+.tabs-menu-item .tm-name { overflow: hidden; text-overflow: ellipsis; }
+.tabs-menu-item .tm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mh-accent); flex: none; }
+.tabs-menu-item .tm-pin { font-size: 11px; flex: none; }
+/* Ctrl+Tab 切换浮层（窗口级单例；内容恒取焦点栏） */
+.tab-hud {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 9999;
+  min-width: 240px;
+  max-width: 480px;
+  max-height: 60vh;
+  overflow: hidden;
+  padding: 10px 12px;
+  background: var(--mh-bg-panel);
+  border: 1px solid var(--mh-border);
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.tab-hud-title { font-size: 11.5px; color: var(--mh-text-2); margin-bottom: 6px; }
+.tab-hud-item {
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--mh-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tab-hud-item.current { background: var(--mh-bg-active); color: var(--mh-text); font-weight: 600; }
+
+/* ---------- 0.5.0 Phase 5a A1：Ctrl+P 快速打开浮层 ---------- */
+.quick-open {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 8vh;
+  background: rgba(0, 0, 0, 0.28);
+}
+.qo-box {
+  width: min(680px, 92vw);
+  max-height: 72vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--mh-bg-panel);
+  border: 1px solid var(--mh-border);
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
+}
+.qo-box input {
+  flex: none;
+  padding: 11px 14px;
+  font-size: 13.5px;
+  color: var(--mh-text);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--mh-border);
+  outline: none;
+}
+.qo-meta {
+  flex: none;
+  padding: 5px 14px;
+  font-size: 11.5px;
+  color: var(--mh-text-2);
+  border-bottom: 1px solid var(--mh-border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qo-list { flex: 1; overflow: auto; padding: 4px; }
+.qo-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--mh-text-2);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.qo-row:hover { background: var(--mh-bg-hover); }
+.qo-row.current { background: var(--mh-bg-active); color: var(--mh-text); }
+.qo-row .qo-name { flex: none; color: var(--mh-text); }
+.qo-row .qo-dir {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+  color: var(--mh-text-2);
+  direction: rtl; /* 路径过长时优先保留尾部（近处目录更有辨识度） */
+  text-align: left;
+}
+.qo-empty { padding: 14px; font-size: 12.5px; color: var(--mh-text-2); text-align: center; }
+
+/* ---------- 0.5.0 Phase 5a F1：快捷键帮助面板 ---------- */
+.help-panel { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.help-search { display: flex; align-items: center; gap: 8px; }
+.help-search input {
+  flex: 1;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  color: var(--mh-text);
+  background: var(--mh-bg);
+  border: 1px solid var(--mh-border);
+  border-radius: 6px;
+  outline: none;
+}
+.help-groups { max-height: 52vh; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
+.help-group-title { font-size: 12px; font-weight: 700; color: var(--mh-text-2); margin-bottom: 4px; }
+.help-row { display: flex; align-items: baseline; gap: 10px; padding: 3px 0; font-size: 12.5px; }
+.help-keys {
+  flex: none;
+  min-width: 168px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--mh-accent);
+}
+.help-label { flex: 1; min-width: 0; color: var(--mh-text); }
+.help-empty { padding: 12px; text-align: center; color: var(--mh-text-2); font-size: 12.5px; }
+
 /* ============ 底部面板 ============ */
 #bottom-panel {
   flex: none;
@@ -609,6 +918,11 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 }
 #bottom-panel.collapsed { height: 34px; }
 #bottom-panel.collapsed .panel-body { display: none; }
+/* 0.5.0 Phase 5a E1：最大化 / 还原（标题栏 ⛶ 按钮）。
+   .maximized 只改高度：折叠态与最大化互斥（展开时才可最大化，见 app.js 的 togglePanelMax）。
+   用 vh 而不是百分比：body 是 flex 列容器，#bottom-panel 为 flex:none，百分比高度在部分
+   主题的 body 尺寸链上不可靠（vh 与窗口高度直接挂钩，行为确定）。 */
+#bottom-panel.maximized { height: 72vh; }
 
 .panel-tabs {
   flex: none;
@@ -672,6 +986,17 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .find-result .r-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mh-text); }
 .find-result .r-text mark { background: #ffe08a; color: #26303e; border-radius: 2px; padding: 0 1px; }
 .find-empty { color: var(--mh-text-2); padding: 14px; text-align: center; }
+/* 0.5.0 Phase 5a G1/G2：三开关按钮 + 截断提示行 */
+.find-toggle { flex: none; min-width: 34px; font-family: var(--mono); }
+.find-toggle.active {
+  background: var(--mh-accent); color: var(--mh-accent-content, #fff);
+  border-color: var(--mh-accent); font-weight: 700;
+}
+.find-more {
+  padding: 8px 14px; margin-top: 4px; text-align: center;
+  color: var(--mh-text-2); font-size: 12px;
+  border-top: 1px dashed var(--mh-border);
+}
 
 .gs-group { margin-bottom: 6px; }
 .gs-file {
@@ -806,7 +1131,9 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 :root { scrollbar-color: auto; }
 
 /* ============ 提示浮层 ============ */
-.toast {
+/* .mh-note = 应用级提示的独立类名（ui.js 的 note()，如崩溃恢复检测）：视觉与 .toast 共享同一规则，
+   但**不带 .toast 类** —— 否则会被"按 .toast 收集文案"的用例/断言误收（见 ui.js note() 的说明）。 */
+.toast, .mh-note {
   position: fixed;
   left: 50%;
   bottom: 64px;
@@ -822,7 +1149,35 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   pointer-events: none;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
 }
-.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast.show, .mh-note.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ============ 崩溃恢复弹窗（huge:doc-recover-list 的渲染端消费方） ============ */
+.recover-wrap { display: flex; flex-direction: column; gap: 10px; width: 100%; min-width: 460px; }
+.recover-head { font-size: 12.5px; color: var(--mh-text-2); }
+.recover-msg { font-size: 12.5px; line-height: 1.5; color: var(--mh-text-2); }
+/* 红字拒绝文案：用例按 .recover-error + 文本片段断言 */
+.recover-msg.recover-error { color: var(--mh-danger); font-weight: 600; }
+.recover-list { display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow: auto; }
+.recover-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--mh-border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--mh-bg-panel);
+}
+.recover-name { font-size: 13px; font-weight: 600; color: var(--mh-text); }
+.recover-acts { grid-row: span 3; display: flex; align-items: center; gap: 6px; }
+.recover-path {
+  font-size: 11.5px;
+  color: var(--mh-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 420px;
+}
+.recover-meta { font-size: 11.5px; color: var(--mh-text-2); }
 
 .py-cand { color: var(--mh-accent); text-decoration: none; margin-right: 6px; }
 .py-cand:hover { text-decoration: underline; }
@@ -830,7 +1185,8 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 /* ============ Markdown 预览排版 ============ */
 .markdown-body {
   font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
-  font-size: 14.5px;
+  /* 0.5.0 Phase 5a B8：预览字号由 CSS 变量驱动（默认值 = 改造前的 14.5px，观感零变化） */
+  font-size: var(--mh-preview-font-size);
   line-height: 1.75;
   color: var(--mh-text);
   user-select: text;
@@ -1050,201 +1406,6 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .viewer-info span { color: var(--mh-text-2); flex: none; width: 64px; }
 .viewer-bar { display: flex; align-items: center; gap: 8px; }
 .viewer-zoom { font-size: 12px; color: var(--mh-text-2); margin-left: auto; }
-
-/* ============ AI 助手侧栏 ============ */
-.ai-panel {
-  width: 360px;
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  background: var(--mh-bg-panel);
-  border-left: 1px solid var(--mh-border);
-  min-height: 0;
-}
-.ai-header {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--mh-border);
-}
-.ai-title { font-weight: 700; font-size: 13.5px; }
-.ai-model-badge {
-  font-size: 11px;
-  color: var(--mh-text-2);
-  background: var(--mh-bg);
-  padding: 2px 8px;
-  border-radius: 20px;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ai-model-badge.clickable {
-  cursor: pointer;
-  color: var(--mh-accent);
-}
-.ai-model-badge.clickable:hover {
-  background: var(--mh-accent-soft);
-}
-/* AI 模型切换菜单（垂直选项） */
-.ai-model-menu {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.ai-model-item {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  padding: 11px 14px;
-  border: 1px solid var(--mh-border);
-  border-radius: 10px;
-  background: var(--mh-bg-panel);
-  cursor: pointer;
-  text-align: left;
-  width: 100%;
-  font: inherit;
-  transition: border-color 0.15s, background 0.15s;
-}
-.ai-model-item:hover {
-  border-color: var(--mh-accent);
-  background: var(--mh-accent-soft);
-}
-.ai-model-item.current {
-  border-color: var(--mh-accent);
-  background: var(--mh-accent-soft);
-}
-.ai-model-item-name {
-  font-weight: 600;
-  font-size: 13.5px;
-  color: var(--mh-text);
-}
-.ai-model-item-desc {
-  font-size: 12px;
-  color: var(--mh-text-2);
-}
-.ai-msg-usage {
-  font-size: 11px;
-  color: var(--mh-text-2);
-  margin-top: 2px;
-  padding-left: 2px;
-}
-/* v0.2.5：推理模型思考过程（可折叠）+ 流式输出光标 */
-details.ai-reasoning {
-  border: 1px dashed var(--mh-border);
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 12px;
-  color: var(--mh-text-2);
-}
-details.ai-reasoning summary {
-  cursor: pointer;
-  user-select: none;
-  font-size: 11.5px;
-}
-.ai-reasoning-body {
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: 1.6;
-  margin-top: 4px;
-  max-height: 200px;
-  overflow-y: auto;
-}
-.ai-msg-body.streaming::after {
-  content: '▍';
-  color: var(--mh-accent);
-  animation: mh-blink 0.9s steps(1) infinite;
-}
-@keyframes mh-blink { 50% { opacity: 0; } }
-.ai-header-actions { display: flex; gap: 6px; }
-.ai-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.ai-msg { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
-.ai-msg-head { font-size: 11px; color: var(--mh-text-2); font-weight: 600; }
-.ai-msg-body {
-  font-size: 13px;
-  line-height: 1.6;
-  padding: 8px 12px;
-  border-radius: 10px;
-  word-break: break-word;
-  user-select: text;
-}
-.ai-msg.user .ai-msg-body {
-  background: var(--mh-accent-soft);
-  border: 1px solid #d5e4fb;
-}
-.ai-msg.ai .ai-msg-body {
-  background: var(--mh-bg);
-  border: 1px solid var(--mh-border);
-}
-.ai-msg.system .ai-msg-body {
-  /* L5（v0.1.44）：原 #fef7e0/#f3e3b0/#8a6d1a 为暗色下刺眼浅黄硬编码，改由主题令牌推导，暗色自适应 */
-  background: color-mix(in oklab, var(--mh-accent-soft) 55%, var(--mh-bg-hover));
-  border: 1px solid color-mix(in oklab, var(--mh-accent) 28%, var(--mh-border));
-  color: var(--mh-text-2);
-}
-.ai-msg-body p { margin: 0.3em 0; }
-.ai-msg-body pre {
-  background: #1e2430;
-  color: #d8e0ec;
-  padding: 10px 12px;
-  border-radius: 8px;
-  overflow: auto;
-  font-size: 12px;
-}
-.ai-msg-body code {
-  font-family: var(--mono);
-  background: var(--mh-bg-hover);
-  padding: 0.1em 0.4em;
-  border-radius: 4px;
-  font-size: 0.9em;
-}
-.ai-msg-body pre code { background: transparent; padding: 0; }
-.ai-apply { align-self: flex-start; margin-top: 4px; }
-.ai-input-row {
-  flex: none;
-  display: flex;
-  gap: 6px;
-  align-items: flex-end;
-  padding: 10px 12px;
-  border-top: 1px solid var(--mh-border);
-}
-.ai-input-row textarea {
-  flex: 1;
-  resize: none;
-  padding: 8px 12px;
-  border: 1px solid var(--mh-border);
-  border-radius: var(--mh-radius);
-  font-size: 13px;
-  font-family: inherit;
-  outline: none;
-  background: var(--mh-bg);
-}
-.ai-input-row textarea:focus {
-  border-color: var(--mh-accent);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
-}
-.ai-apply-body p { color: var(--mh-text-2); font-size: 13px; margin-bottom: 4px; }
-.ai-model-select {
-  flex: none;
-  width: 190px;
-  padding: 8px 12px;
-  border: 1px solid var(--mh-border);
-  border-radius: var(--mh-radius);
-  font-size: 13px;
-  background: var(--mh-bg);
-  outline: none;
-}
 
 /* ============ 通用分隔条（可拖拽调整尺寸） ============ */
 .resize-divider {
@@ -1755,3 +1916,49 @@ html[data-theme^="fx-"] .cm-editor { background: color-mix(in srgb, var(--mh-bg-
   padding: 10px 14px;
   text-align: left;
 }
+
+/* ============ v0.4.0 大文件虚拟滚动查看器 ============ */
+.huge-view { position: relative; overflow: auto; height: 100%; width: 100%; background: var(--mh-bg-panel); }
+/* 缺陷 1 兜底：.cm-editor（576 行 height:100%）与 .huge-view（下一行 height:100%）都是
+   #editor-host（455 行：block + overflow:hidden）的流内同级子元素 —— 同时可见时总高 200%，
+   huge 视图被整体挤到可视区之外（探针实测：host top=86 h=508，huge top=594）。
+   激活 huge 标签时 tabs.js 的 syncEditorLayer 会给**该栏的** .editor-host 加 .huge-active；
+   注意**必须 !important + 高特异性**：CodeMirror 基线主题给编辑器根节点写了
+   `display:flex !important`（node_modules/@codemirror/view 基线主题），普通规则/内联样式都压不过它。
+   0.5.0 Phase 2：选择器从 `#editor-host.huge-active` 改为 `#editor-panes .editor-host.huge-active` ——
+   ID 选择器只能命中 p0，双栏下「B 栏开普通文件」时 p1 的让位会失效（且 p0 开 huge 不得把 p1 的 CM 也隐藏）。 */
+#editor-panes .editor-host.huge-active > .cm-editor { display: none !important; }
+.huge-view .huge-sizer { position: relative; width: 100%; }
+.huge-view .huge-rows { position: absolute; inset: 0; }
+.huge-view .huge-line {
+  position: absolute; left: 0; right: 0; height: 20px; line-height: 20px;
+  display: flex; gap: 10px; white-space: pre; overflow: hidden;
+  font-family: var(--mh-mono, Consolas, 'Courier New', monospace); font-size: 13px;
+}
+.huge-view .huge-no { flex: none; width: 72px; text-align: right; color: var(--mh-text-2); user-select: none; }
+.huge-view .huge-text { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.huge-view .huge-status {
+  position: sticky; bottom: 0; z-index: 3;
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 8px; font-size: 11.5px;
+  color: var(--mh-text-2); background: color-mix(in oklab, var(--mh-bg-panel) 92%, transparent);
+  border-top: 1px solid color-mix(in oklab, var(--mh-border) 60%, transparent);
+}
+.huge-view .huge-status-text { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Phase D 编辑工具条（在状态条内，右下角常驻；按钮态由 hugeview 同步） */
+.huge-view .huge-btn {
+  flex: none; font: inherit; font-size: 11.5px; line-height: 1.5; padding: 1px 8px;
+  border: 1px solid var(--mh-border); border-radius: 6px;
+  background: var(--mh-bg-panel); color: var(--mh-text); cursor: pointer;
+}
+.huge-view .huge-btn:hover:not(:disabled) { border-color: var(--mh-accent); color: var(--mh-accent); }
+.huge-view .huge-btn:disabled { opacity: .45; cursor: default; }
+.huge-view .huge-btn.on { border-color: var(--mh-accent); color: var(--mh-accent); }
+/* 编辑态：光标行高亮 + 自绘光标（零宽 span，不引发布局位移） */
+.huge-view.huge-editable .huge-text { cursor: text; }
+.huge-view .huge-line-active { background: color-mix(in oklab, var(--mh-accent) 12%, transparent); }
+.huge-view .huge-caret {
+  display: inline-block; width: 0; height: 1em; vertical-align: text-bottom;
+  border-left: 2px solid var(--mh-accent); animation: mh-caret-blink 1.05s steps(1) infinite;
+}
+@keyframes mh-caret-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: .2; } }

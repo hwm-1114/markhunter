@@ -4,29 +4,28 @@
 
 **执笔即江湖，所写皆锋芒**
 
-A Windows desktop Markdown / text editor built for large files, multi-window editing, document diffing and AI assistance.
+A Windows desktop Markdown / text editor built for large files, multi-window editing and document diffing.
 
 [![Release](https://img.shields.io/github/v/release/hwm-1114/markhunter?label=%E6%9C%80%E6%96%B0%E7%89%88&color=blue)](https://github.com/hwm-1114/markhunter/releases/latest)
 [![Build & Release](https://github.com/hwm-1114/markhunter/actions/workflows/release.yml/badge.svg)](https://github.com/hwm-1114/markhunter/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/%E8%AE%B8%E5%8F%AF%E8%AF%81-MIT-green.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%2010%2F11%20x64-lightgrey)
-![E2E](https://img.shields.io/badge/%E5%86%92%E7%83%9F%E6%B5%8B%E8%AF%95-179%20%E9%A1%B9%E9%80%9A%E8%BF%87-brightgreen)
+![E2E](https://img.shields.io/badge/%E5%86%92%E7%83%9F%E6%B5%8B%E8%AF%95-225%20%E9%A1%B9%E9%80%9A%E8%BF%87-brightgreen)
 
 [📥 下载安装包](#-安装与下载) · [✨ 功能特性](#-功能特性) · [⌨️ 快捷键](#️-快捷键) · [🛠 参与开发](#-开发运行) · [🔒 隐私与安全](#-隐私与安全) · [📖 更新日志](CHANGELOG.md)
 
 </div>
 
-基于 **Electron 43 + CodeMirror 6 + Tailwind v4 / daisyUI 5** 的 Windows 桌面 Markdown / 文本编辑器。为「重文档工作者」打造：超大文件秒开、多窗口并行、文档级 diff、AI 辅助写作，内置 56 款主题皮肤。
+基于 **Electron 43 + CodeMirror 6 + Tailwind v4 / daisyUI 5** 的 Windows 桌面 Markdown / 文本编辑器。为「重文档工作者」打造：超大文件连续滚动 + 秒搜（≤4GB）、多窗口并行、文档级 diff，内置 56 款主题皮肤。
 
 ## ✨ 功能特性
 
 **核心亮点**
 
-- 🐘 **大文件分层打开（≤4GB）**：小文件直开、中大文件分段编辑、**>256MB 只读滑窗查看器**（秒开 + 翻页 + 跳转 + 区域编辑写回）
+- 🐘 **大文件分层打开（≤4GB）**：小文件直开、中大文件分段编辑、**>1GB 虚拟滚动查看器**（连续下拉 + 任意位置直达 + Ctrl+G 行号跳转，只渲染视口行）、**256MB–1GB 只读分页查看器**（秒开 + 翻页 + 跳转 + 区域编辑写回）；大文件搜索走**原生字节匹配**快路径，命中可直达（见「搜索与替换」）
 - 🪟 **多窗口同时编辑**：每窗口独立目录/标签，事件按窗口精确路由，同文件跨窗口自动只读 + 静默同步
 - 📂 **多目录侧栏 + 拖拽传输**：侧栏同时打开多个目录，树内拖拽 = 移动、Ctrl+拖拽 = 复制，跨目录互传
 - 🔀 **多文档对比**：双栏 / 三方 diff、词级高亮、变更块导航、统计与报告导出
-- 🤖 **AI 助手**：OpenAI 兼容接口（DeepSeek 预置），读取/修改文档、搜索、建文件；API Key 本机 DPAPI 加密
 - 🎨 **56 款主题皮肤**：含 20 款动态特效（极光 / 樱花雨 / 字符雨 / 星空 / CRT 扫描线 / 蒸汽波…），切换即整窗预览
 
 **文件管理**
@@ -60,23 +59,17 @@ A Windows desktop Markdown / text editor built for large files, multi-window edi
 
 - 文件内查找（Ctrl+F / Ctrl+H）：全部匹配列表、点击跳转、编辑器同步高亮；替换当前 / 全部替换
 - 全局搜索（Ctrl+Shift+F）：按文件分组、点击打开定位；结果支持跨文件批量替换（带确认）
+- **大文件秒搜**：搜索改用**原生字节匹配**（UTF-8 与 ASCII 同一份字节、GBK 正确），跨块边界命中不丢、大小写不敏感一次归并；命中行号由行索引直接算出、点击直达任意位置
 
 **Python 运行**
 
 - 运行当前 `.py`，解释器自动检测（PATH / 注册表 / 常见路径）或手动选择
 - 内嵌输出面板（stdout / stderr 分色、退出码、耗时），可终止（含进程树）
 
-**AI 助手**
-
-- **任意 OpenAI 兼容服务**：服务商预设一键填入（DeepSeek / OpenAI / 硅基流动 / Kimi / 智谱 / 通义 / Ollama / LM Studio），中转站裸域名自动补 /v1，局域网本机模型可用；「拉取模型列表」在线获取可选模型
-- **流式回复 + 思考过程**：打字机实时输出；推理模型（如 deepseek-reasoner）的思考过程折叠显示
-- function calling 读取 / 修改文档、全局搜索、新建文件；修改前可设置确认提示
-- API Key 经 Windows DPAPI 加密存储在本地，界面不显示明文；支持一键清空对话
-
 **多窗口同时编辑**
 
 - Ctrl+Shift+N 新建窗口 / 二次启动自动在已有实例中开窗（单实例锁）
-- 每窗口独立目录 / 标签 / 面板；文件变更、Python 输出、AI 事件、对话框按窗口精确路由
+- 每窗口独立目录 / 标签 / 面板；文件变更、Python 输出、对话框按窗口精确路由
 - 设置与主题跨窗口即时同步
 - 同文件跨窗口：后来窗口自动只读（🔒 徽标，右键标签可解除），编辑窗口保存后只读窗静默同步（不闪不抖）
 
@@ -107,6 +100,7 @@ A Windows desktop Markdown / text editor built for large files, multi-window edi
 | Ctrl+S | 保存当前文件 |
 | Ctrl+F / Ctrl+H | 文件内查找 / 定位到替换输入框 |
 | Ctrl+Shift+F | 全局搜索（结果支持批量替换） |
+| Ctrl+G | 大文件查看器：跳转到指定行号 |
 | Ctrl+Shift+N | 新建窗口（多窗口同时编辑） |
 | Ctrl+B | 预览模式切换（编辑 / 分屏 / 仅预览） |
 | Ctrl+0 | 预览缩放重置 |
@@ -122,6 +116,8 @@ A Windows desktop Markdown / text editor built for large files, multi-window edi
 3. 未签名应用首次运行可能触发 Windows SmartScreen：点击「更多信息」→「仍要运行」
 
 > 免安装使用：应用为绿色单进程设计，卸载仅删除安装目录即可；用户配置保存在 `%APPDATA%\MarkHunter\`。
+>
+> **右键菜单指向已安装版本**：资源管理器里的「用 MarkHunter 打开」（盘符 / 目录 / 目录空白处）注册的是安装到本机的 `MarkHunter.exe` —— 直接跑开发版（`npm start`）时右键菜单仍然会拉起已安装的旧版本，需重新安装安装包，或手工改注册表 `HKCU\Software\Classes\{Drive,Directory,Directory\Background}\shell\MarkHunter\command` 指向开发版路径。
 
 ## 🛠 参与开发
 
@@ -133,7 +129,7 @@ cd markhunter
 npm install       # 安装依赖（Electron 走 npmmirror 镜像）
 npm start         # 启动应用
 npm run build     # esbuild 打包渲染进程（改渲染端源码后必须执行）
-npm run smoke     # 端到端冒烟测试（179 项，真实窗口自动化验证）
+npm run smoke     # 端到端冒烟测试（225 项，真实窗口自动化验证；判定用 node scripts/smoke-verify.js）
 npm run release   # 本地打包 NSIS 安装包
 ```
 
@@ -146,16 +142,16 @@ npm run release   # 本地打包 NSIS 安装包
 ```
 src/
 ├─ main/       # 主进程（CJS）：窗口、文件 IPC 与编码检测、安全白名单、
-│              #   文件监听、全局搜索 worker、设置与主题、AI / Python
+│              #   文件监听、全局搜索 worker、设置与主题、Python、
+│              #   行索引（lineindex.js）、右键 --dir 参数解析（args.js）
 ├─ preload/    # contextBridge：仅暴露 window.api.*（IPC 白名单镜像）
 └─ renderer/   # 渲染端（ESM → esbuild IIFE）：标签编辑、文件树、预览、
-               #   搜索、对比、查看器、AI 面板、主题引擎
+               #   搜索、对比、查看器、大文件虚拟滚动查看器（hugeview.js）、主题引擎
 ```
 
 ## 🔒 隐私与安全
 
-- **零遥测**：不采集、不上报任何数据；仅当你配置并使用 AI 助手时访问你指定的 API 服务
-- **API Key 本地加密**：经 Windows DPAPI（safeStorage）加密后保存在本机 `settings.json`，永不回显明文
+- **零遥测**：不采集、不上报任何数据；应用不访问任何网络服务（AI 助手已于 v0.3.0 移除）
 - **文件操作白名单**：写入 / 删除 / 改名均经主进程路径校验（仅限已打开目录内），防目录穿越
 - **打包加固**：asar 完整性校验 + Electron Fuses（禁用 runAsNode 等）
 

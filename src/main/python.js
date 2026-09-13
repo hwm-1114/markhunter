@@ -1,11 +1,13 @@
 const { app, ipcMain, BrowserWindow } = require('electron');
 const { spawn } = require('child_process');
+const { StringDecoder } = require('string_decoder');
 const fs = require('fs');
 const path = require('path');
 const { isApproved } = require('./security');
 
 let currentProc = null;
 let currentStartTime = 0;
+let runSeq = 0; // 运行序号：旧进程迟到的 exit 事件据此被渲染端忽略（避免覆盖新进程的运行状态）
 
 /** 发起窗口（v0.1.51 多窗口：输出/退出事件只发给启动 Python 的窗口） */
 function winOf(e) {
@@ -40,7 +42,9 @@ function killTree(child, done) {
   }
 }
 
-/** 换新进程前处置旧进程：摘掉输出监听（防残余输出窜入新批次）后树杀（不等待） */
+/** 换新进程前处置旧进程：摘掉输出监听（防残余输出窜入新批次）后树杀（不等待）。
+ *  注意：close 回调保留（用于给发起窗口补发 python:exit），因此不能在这里清 currentProc ——
+ *  由 sendExit 里的 `currentProc === child` 判定负责。 */
 function disposeCurrentProc() {
   const old = currentProc;
   currentProc = null;
@@ -259,6 +263,10 @@ function registerPythonIpc(_getWindow) {
     currentStartTime = Date.now();
     // P4：输出聚合器（stdout/stderr 合批发送，退出时 flush 残余）
     const batcher = createOutputBatcher(() => win);
+    // v0.3.0：按流增量解码 —— 直接 d.toString('utf8') 会在管道分块边界切断多字节字符，
+    // 输出里出现 U+FFFD（实测 sys.stdout.write("中"*100000) 出现 8 个替换符）。
+    const decStdout = new StringDecoder('utf8');
+    const decStderr = new StringDecoder('utf8');
     // 使用 ['--', filePath]：避免以 '-' 开头的文件名被解释为解释器选项
     const child = spawn(interpreter, ['--', filePath], {
       cwd: path.dirname(filePath),
@@ -266,24 +274,36 @@ function registerPythonIpc(_getWindow) {
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     });
     currentProc = child;
-    win.webContents.send('python:start', { interpreter, file: filePath });
+    const token = ++runSeq;
+    win.webContents.send('python:start', { interpreter, file: filePath, token });
 
     child.stdout.on('data', (d) => {
-      batcher.push('stdout', d.toString('utf8'));
+      const s = decStdout.write(d);
+      if (s) batcher.push('stdout', s);
     });
     child.stderr.on('data', (d) => {
-      batcher.push('stderr', d.toString('utf8'));
+      const s = decStderr.write(d);
+      if (s) batcher.push('stderr', s);
     });
     let settled = false; // 防双发：spawn 失败时 error 与 close 都会触发
     const sendExit = (payload) => {
       if (settled) return;
       settled = true;
+      // 解码器余量先入批（末尾不完整序列/最后一段），再 flush，保证输出完整
+      try {
+        const tailOut = decStdout.end();
+        if (tailOut) batcher.push('stdout', tailOut);
+        const tailErr = decStderr.end();
+        if (tailErr) batcher.push('stderr', tailErr);
+      } catch { /* 忽略 */ }
       batcher.flush(); // P4：退出时 flush 残余，保证输出完整、退出码后到
       // 窗口可能已销毁（应用退出中）：flush 已做同样检查，此处防 webContents.send 抛错
       try {
-        if (win && !win.isDestroyed()) win.webContents.send('python:exit', payload);
+        if (win && !win.isDestroyed()) win.webContents.send('python:exit', Object.assign({ token }, payload));
       } catch { /* 忽略 */ }
-      currentProc = null;
+      // v0.3.0：只在「当前进程仍是本进程」时清引用 —— 旧进程被 taskkill 后的 close 回调
+      // 晚到时若无条件置空，会把刚启动的新进程引用抹掉（终止按钮失效、退出应用也回收不了）
+      if (currentProc === child) currentProc = null;
     };
     child.on('error', (err) => {
       sendExit({

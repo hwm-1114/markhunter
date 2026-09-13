@@ -1,13 +1,16 @@
 // 应用入口：组装各模块
-import { $, $$, showPrompt, alertBox, toast, closeModal, openModal, confirmDialog, initDragResize, escapeHtml, debounce } from './ui.js';
+import { $, $$, showPrompt, toast, closeModal, openModal, initDragResize, escapeHtml, debounce } from './ui.js';
 import { createTree } from './tree.js';
 import { createEditor } from './tabs.js';
 import { createFind } from './find.js';
 import { createPreview } from './preview.js';
 import { createGlobalSearch } from './globalsearch.js';
 import { createPythonPanel } from './python.js';
-import { createAiPanel } from './ai-panel.js';
 import { createFavorites } from './favorites.js';
+import { createOutline } from './outline.js';
+import { createQuickOpen } from './quickopen.js';
+import { createHelp, matchShortcut, shortcutRows } from './help.js';
+import { createRecover } from './recover.js';
 import { isMarkdown, isPython } from './ui.js';
 
 async function boot() {
@@ -21,12 +24,12 @@ async function boot() {
 
   // ---------- 全局状态 ----------
   const state = {
-    rootDir: null,       // 活动工作目录（全局搜索/新建/AI 工具的默认目标）
+    rootDir: null,       // 活动工作目录（全局搜索/新建的默认目标）
     sidebarRoots: [],    // v0.2.3 侧栏多目录根列表（首目录即活动目录的来源，须非嵌套）
     settings: await window.api.getSettings(),
   };
 
-  let tree, editor, preview, find, globalSearch, python;
+  let tree, editor, preview, find, globalSearch, python, outline, quickOpen, help;
 
   // 应用滚动条宽度
   const applyScrollbarWidth = (w) => {
@@ -34,7 +37,68 @@ async function boot() {
   };
   applyScrollbarWidth(state.settings.scrollbarWidth);
 
-  // ---------- 主题引擎（36 皮肤 = daisyUI 内置 35 + 自研经典） ----------
+  // ---------- 0.5.0 Phase 5a B8：编辑器 / 预览字号与行高 ----------
+  // 落地方式 = **根元素 CSS 变量**（styles.css 的 :root 给默认值）：
+  //   · 所有栏的 .cm-editor / .markdown-body 同时跟随 ⇒ 「作用于所有视图的 CM 与预览」天然满足，
+  //     不需要给每个 pane 的 EditorView / preview 实例逐个派发（多视图一致性最省事的正确解）；
+  //   · 范围夹取 / 脏值兜底都在渲染端做（settings.js 只负责白名单与默认值）；
+  //   · 字号变化后必须 requestMeasure（CM 的字符宽度缓存与滚动高度按旧字号算的）。
+  const FONT_LIMITS = { editorFontSize: [10, 32], editorLineHeight: [1, 2.6], previewFontSize: [10, 32] };
+  const FONT_DEFAULTS = { editorFontSize: 13.5, editorLineHeight: 1.65, previewFontSize: 14.5 };
+  function clampFont(key, v) {
+    const [lo, hi] = FONT_LIMITS[key];
+    const n = Number(v);
+    if (!Number.isFinite(n)) return FONT_DEFAULTS[key];
+    // ⚠️ 必须按 **2 位小数**归整，不能按 1 位：行高是倍数域且默认值/输入步长都是 2 位
+    //    （默认 1.65、设置项 step 0.05），`Math.round(1.65 * 10) / 10` 会把它变成 **1.7**
+    //    —— 落盘仍写 1.65、CSS 变量却是 1.7，settings.json 与界面出现静默漂移
+    //    （2026-09 首轮验收就是被这条卡住的：ctrl-0-persisted=true 但字号复位断言为 false）。
+    return Math.min(hi, Math.max(lo, Math.round(n * 100) / 100));
+  }
+  function applyFonts(s) {
+    const t = document.documentElement.style;
+    t.setProperty('--mh-editor-font-size', clampFont('editorFontSize', s.editorFontSize) + 'px');
+    t.setProperty('--mh-editor-line-height', String(clampFont('editorLineHeight', s.editorLineHeight)));
+    t.setProperty('--mh-preview-font-size', clampFont('previewFontSize', s.previewFontSize) + 'px');
+    if (editor) editor.refreshMeasure(); // boot 早期 editor 尚未创建（CSS 变量已就位，无需测量）
+  }
+  applyFonts(state.settings);
+
+  // ---------- 0.5.0 Phase 5a E2：侧栏分区折叠（收藏 / 文件树 / 全局搜索）并记忆 ----------
+  // ⚠️ 位置必须在 `createFavorites(...)` **之前**：收藏分区的初始折叠态要从这里取
+  // （const/let 的 TDZ 会让"放到后面"直接抛 Cannot access before initialization）。
+  // 折叠态写进 settings.sidebarCollapsed（键已加进 src/main/settings.js 白名单，否则会被静默丢弃）。
+  // 只加/去容器上的 .collapsed 类：树内部的 expanded 集合、loadChildren 补载（J4）与可见性无关，
+  // 折叠再展开后展开态原样保留。
+  const SIDEBAR_SECTIONS = ['fav', 'tree', 'search'];
+  const normalizeCollapsed = (v) => {
+    const o = {};
+    for (const k of SIDEBAR_SECTIONS) o[k] = !!(v && typeof v === 'object' && v[k]);
+    return o;
+  };
+  let sidebarCollapsed = normalizeCollapsed(state.settings.sidebarCollapsed);
+  function applySidebarCollapsed(v, persist) {
+    sidebarCollapsed = normalizeCollapsed(v);
+    const bind = (blockSel, caretSel, on) => {
+      const b = $(blockSel);
+      if (b) b.classList.toggle('collapsed', on);
+      const c = $(caretSel);
+      if (c) c.textContent = on ? '▶' : '▼';
+    };
+    bind('#fav-block', '#fav-caret', sidebarCollapsed.fav);
+    bind('#file-tree', '#tree-caret', sidebarCollapsed.tree);
+    bind('#sidebar-search', '#search-caret', sidebarCollapsed.search);
+    if (persist) window.api.setSettings({ sidebarCollapsed });
+  }
+  function toggleSidebarSection(key) {
+    if (SIDEBAR_SECTIONS.indexOf(key) < 0) return sidebarCollapsed;
+    applySidebarCollapsed({ ...sidebarCollapsed, [key]: !sidebarCollapsed[key] }, true);
+    return sidebarCollapsed;
+  }
+  applySidebarCollapsed(sidebarCollapsed, false);
+  $('#tree-header').addEventListener('click', () => toggleSidebarSection('tree'));
+  $('#search-header').addEventListener('click', () => toggleSidebarSection('search'));
+
   // 清单/分组与 docs/开发计划-多主题皮肤.md §3.3.2 一致；暗色清单 = 实证 14 个 color-scheme: dark
   const THEME_NAMES = [
     'markhunter-classic', 'light', 'cupcake', 'bumblebee', 'emerald', 'corporate',
@@ -154,20 +218,28 @@ async function boot() {
   // P1（v0.1.44）：击键防抖 —— 打字突发只触发一次整篇 md.render + find 全扫。
   // trailing 250ms，与自动保存 800ms 节奏协调（互不干扰）；
   // onTabSwitch / 外部重载 / 主题切换等路径不走 onDocChanged，仍即时渲染，不受本防抖影响。
+  // 0.5.0 Phase 2：判据与实例都**按该标签所属栏** —— 双栏下 `getActiveTab()` 只是「焦点栏的活动标签」，
+  // 拿它做判据会漏掉**非焦点栏**的即时渲染（该栏的程序化变更 / 自己敲字），也会把 A 栏的 preview
+  // 实例当成 B 栏的去渲染（mode/缩放/滚动都是实例级状态）。
   const debouncedPreviewRender = debounce((tab) => {
-    // 触发时重新校验：期间可能已切换标签 / 改模式 / 变文件类型
-    if (getActiveTab() === tab && isMarkdown(tab.name) && preview.getMode() !== 'edit') {
-      preview.render();
+    // 触发时重新校验：期间可能已切标签 / 换栏 / 改模式 / 变文件类型
+    const pid = editor.paneIdOf(tab) || editor.getFocusPaneId();
+    const pv = previewFor(pid);
+    if (editor.paneActiveOf(pid) === tab && isMarkdown(tab.name) && pv.getMode() !== 'edit') {
+      pv.render();
     }
   }, 250);
   const debouncedFindSearch = debounce(() => {
     if (findQuery()) find.runSearch(true);
   }, 250);
+  // B1：大纲重建同样走防抖（解析全文标题是 O(文档) 成本；光标移动路径只切高亮，不重建）
+  const debouncedOutlineRefresh = debounce(() => { if (outline) outline.refresh(); }, 250);
 
   // ---------- 初始化各模块 ----------
   editor = createEditor({
     getWordWrap: () => state.settings.wordWrap,
     getIndentSize: () => state.settings.indentSize,
+    getMaxFileSizeMB: () => state.settings.maxFileSizeMB, // v0.4.0：打开上限在 openFile 统一把关
     onSaveStatus: (msg) => {
       $('#save-status').textContent = msg;
     },
@@ -177,20 +249,43 @@ async function boot() {
       tab.saveTimer = setTimeout(() => editor.saveNow(tab), state.settings.autoSaveDelay);
       $('#save-status').textContent = '未保存…';
       // 实时更新预览（P1：250ms trailing 防抖合并击键；onTabSwitch/外部重载等仍即时渲染）
-      if (getActiveTab() === tab && isMarkdown(tab.name) && preview.getMode() !== 'edit') {
+      // Phase 2：按**该标签所属栏**判定并取实例（见 debouncedPreviewRender 上方的说明）
+      const pid = editor.paneIdOf(tab) || editor.getFocusPaneId();
+      const pv = previewFor(pid);
+      if (editor.paneActiveOf(pid) === tab && isMarkdown(tab.name) && pv.getMode() !== 'edit') {
         debouncedPreviewRender(tab);
       }
       // 文件内搜索实时刷新（P1：同样防抖，不抢占光标，避免打字时光标被拽走）
       if (findQuery()) debouncedFindSearch();
+      // B1：大纲跟随文档内容（防抖重建；光标移动另有 onCursorMove 的轻量高亮路径）
+      debouncedOutlineRefresh();
+    },
+    /** B1：光标/选区变化的统一出口（tabs.js 由派发事务的视图反查所属文档后回调）。
+     *  只有**焦点栏**的文档才驱动大纲（大纲跟的就是焦点栏）；内容变了走防抖重建，
+     *  纯移动光标只切 .current 高亮（零解析成本）。 */
+    onCursorMove: (tab, line, docChanged) => {
+      if (!outline || !tab) return;
+      if (tab !== getActiveTab()) return;
+      if (docChanged) debouncedOutlineRefresh();
+      else outline.markLine(line);
     },
     onTabLeave: (oldTab) => {
       // 预览区滚动位置随标签记忆（编辑器滚动由 tabs.js switchTab 内部保存）
-      const ph = $('#preview-host');
+      const ph = previewHostOf(editor.paneIdOf(oldTab));
       if (ph && oldTab) oldTab.previewScrollTop = ph.scrollTop;
     },
-    onTabSwitch: (tab) => {
-      preview.applyMode();
+    /** 标签/焦点栏切换的统一出口。
+     *  focused=false 表示这是**非焦点栏**内部的切换（Phase 2）：只更新那一栏自己的图层显隐
+     *  （编辑器 / 图片 / 对比 / 预览模式），**不碰**状态栏、树跟随、查找与运行按钮 ——
+     *  那些是「全局单例 + 焦点栏」语义。 */
+    onTabSwitch: (tab, focused = true) => {
+      syncPreviewToFocus(); // 焦点栏可能刚变（Ctrl+1/2、点另一栏）→ preview 实例跟着走
+      // 该标签所属栏的预览实例负责它自己那一栏的图层显隐（栏内预览模式按栏独立）
+      const pid = tab ? editor.paneIdOf(tab) : editor.getFocusPaneId();
+      try { previewFor(pid).applyMode(); } catch (err) { console.warn('[preview]', err && err.message ? err.message : err); }
+      if (!focused) return;
       updateRunButton();
+      if (outline) outline.refresh(); // B1：切标签 → 大纲按新文档重建/隐藏（非 markdown 整体隐藏）
       if (tab) {
         $('#save-status').textContent = tab.dirty ? '未保存…' : '';
         if (findQuery()) find.runSearch();
@@ -201,12 +296,13 @@ async function boot() {
           toast('文件不在当前工作目录，已在「外部文件」分支定位');
         }
         // 预览区滚动位置恢复：render 同步完成，mermaid 异步渲染可能再改高度 → 多帧校正；
-        // 无记录 → 顶部（避免残留上一标签的滚动偏移）
-        const ph = $('#preview-host');
+        // 无记录 → 顶部（避免残留上一标签的滚动偏移）。Phase 2：取该标签所属栏的预览区。
+        const paneId = editor.paneIdOf(tab);
+        const ph = previewHostOf(paneId);
         if (ph) {
           const target = typeof tab.previewScrollTop === 'number' ? tab.previewScrollTop : 0;
           const restorePv = (n) => {
-            if (getActiveTab() !== tab) return;
+            if (editor.paneActiveOf(paneId) !== tab) return;
             ph.scrollTop = target;
             if (n > 0) requestAnimationFrame(() => restorePv(n - 1));
           };
@@ -217,9 +313,12 @@ async function boot() {
         find.clearSearch();
       }
     },
-    onRequestClose: (tab) => {
-      if (tab.dirty) editor.saveNow(tab);
-      editor.closeTab(tab);
+    onRequestClose: (tab, paneId) => {
+      // Phase 3：**不再无条件预保存** —— 关的是哪一条视图由 tabs.js 的 closeTab 判定：
+      // 同一文件在别的栏还有视图时是**视图级关闭**（不落盘、不清脏），只有关掉最后一个视图
+      // 才走文档级路径（先保存脏内容再移除文档）。原来的 `if (tab.dirty) saveNow(tab)` 会把
+      // 视图级关闭也变成一次写盘，直接违反 G3。
+      editor.closeTab(tab, paneId ? { paneId } : {});
     },
     onSessionChange: () => {
       persistSession();
@@ -227,173 +326,145 @@ async function boot() {
     },
   });
 
-  preview = createPreview(() => editor, getActiveTab, () =>
-    DARK_THEMES.includes(document.documentElement.getAttribute('data-theme'))
-  );
+  // ---------- 0.5.0 多视图 Phase 2：每栏一个 preview 实例 ----------
+  // 「栏内预览模式（edit/split/preview）必须按栏独立」是 0.3.0 §4-E5 的 P0：mode / 缩放 /
+  // 滚动同步都是 createPreview 的实例闭包变量，**按栏各建一个实例**即天然独立。
+  // `preview` 这个变量恒指向**焦点栏**的实例（由 syncPreviewToFocus 维护），
+  // 因此既有调用点 `preview.getMode()/render()/applyMode()/cycleMode()/resetZoom()` 一个字都不用改。
+  // 缓存键是栏的宿主根节点（WeakMap）：合栏/重新分栏会换 DOM，旧实例自然失效，不串栏也不泄漏。
+  const previews = new WeakMap(); // pane.root -> preview 实例
+  function previewFor(paneId) {
+    const p = editor.getPaneElsById(paneId);
+    if (!p) return preview;
+    let pv = previews.get(p.root);
+    if (pv) return pv;
+    pv = createPreview(
+      () => editor,
+      () => editor.paneActiveOf(paneId), // 本栏的活动标签（不是全局 getActiveTab）
+      () => DARK_THEMES.includes(document.documentElement.getAttribute('data-theme')),
+      {
+        paneId,
+        els: () => {
+          const q = editor.getPaneElsById(paneId);
+          return q
+            ? {
+                previewHost: q.previewHost,
+                contentEl: q.previewContent,
+                editorHost: q.editorHost,
+                divider: q.divider,
+                imageHost: q.imageHost,
+                diffHost: q.diffHost,
+                viewerBar: q.viewerBar,
+                zoomBadge: q.zoomBadge,
+              }
+            : null;
+        },
+        getView: () => {
+          const q = editor.getPaneElsById(paneId);
+          return q ? q.view : null;
+        },
+      }
+    );
+    previews.set(p.root, pv);
+    return pv;
+  }
+  /** 把 `preview` 指到焦点栏的实例（切换焦点栏 / 分栏 / 合栏后必须调一次） */
+  function syncPreviewToFocus() {
+    const pv = previewFor(editor.getFocusPaneId());
+    if (pv) preview = pv;
+    return preview;
+  }
+  /** 某栏的预览滚动容器（预览滚动位置记忆 / 状态栏「顶部、底部」按钮用） */
+  function previewHostOf(paneId) {
+    const p = editor.getPaneElsById(paneId);
+    return p ? p.previewHost : $('#preview-host');
+  }
+
+  preview = previewFor(editor.getFocusPaneId());
   // H1：boot 时 applyTheme（上方 L114 附近）先于 preview 创建，mermaid 仍停留在模块级 default（浅色）。
   // 此处补一次 refreshMermaid，按当前持久化主题的明暗初始化 mermaid（明暗守卫去重，无图零成本）。
   preview.refreshMermaid();
+  // 启动时若恢复了多栏（Phase 3 的 layout；本阶段恒单栏）→ 每栏的预览也各初始化一次（去重幂等）
+  for (let i = 0; i < editor.getPaneCount(); i++) {
+    const p = editor.getPaneEls(i);
+    if (p) previewFor(p.id).refreshMermaid();
+  }
   find = createFind(() => editor, getActiveTab);
   globalSearch = createGlobalSearch(() => state.rootDir, openFileAt);
   python = createPythonPanel(getActiveTab, () => state.settings, (tab) => editor.saveNow(tab));
   tree = createTree();
-
-  // ---------- AI 助手 ----------
-  const aiPanel = createAiPanel(() => editor, () => state.settings, applyAiSnippet, executeAiTool);
-
-  /** AI 工具执行器（function calling） */
-  async function executeAiTool(name, args) {
-    const tab = getActiveTab();
-    const view = editor.getView();
-    const isViewer = tab && tab.kind === 'viewer-lg';
-    switch (name) {
-      case 'read_document': {
-        if (!tab) return '（当前无打开的文档）';
-        if (!tab.state) return '（当前为图片/PDF 等非文本文件，无法读取文字内容）';
-        if (isViewer) {
-          // 大文件查看器：只提供当前窗口内容（截断 20 万字符），避免整窗放大与全文误读
-          return `（当前为大文件查看器，仅加载了窗口内容；全文 ${Math.round(tab.vwin.size / 1048576)} MB）\n\n[窗口内容（截断）]\n` + tab.state.doc.toString().slice(0, 200000);
-        }
-        return tab.state.doc.toString();
-      }
-      case 'replace_selection': {
-        if (isViewer) throw new Error('大文件查看器不支持该操作（可在查看器横幅开启区域编辑）');
-        if (!tab || !tab.state) throw new Error('当前无可编辑的文本文档');
-        const sel = view.state.selection.main;
-        if (sel.from === sel.to) throw new Error('未选中文字');
-        await maybeConfirm(`替换选中的 ${sel.to - sel.from} 个字符？`, args.text);
-        await editor.applySnippet(String(args.text || ''), 'replace', sel.from, sel.to);
-        return '已替换选中文字';
-      }
-      case 'insert_text': {
-        if (isViewer) throw new Error('大文件查看器不支持该操作（可在查看器横幅开启区域编辑）');
-        if (!tab || !tab.state) throw new Error('当前无可编辑的文本文档');
-        await maybeConfirm('在光标处插入文字？', args.text);
-        await editor.applySnippet(String(args.text || ''), 'insert', view.state.selection.main.head);
-        return '已插入文字';
-      }
-      case 'replace_document': {
-        if (isViewer) throw new Error('大文件查看器不支持该操作（可在查看器横幅开启区域编辑）');
-        if (!tab || !tab.state) throw new Error('当前无可编辑的文本文档');
-        await maybeConfirm('替换整个文档内容？', args.text);
-        await editor.applySnippet(String(args.text || ''), 'full');
-        return '已替换全文';
-      }
-      case 'search_documents': {
-        if (!state.rootDir) throw new Error('未打开工作目录');
-        const results = await window.api.globalSearch(state.rootDir, String(args.query || ''));
-        if (!results.length) return '（无匹配结果）';
-        return results.slice(0, 30).map((r) => `${r.file}:${r.line}: ${r.text}`).join('\n');
-      }
-      case 'create_file': {
-        if (!state.rootDir) throw new Error('未打开工作目录');
-        const parent = tree.getTargetDir();
-        await maybeConfirm(`新建文件 ${args.name}？`, '');
-        const p = await window.api.create(parent, String(args.name || ''), 'file');
-        if (args.content) await window.api.writeFile(p, String(args.content));
-        tree.refreshNode(parent, true);
-        return `已新建文件 ${p}`;
-      }
-      case 'create_dir': {
-        if (!state.rootDir) throw new Error('未打开工作目录');
-        const parent = tree.getTargetDir();
-        await maybeConfirm(`新建目录 ${args.name}？`, '');
-        await window.api.create(parent, String(args.name || ''), 'dir');
-        tree.refreshNode(parent, true);
-        return '已新建目录';
-      }
-      case 'open_file': {
-        if (!state.rootDir) throw new Error('未打开工作目录');
-        // S8：拒绝路径穿越 —— 仅允许工作目录内的相对路径
-        const name = String(args.name || '');
-        const segs = name.split(/[\\/]/);
-        if (
-          segs.some((s) => s === '..') ||   // 含 '..' 段
-          /^[\\/]/.test(name) ||            // 以 / 或 \ 开头（绝对路径）
-          /^[a-zA-Z]:/.test(name)           // 盘符开头（如 C:\）
-        ) {
-          throw new Error('非法路径');
-        }
-        const p = (state.rootDir + '\\' + name).replace(/\//g, '\\');
-        const opened = await editor.openFile(p);
-        tree.reveal(p).catch(() => {}); // 树跟随定位
-        return opened ? `已打开 ${p}` : '打开失败（文件不存在或过大）';
-      }
-      default:
-        throw new Error(`未知工具：${name}`);
-    }
-  }
-
-  /** 根据「修改前询问」设置决定是否弹确认框 */
-  async function maybeConfirm(desc, preview) {
-    if (state.settings.aiAskBeforeApply === false) return;
-    const pv = preview ? String(preview).slice(0, 200) : '';
-    const ok = await confirmDialog(`${desc}${pv ? '\n\n内容预览：' + pv : ''}`, 'AI 修改文档');
-    if (!ok) throw new Error('用户取消了操作');
-  }
-
-  /** AI 内容写入文档：选择替换选中 / 插入光标 / 替换全文 */
-  function applyAiSnippet(text) {
-    const tab = getActiveTab();
-    const view = editor.getView();
-    if (!tab || !tab.state) {
-      toast('请先打开一个文档');
-      return;
-    }
-    const sel = view.state.selection.main;
-    const hasSel = sel.from !== sel.to;
-    const selLen = hasSel ? sel.to - sel.from : 0;
-
-    const body = document.createElement('div');
-    body.className = 'ai-apply-body';
-    const p = document.createElement('p');
-    p.textContent = '选择 AI 内容的写入方式：';
-    body.appendChild(p);
-
-    const actions = [];
-    if (hasSel) {
-      actions.push({
-        label: `替换选中文字（${selLen} 字）`,
-        primary: true,
-        onClick: () => {
-          editor.applySnippet(text, 'replace', sel.from, sel.to);
-          closeModal();
-          toast('已替换选中内容');
-        },
-      });
-    }
-    actions.push({
-      label: '插入到光标处',
-      primary: !hasSel,
-      onClick: () => {
-        editor.applySnippet(text, 'insert', view.state.selection.main.head);
-        closeModal();
-        toast('已插入到光标处');
-      },
-    });
-    actions.push({
-      label: '替换全文',
-      onClick: () => {
-        editor.applySnippet(text, 'full');
-        closeModal();
-        toast('已替换全文');
-      },
-    });
-    actions.push({ label: '取消', onClick: closeModal });
-    openModal({ title: 'AI 内容写入文档', body, actions });
-  }
+  // B1：大纲 / TOC 侧栏（数据源 = 焦点栏的活动文档；见 outline.js 顶部三条硬口径）
+  outline = createOutline({ getEditor: () => editor, getActiveDoc: () => getActiveTab() });
+  outline.refresh();
+  // A1：Ctrl+P 快速打开（数据源 = search-worker 的文件清单，见 quickopen.js）
+  quickOpen = createQuickOpen({
+    getRootDir: () => state.rootDir,
+    onOpen: (p) => {
+      editor.openFile(p);
+      tree.reveal(p).catch(() => {}); // 与树双击打开同口径：打开并定位
+    },
+  });
+  // F1：快捷键帮助面板在下方「快捷键」段创建（它的 actions 表就是那一段的 SHORTCUT_ACTIONS，
+  // 面板会据此标注"未接线"的键位，避免表里加了键却忘了接动作）。
+  // ---------- 崩溃恢复（0.5.0 挂账收尾）：huge:doc-recover-list 的渲染端消费方 ----------
+  // 主进程只给"可恢复块表列表"，重挂会话的通道不存在（overlay*.js 属禁区）⇒ 恢复在本模块内
+  // 完成：读恢复区 → 两道身份闸（stat + docKey）→ 按 run 倒序回放 huge:doc-edit。
+  const recover = createRecover({ api: window.api, editor });
 
   function updateRunButton() {
     const tab = getActiveTab();
     $('#btn-run-py').disabled = !(tab && isPython(tab.name));
   }
 
+  // ---------- B8：字号步进（Ctrl+= / Ctrl+-）与「视图缩放复位」（Ctrl+0） ----------
+  /** 步进编辑器字号并落盘（设置项与快捷键同一个出口：单测/冒烟只需覆盖这一条路径）。
+   *  **当前值从主进程现读**（而不是 state.settings 缓存）：settings.json 是唯一真值，
+   *  另一个窗口刚改过 / 本窗口刚被外部改过时，缓存可能是旧的 —— 差值算错就会出现
+   *  "按一下 +1 却跳了两格"。读一次设置的 IPC 成本远低于一次键击的感知阈值。 */
+  async function stepEditorFont(delta) {
+    const fresh = await window.api.getSettings();
+    state.settings = fresh;
+    const cur = clampFont('editorFontSize', fresh.editorFontSize);
+    const next = clampFont('editorFontSize', Math.round((cur + delta) * 100) / 100);
+    if (next === cur) {
+      applyFonts(fresh); // 极端情况：落库值是越界脏数据 → 顺手把显示拉回夹取后的值
+      toast(delta > 0 ? `编辑器字号已是上限（${cur}px）` : `编辑器字号已是下限（${cur}px）`);
+      return next;
+    }
+    state.settings = await window.api.setSettings({ editorFontSize: next });
+    applyFonts(state.settings);
+    toast(`编辑器字号 ${next}px`);
+    return next;
+  }
+  /** Ctrl+0 的语义（0.5.0 Phase 5a 定义）：**视图缩放复位** ——
+   *  编辑器字号 / 行高 / 预览字号回到默认值，**并且**预览缩放回到 100%（后者是 Ctrl+0 的原有行为，
+   *  见冒烟 zoomPreview：Ctrl+滚轮放大后 Ctrl+0 → #preview-host 的 style.zoom === '1'）。
+   *  两者合一是「一键把视图还原成默认观感」，不再只复位预览缩放。 */
+  async function resetViewScale() {
+    // 预览缩放**同步**复位：这是 Ctrl+0 的原有行为，既有冒烟用例 zoomPreview 在派发按键后
+    // 只等 100ms 就断言 `#preview-host` 的 style.zoom === '1' —— 放到 IPC 之后会被拖慢而变红。
+    preview.resetZoom(); // 焦点栏的预览实例（既有语义不变）
+    // 字号/行高**也同步先刷一次 DOM**（乐观）：落盘是异步 IPC，若等它返回再改 CSS 变量，
+    // 「按下 Ctrl+0」到「界面真的变回默认」之间会多出一个往返的可见延迟 —— 冒烟实测在派发
+    // 按键的同一 tick 里读 CSS 变量仍是旧值。先按默认值应用一次，再用主进程返回的真值应用
+    // 一次（幂等；若落盘被拒/被夹取，最终以真值为准）。
+    applyFonts({ ...state.settings, ...FONT_DEFAULTS });
+    state.settings = await window.api.setSettings({
+      editorFontSize: FONT_DEFAULTS.editorFontSize,
+      editorLineHeight: FONT_DEFAULTS.editorLineHeight,
+      previewFontSize: FONT_DEFAULTS.previewFontSize,
+    });
+    applyFonts(state.settings);
+    toast('视图缩放已复位（字号与预览缩放回默认）');
+  }
+
   // ---------- 状态栏滚动快捷按钮：回顶部 / 到底部 ----------
   // 仅预览模式下主面板是预览区（滚预览）；其余滚编辑器（tabs.js 内处理图片/分段标签）
+  // Phase 2：预览区取**焦点栏**的那一个（preview 实例已经跟着焦点栏走）
   $('#btn-scroll-top').addEventListener('click', () => {
     const tab = getActiveTab();
     if (tab && tab.kind !== 'image' && preview.getMode() === 'preview') {
-      $('#preview-host').scrollTop = 0;
+      previewHostOf(editor.paneIdOf(tab)).scrollTop = 0;
       return;
     }
     editor.scrollToTop();
@@ -401,7 +472,7 @@ async function boot() {
   $('#btn-scroll-bottom').addEventListener('click', () => {
     const tab = getActiveTab();
     if (tab && tab.kind !== 'image' && preview.getMode() === 'preview') {
-      const ph = $('#preview-host');
+      const ph = previewHostOf(editor.paneIdOf(tab));
       ph.scrollTop = ph.scrollHeight;
       return;
     }
@@ -413,9 +484,14 @@ async function boot() {
   let lastExtToastPath = null; // 需求1：外部文件 toast 去重（同一路径只提示一次）
 
   /** 将当前打开标签快照写入设置；force=true 立即落盘，否则 600ms 防抖合并。
-   *  多窗口（v0.2.1）：仅焦点窗口写入 —— 后台窗口的标签变化不再覆盖最后活动窗口的会话。 */
-  function persistSession(force = false) {
-    if (!document.hasFocus()) return;
+   *  多窗口（v0.2.1）：仅焦点窗口写入 —— 后台窗口的标签变化不再覆盖最后活动窗口的会话。
+   *
+   *  **`opts.final`（0.5.0 Phase 3 新增）**：关窗/卸载路径（`beforeunload`）专用 —— 它是**唯一**
+   *  允许在无焦点时写盘的入口。窗口焦点守卫本身**语义不变**（后台窗口依然不写会话，
+   *  `sessionRestore`/`pinSessionPersist`/`extSessionRestore` 三项用例依赖它）。
+   *  `window.__app.session.save()` 仍走 `persistSession(true)`（**不带 final**），口径不变。 */
+  function persistSession(force = false, opts = {}) {
+    if (!document.hasFocus() && !opts.final) return;
     if (!force) {
       clearTimeout(sessionTimer);
       sessionTimer = setTimeout(() => persistSession(true), 600);
@@ -425,52 +501,135 @@ async function boot() {
     if (!s.paths.length) {
       window.api.setSettings({ lastSession: null });
     } else {
-      window.api.setSettings({ lastSession: { paths: s.paths, active: s.active, pinned: s.pinned } });
+      // Phase 3：三键（paths/active/pinned）保持不变 + 新增 layout（每栏文档/活动项/pin + 比例 + 焦点栏）
+      window.api.setSettings({ lastSession: { paths: s.paths, active: s.active, pinned: s.pinned, layout: s.layout } });
     }
   }
 
-  /** 启动时恢复上次会话：并行恢复标签（P9：并发 3 个 openFile，串行逐个打开在大会话下拖慢启动），
-   *  失败静默跳过（仅 console.warn），最多 50 个；恢复完成后按会话顺序重排标签栏，最后激活活动标签 */
+  // 关窗/刷新前的最后一次落盘：**只有这里**允许用 opts.final（无焦点也写，否则后台窗口被关闭时
+  // 最后一次布局调整会丢）。setSettings 是异步 IPC，但消息在 beforeunload 期间已同步投递给主进程，
+  // 主进程侧照常处理（实测有效）；渲染端不等待返回，失败也不阻断关窗。
+  window.addEventListener('beforeunload', () => {
+    try { persistSession(true, { final: true }); } catch { /* 关窗不因会话写入失败中断 */ }
+  });
+
+  /** 会话布局归一化（Phase 3 的向后兼容入口）。返回 `{ panes: [{docs, active, pinned}], sizes, focus }`。
+   *   · 无 `layout`（旧版本写出的 `{paths,active,pinned}`）→ 映射成**单栏**，顺序逐位不变；
+   *   · `layout.panes` 多于 2 栏 / `sizes` 长度不匹配 → 回落单栏并 console.warn（L6 的静默口径）；
+   *   · 上限：总视图数 ≤ **240**、单栏 ≤ **200**（0.3.0 §2.5），超出的部分截断丢弃。 */
+  function normalizeSessionLayout(ls) {
+    const MAX_TOTAL = 240;
+    const MAX_PER_PANE = 200;
+    const paths = Array.isArray(ls.paths) ? ls.paths.slice() : [];
+    const single = (why) => {
+      if (why) console.warn('[session] layout 不可用（' + why + '），回落单栏');
+      return { panes: [{ docs: paths.slice(0, MAX_PER_PANE), active: ls.active, pinned: ls.pinned }], sizes: null, focus: 0 };
+    };
+    const ly = ls.layout;
+    if (!ly || !Array.isArray(ly.panes) || ly.panes.length === 0) return single('旧格式无 layout');
+    if (ly.panes.length > 2) return single('栏数 ' + ly.panes.length + ' > 2');
+    if (ly.sizes != null && (!Array.isArray(ly.sizes) || ly.sizes.length < ly.panes.length)) return single('sizes 长度不匹配');
+    let budget = MAX_TOTAL;
+    const panesPlan = ly.panes.map((p) => {
+      const raw = (p && Array.isArray(p.docs)) ? p.docs.filter((d) => typeof d === 'string' && d) : [];
+      const uniq = [];
+      for (const d of raw) if (uniq.indexOf(d) < 0) uniq.push(d); // 栏内去重（防御手写/损坏的会话）
+      const docs = uniq.slice(0, Math.max(0, Math.min(MAX_PER_PANE, budget)));
+      budget -= docs.length;
+      return { docs, active: p && p.active, pinned: (p && Array.isArray(p.pinned)) ? p.pinned : [] };
+    });
+    if (!panesPlan.some((p) => p.docs.length)) return single('layout 内没有任何文档');
+    return { panes: panesPlan, sizes: ly.sizes, focus: ly.focus };
+  }
+
+  /** 启动时恢复上次会话：并行恢复标签（P9：并发 6 个 openFile，串行逐个打开在大会话下拖慢启动），
+   *  失败静默跳过（仅 console.warn）。
+   *
+   *  **Phase 3（G4）**：按 `layout` 恢复多栏 —— 顺序不可改（理由见每步注释）：
+   *   ① 归一化 layout（无 layout 的旧会话 → 单栏，逐位兼容）；
+   *   ② 先建栏（第 2 栏要在往里放文档之前就存在）；
+   *   ③ 逐栏恢复：同一路径第二次出现时**复用已有 Document**（`attachViewToPane`），
+   *      **读盘只发生一次**（否则大文件读两遍、分段标签会建两份 chunk 状态，保存时互相截断）；
+   *   ④ 恢复全局标签顺序（每栏相对顺序 = 会话顺序）；
+   *   ⑤ 应用比例 → 应用焦点栏 → 最后激活各栏的活动项；
+   *   ⑥ 上限：总视图数 ≤ 240、单栏 ≤ 200（在 normalizeSessionLayout 里截断）。 */
   async function restoreSession() {
     const ls = state.settings.lastSession;
     if (!ls || !Array.isArray(ls.paths) || ls.paths.length === 0) return;
-    // O2：会话上限 50 → 200（配合标签徽标增量化，100+ 标签的打开与恢复均可接受）
-    const paths = ls.paths.slice(0, 200);
-    // P9/O2：固定并发 6 的限流池（原 3；大标签数会话下恢复时间减半，主进程 IPC 仍可控）
+    const plan = normalizeSessionLayout(ls);
+    // ① 建栏：layout 里多于 2 栏已在 normalize 阶段回落单栏（硬上限 2 不变）。
+    //    **反向也要归一**：快照是单栏而当前窗口已是双栏（同一窗口内再次 restore、或恢复前
+    //    用户自己分过屏）→ 先合并回单栏，否则"恢复结果 ≠ 快照"，界面会留下快照里没有的第二栏。
+    if (plan.panes.length <= 1 && editor.getPaneCount() > 1) editor.mergePanes();
+    if (plan.panes.length > 1 && editor.getPaneCount() < 2) editor.openSecondPane('right');
+    // ② 逐栏并行打开（外层按栏串行：第 2 栏要复用第 1 栏已经建好的 Document）；
+    //    内层保持既有的固定并发 6 限流池（主进程 IPC 压力已在 v0.4.0 标定过）
     const CONCURRENCY = 6;
-    let cursor = 0;
-    const workers = Array.from({ length: Math.min(CONCURRENCY, paths.length) }, async () => {
-      while (cursor < paths.length) {
-        const p = paths[cursor++];
+    for (let i = 0; i < plan.panes.length && i < 2; i++) {
+      const list = plan.panes[i].docs;
+      let cursor = 0;
+      const workers = Array.from({ length: Math.min(CONCURRENCY, list.length) }, async () => {
+        while (cursor < list.length) {
+          const p = list[cursor++];
+          try {
+            const doc = editor.findTabByPath(p);
+            if (doc) editor.attachViewToPane(doc, i); // 同一 Document 的第二/多个视图：不重新读盘
+            else await editor.openFile(p, { silent: true, paneIndex: i }); // L6：恢复失败静默（不弹 alertBox）
+          } catch (err) {
+            console.warn('[session] 恢复标签失败（已跳过）:', p, err && err.message ? err.message : err);
+          }
+        }
+      });
+      await Promise.all(workers);
+    }
+    // ③ 全局标签顺序 = 各栏文档按栏顺序拼接去重（每栏的相对顺序因此与会话一致，
+    //    标签栏按栏过滤后就是会话里的顺序）
+    const ordered = [];
+    for (const p of plan.panes) for (const d of p.docs) if (ordered.indexOf(d) < 0) ordered.push(d);
+    if (ordered.length > 1) editor.reorderTabs(ordered);
+    // ④ 比例 → 焦点栏 → 各栏的活动项与 pin
+    if (plan.sizes) editor.setPaneSizes(plan.sizes);
+    if (plan.panes.length > 1 && Number.isInteger(plan.focus) && plan.focus >= 0 && plan.focus < plan.panes.length) {
+      // 必须显式应用（含 focus=0）：建第 2 栏时焦点被挪到了新栏，不还原就与快照不符
+      editor.focusPaneIndex(plan.focus);
+    }
+    let anyPinned = false;
+    for (let i = 0; i < plan.panes.length && i < 2; i++) {
+      const docs = plan.panes[i].docs;
+      const ai = plan.panes[i].active;
+      if (Number.isInteger(ai) && ai >= 0 && ai < docs.length) {
         try {
-          await editor.openFile(p, { silent: true }); // L6：恢复失败静默（不弹 alertBox）
+          // 已存在 → 在该栏激活（不重新读盘）；不存在（文件打不开）→ 回落它实际所在的栏
+          await editor.openFile(docs[ai], { silent: true, paneIndex: i });
         } catch (err) {
-          console.warn('[session] 恢复标签失败（已跳过）:', p, err && err.message ? err.message : err);
+          console.warn('[session] 激活标签失败:', docs[ai], err && err.message ? err.message : err);
         }
       }
-    });
-    await Promise.all(workers);
-    // 并行打开完成顺序 ≠ 会话顺序：按 paths 顺序重排标签栏，保证 pinned/active 下标语义一致
-    if (paths.length > 1) editor.reorderTabs(paths);
-    const active = typeof ls.active === 'number' && ls.active >= 0 && ls.active < paths.length ? ls.active : -1;
-    if (active >= 0) {
-      try {
-        await editor.openFile(paths[active], { silent: true }); // openFile 对已存在标签会 switchTab 激活
-      } catch (err) {
-        console.warn('[session] 激活标签失败:', paths[active], err && err.message ? err.message : err);
+      const pinSet = new Set((plan.panes[i].pinned || []).filter((n) => Number.isInteger(n) && n >= 0 && n < docs.length));
+      for (const idx of pinSet) {
+        const t = editor.findTabByPath(docs[idx]);
+        if (t) { editor.setPinned(t, true); anyPinned = true; }
       }
     }
-    // 恢复 pinned：按下标 Set 还原（越界下标忽略；旧数据无 pinned → 视为 []）
-    if (Array.isArray(ls.pinned)) {
-      const pinSet = new Set(ls.pinned.filter((i) => Number.isInteger(i) && i >= 0 && i < paths.length));
-      for (const idx of pinSet) {
-        const t = editor.findTabByPath(paths[idx]);
-        if (t) editor.setPinned(t, true);
+    if (anyPinned) editor.renderTabs(); // 一次重绘，保证 pin 标记同步
+    // 焦点栏**最后再钉一次**：上面逐栏激活的过程里，任何"把焦点带到该栏"的路径都可能改写它
+    // （openFile 的批量路径已不再改焦点，这里再兜一次，保证与快照一致）
+    if (plan.panes.length > 1 && Number.isInteger(plan.focus) && plan.focus >= 0 && plan.focus < plan.panes.length) {
+      editor.focusPaneIndex(plan.focus);
+    }
+    // 兜底：旧格式（无 layout）的 active 下标必须继续生效（既有的 sessionRestore/restoreParallel 口径）
+    if (!plan.panes.some((p) => Number.isInteger(p.active) && p.active >= 0)) {
+      const a = typeof ls.active === 'number' && ls.active >= 0 && ls.active < ls.paths.length ? ls.active : -1;
+      if (a >= 0) {
+        try {
+          await editor.openFile(ls.paths[a], { silent: true });
+        } catch (err) {
+          console.warn('[session] 激活标签失败:', ls.paths[a], err && err.message ? err.message : err);
+        }
       }
-      editor.renderTabs(); // 一次重绘，保证 pin 标记同步
     }
     syncExternalTree(); // 需求1：外部文件虚拟分支重渲染（幂等）
-    persistSession(true); // 强制落盘：确保最终快照包含 pinned
+    persistSession(true); // 强制落盘：确保最终快照包含 pinned 与 layout
   }
 
   /** 需求1：同步「外部文件」虚拟分支 —— 取所有打开标签中 rootDir 外的文件路径。
@@ -528,11 +687,12 @@ async function boot() {
             .catch(() => {});
           syncExternalTree(); // 外部文件重命名后同步外部区（原路径移除、新路径加入）
         } else {
-          editor.closeByPath(p, false);
+          // 删除路径：不保存（save:false）—— 否则 dirty 标签的保存会把已删除的文件写回磁盘
+          editor.closeByPath(p, false, { save: false });
         }
       } else {
         // 可能是目录删除
-        editor.closeByPath(p, true);
+        editor.closeByPath(p, true, { save: false });
       }
     },
   });
@@ -567,8 +727,11 @@ async function boot() {
 
   /** 按路径直接打开目录（选择对话框 / 右键菜单 / 启动恢复 / 点击收藏项共用）。
    *  v0.2.3 多目录：目录加入侧栏根列表（去重、禁嵌套、上限 12）并设为活动目录；
-   *  已在列表中的目录 → 仅切换活动。 */
-  function openDirFromPath(dir) {
+   *  已在列表中的目录 → 仅切换活动。
+   *  opts.fromLaunch：来自「右键 --dir / 二次启动」等外部指定目录的场景 —— 与已打开根目录
+   *  存在包含关系时不再直接拒绝（那样右键盘符/父目录会像"没反应"），改为：
+   *  目标在某根内 → 激活该根并在树里定位；目标是若干根的祖先 → 用目标替换这些子根。 */
+  function openDirFromPath(dir, opts = {}) {
     if (!dir) return Promise.resolve(false);
     return window.api
       .readTree(dir) // 可读性预检（无效目录直接失败，不进侧栏）
@@ -578,6 +741,21 @@ async function boot() {
         if (existed) {
           if (state.rootDir && normKey(state.rootDir) === nd) return true; // 已是活动目录
           return activateSidebarRoot(existed);
+        }
+        if (opts.fromLaunch) {
+          const inside = state.sidebarRoots.find((r) => nd.startsWith(normKey(r) + '/'));
+          if (inside) {
+            // 目标落在某个已打开根内：不新增根，直接激活该根并把树定位到目标目录
+            return activateSidebarRoot(inside).then(() => {
+              tree.reveal(dir).catch(() => {});
+              return true;
+            });
+          }
+          const contained = state.sidebarRoots.filter((r) => normKey(r).startsWith(nd + '/'));
+          if (contained.length) {
+            state.sidebarRoots = state.sidebarRoots.filter((r) => !contained.includes(r));
+            toast(`已用「${dir}」替换侧栏中 ${contained.length} 个被包含的目录`);
+          }
         }
         // 嵌套防御：根间嵌套会让 isInsideRoot「任根判定」产生歧义（外部/内部归属不定）
         for (const r of state.sidebarRoots) {
@@ -623,6 +801,9 @@ async function boot() {
   const favorites = createFavorites({
     onOpenDir: openDirFromPath,
     getRootDir: () => state.rootDir,
+    // E2：收藏分区折叠态与另外两个分区同源（settings.sidebarCollapsed），避免两处 caret 打架
+    initialCollapsed: sidebarCollapsed.fav,
+    onCollapseChange: (v) => applySidebarCollapsed({ ...sidebarCollapsed, fav: !!v }, true),
   });
   $('#btn-toggle-fav').addEventListener('click', () => favorites.toggle());
 
@@ -638,8 +819,10 @@ async function boot() {
   // 由 boot 的恢复段优先采用；boot 完成后再收到的事件（second-instance 新窗口/运行中重开）直通执行。
   let bootDirSettled = false;
   let externalDir = null;
+  let openDirFromArg = false; // 本次启动是否由「右键 --dir / 二次启动」指定了目录
   window.api.onOpenDir((dir) => {
     externalDir = dir;
+    openDirFromArg = true;
     if (bootDirSettled) openDirFromPath(dir);
   });
 
@@ -660,6 +843,22 @@ async function boot() {
   }
 
   // ---------- 打开文件并定位行（全局搜索结果点击） ----------
+  /** 等待 huge 视图可定位：行数估算就绪（lines>1）后最多再等 budgetMs 等行索引。
+   *  新建实例的 totalLines() 先是 1（行数估算异步、索引未建）→ 此时 gotoLine 会被 clamp 到第 1 行；
+   *  索引就绪后行号才精确（估算值在行长不均的文件上可能偏差很大）。返回最终 getState()（可能为 null）。 */
+  async function waitHugeReady(hv, budgetMs) {
+    const t0 = performance.now();
+    let st = null;
+    for (;;) {
+      try { st = hv.getState(); } catch { return null; }
+      if (st && st.indexed) return st;
+      const el = performance.now() - t0;
+      if (st && st.lines > 1 && el > budgetMs) return st; // 索引太慢：先按估算行数定位，别让用户干等
+      if (el > budgetMs * 3) return st;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  }
+
   async function openFileAt(file, line, query) {
     const tab = await editor.openFile(file);
     tree.reveal(file).catch(() => {}); // 全局搜索跳转：树跟随定位
@@ -668,10 +867,40 @@ async function boot() {
     if (tab.kind === 'viewer-lg') {
       if (line) {
         try {
-          const off = await window.api.findLineOffset(file, line);
+          // v0.4.0：优先用行索引（O(log n)，侧车缓存），失败回退旧的流式数换行
+          let off = 0;
+          try {
+            off = await window.api.hugeLineOffset(file, line);
+          } catch {
+            off = await window.api.findLineOffset(file, line);
+          }
           await editor.revealViewerAt(tab, off);
         } catch (err) {
           console.warn('[gs-jump] 大文件定位失败:', file, err && err.message ? err.message : err);
+        }
+      }
+    } else if (tab.kind === 'huge') {
+      // 缺陷 2 修复：虚拟滚动查看器的正文不在 CodeMirror 里（CM 文档是空的），
+      // editor.jumpToLine 只会把空文档 clamp 到第 1 行 —— 必须走 hugeview 的 gotoLine
+      //（行号 → 字节偏移由主进程稀疏行索引 O(log n) 完成，不再全量重扫）。
+      if (line) {
+        // tab.huge 只在标签活动时挂载：标签不活动（或尚未渲染）先用公开 API 激活它
+        //（openFile 命中已开标签 → 内部 switchTab → 挂载 huge 视图），再跳转
+        if (!tab.huge && editor.getActiveTab() !== tab) await editor.openFile(file);
+        if (tab.huge) {
+          try {
+            const sb = $('#sb-len');
+            if (sb) sb.textContent = '大文件索引建立中，正在定位…';
+            await waitHugeReady(tab.huge, 12000); // 等估算/索引就绪：否则跳转被 clamp 到第 1 行
+            const n = await tab.huge.gotoLine(line);
+            if (sb) sb.textContent = `已跳转第 ${n} 行`; // 状态栏即时反馈
+            toast(`已定位到《${tab.name}》第 ${n} 行`);
+          } catch (err) {
+            console.warn('[gs-jump] 大文件定位失败:', file, err && err.message ? err.message : err);
+            toast('大文件定位失败：' + (err && err.message ? err.message : err));
+          }
+        } else {
+          toast('大文件视图尚未就绪，已打开文件');
         }
       }
     } else if (line) {
@@ -684,17 +913,57 @@ async function boot() {
     }
   }
 
-  // ---------- 底部面板 ----------
+  // ---------- 底部面板（0.5.0 Phase 5a E1：默认折叠、按需展开、最大化/还原） ----------
+  /** 启动默认折叠（0.3.0 §4-E1 的用户痛点：开机就占 1/4 高、无文件时纯占位）。
+   *  **为什么不回归既有用例**：折叠只是给 #bottom-panel 加 .collapsed（CSS 高度 34px +
+   *  .panel-body{display:none}），面板体与结果 DOM 一字未动 —— findAll / pyUI 等读的是
+   *  `#find-results .find-result` / `#py-output`.textContent，照样有值；而所有"要用面板"的
+   *  入口（Ctrl+F / Ctrl+H / ▶ 运行 / 全局搜索跳转 setQuery）都先经 switchPanel() 展开。 */
+  const BOTTOM_DEFAULT_COLLAPSED = true;
+  const panelEl = $('#bottom-panel');
+  const btnMaxPanel = $('#btn-max-panel');
+  /** boot 时"默认折叠"这一事实的现场快照（用例在末尾跑，届时面板早被前面的用例展开过，
+   *  所以默认态只能在 boot 当下记录 —— 这是对真实 DOM 的观测，不是常量回读）。 */
+  let bottomBootCollapsed = null;
+  const isPanelCollapsed = () => panelEl.classList.contains('collapsed');
+  const isPanelMaximized = () => panelEl.classList.contains('maximized');
+  function syncPanelMaxBtn() {
+    if (!btnMaxPanel) return;
+    const max = isPanelMaximized();
+    btnMaxPanel.textContent = max ? '⤡' : '⛶';
+    btnMaxPanel.title = max ? '还原面板高度' : '最大化面板';
+    btnMaxPanel.setAttribute('aria-pressed', max ? 'true' : 'false');
+  }
+  function setPanelCollapsed(v) {
+    panelEl.classList.toggle('collapsed', !!v);
+    if (v) panelEl.classList.remove('maximized'); // 折叠与最大化互斥（否则"折叠着却占 72vh"）
+    syncPanelMaxBtn();
+  }
+  /** 最大化/还原：折叠态下点击 = 先展开再最大化（一次点击就有可见效果，不要求用户点两次）。 */
+  function togglePanelMax() {
+    if (isPanelCollapsed()) {
+      panelEl.classList.remove('collapsed');
+      panelEl.classList.add('maximized');
+    } else {
+      panelEl.classList.toggle('maximized');
+    }
+    syncPanelMaxBtn();
+    return isPanelMaximized();
+  }
+  // 启动即应用默认折叠（放在这里而不是 index.html 的 class：便于 __app 暴露/用例断言"启动态"）
+  setPanelCollapsed(BOTTOM_DEFAULT_COLLAPSED);
+  bottomBootCollapsed = isPanelCollapsed();
+
   function switchPanel(name) {
     $$('.ptab').forEach((b) => b.classList.toggle('active', b.dataset.panel === name));
     $$('.panel-body').forEach((p) => p.classList.toggle('hidden', p.id !== `panel-${name}`));
-    $('#bottom-panel').classList.remove('collapsed');
+    setPanelCollapsed(false); // E1：按需展开（触发搜索 / 运行 Python / 打开文件定位都走这里）
   }
 
   $$('.ptab').forEach((b) => b.addEventListener('click', () => switchPanel(b.dataset.panel)));
-  $('#btn-close-panel').addEventListener('click', () => {
-    $('#bottom-panel').classList.add('collapsed');
-  });
+  $('#btn-close-panel').addEventListener('click', () => setPanelCollapsed(true));
+  if (btnMaxPanel) btnMaxPanel.addEventListener('click', () => togglePanelMax());
+  syncPanelMaxBtn();
 
   // ---------- 设置弹窗 ----------
   function openSettings() {
@@ -782,7 +1051,8 @@ async function boot() {
     });
     pyField.append(pyLabel, pyRow, pyHint);
 
-    // 大文件上限（1 ~ 4096 MB；v0.1.49 起支持 4GB 以下分层：>256MB 进只读查看器+区域编辑）
+    // 大文件上限（1 ~ 4096 MB；v0.1.49 起支持 4GB 以下分层：>256MB 进只读查看器+区域编辑；
+    // v0.4.0 起 >1GB 再上一档：虚拟滚动查看器 —— 连续滚动，可启用编辑后按 Ctrl+G 跳行号）
     const MAX_SIZE_MB = 4096;
     const sizeField = document.createElement('div');
     sizeField.className = 'field';
@@ -795,7 +1065,7 @@ async function boot() {
     sizeInput.value = s.maxFileSizeMB;
     const sizeHint = document.createElement('div');
     sizeHint.className = 'hint';
-    sizeHint.textContent = `可调整范围 1 ~ ${MAX_SIZE_MB} MB（超过上限拒绝打开）。≤256MB 直接编辑（>64MB 保存走流式写）；>256MB 以只读查看器打开（可切换区域编辑）`;
+    sizeHint.textContent = `可调整范围 1 ~ ${MAX_SIZE_MB} MB（超过上限拒绝打开）。≤256MB 直接编辑（>64MB 保存走流式写）；>256MB 以只读查看器打开（可切换区域编辑）；>1GB 走虚拟滚动查看器（连续滚动，底部「✎ 启用编辑」后可改，Ctrl+G 跳行号，Ctrl+S 保存）`;
     sizeField.append(sizeLabel, sizeInput, sizeHint);
 
     // 自动保存间隔
@@ -844,114 +1114,6 @@ async function boot() {
     indentHint.textContent = `Tab 键插入的空格数，Shift+Tab 反向缩进（可调整范围 1 ~ ${MAX_INDENT} 个空格）`;
     indentField.append(indentLabel, indentInput, indentHint);
 
-    // AI 大模型配置（v0.2.5 通用化：服务商预设一键填入 + 拉取模型列表 + 自定义中转站）
-    const AI_PRESETS = [
-      { id: 'deepseek', label: 'DeepSeek（官方）', baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' },
-      { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-      { id: 'siliconflow', label: '硅基流动 SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3' },
-      { id: 'moonshot', label: '月之暗面 Kimi', baseUrl: 'https://api.moonshot.cn/v1', model: 'kimi-latest' },
-      { id: 'zhipu', label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
-      { id: 'qwen', label: '阿里通义 Qwen', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
-      { id: 'ollama', label: 'Ollama（本机）', baseUrl: 'http://localhost:11434/v1', model: '' },
-      { id: 'lmstudio', label: 'LM Studio（本机）', baseUrl: 'http://localhost:1234/v1', model: '' },
-      { id: 'custom', label: '自定义 / 中转站…', baseUrl: '', model: '' },
-    ];
-    const aiField = document.createElement('div');
-    aiField.className = 'field';
-    const aiTitle = document.createElement('label');
-    aiTitle.textContent = 'AI 大模型（OpenAI 兼容接口：官方 / 中转站 / 本地模型均可）';
-    // 服务商预设：仅作快速填入（不持久化），保存时以服务地址 + 模型名为准
-    const presetSelect = document.createElement('select');
-    presetSelect.className = 'field-select';
-    presetSelect.style.marginBottom = '6px';
-    for (const p of AI_PRESETS) {
-      const opt = document.createElement('option');
-      opt.value = p.id;
-      opt.textContent = p.label;
-      presetSelect.appendChild(opt);
-    }
-    const detected = AI_PRESETS.find((p) => p.baseUrl && p.baseUrl.replace(/\/+$/, '') === String(s.aiBaseUrl || '').replace(/\/+$/, ''));
-    presetSelect.value = detected ? detected.id : (s.aiBaseUrl ? 'custom' : 'deepseek');
-    presetSelect.addEventListener('change', () => {
-      const p = AI_PRESETS.find((x) => x.id === presetSelect.value);
-      if (!p) return;
-      if (p.baseUrl) aiBaseInput.value = p.baseUrl;
-      if (p.model) aiModelInput.value = p.model;
-      if (p.id === 'ollama' || p.id === 'lmstudio') {
-        toast('本地服务通常无需 Key：API Key 可填任意非空占位（如 ollama）');
-      }
-    });
-    const aiKeyInput = document.createElement('input');
-    aiKeyInput.type = 'password'; // S5：密钥不显示明文（经 DPAPI 加密保存）
-    aiKeyInput.placeholder = s.aiApiKeySet ? '已加密保存（留空保持不变）' : 'API Key（本地 Ollama 可填任意占位）';
-    aiKeyInput.value = '';
-    // S5：清除密钥按钮（保存时提交 aiApiKeyClear:true）
-    let aiKeyClear = false;
-    const aiKeyClearBtn = document.createElement('button');
-    aiKeyClearBtn.className = 'tbtn small danger';
-    aiKeyClearBtn.textContent = '清除密钥';
-    aiKeyClearBtn.disabled = !s.aiApiKeySet;
-    aiKeyClearBtn.addEventListener('click', () => {
-      aiKeyClear = true;
-      aiKeyInput.value = '';
-      aiKeyClearBtn.disabled = true;
-      toast('将清除已保存的 API Key（点击保存后生效）');
-    });
-    const aiKeyRow = document.createElement('div');
-    aiKeyRow.className = 'field-row';
-    aiKeyRow.append(aiKeyInput, aiKeyClearBtn);
-    const aiBaseInput = document.createElement('input');
-    aiBaseInput.type = 'text';
-    aiBaseInput.placeholder = '服务地址（如 https://your-relay.example.com）';
-    aiBaseInput.value = s.aiBaseUrl || 'https://api.deepseek.com';
-    presetSelect.value = detected ? detected.id : (s.aiBaseUrl ? 'custom' : 'deepseek'); // base 默认值后再校正
-    const aiModelRow = document.createElement('div');
-    aiModelRow.className = 'field-row';
-    const aiModelInput = document.createElement('input');
-    aiModelInput.type = 'text';
-    aiModelInput.placeholder = '模型名（可手填，或点「拉取模型列表」选择）';
-    aiModelInput.value = s.aiModel || 'deepseek-chat';
-    const modelList = document.createElement('datalist');
-    modelList.id = 'ai-model-datalist';
-    aiModelInput.setAttribute('list', 'ai-model-datalist');
-    const aiModelsBtn = document.createElement('button');
-    aiModelsBtn.className = 'tbtn small';
-    aiModelsBtn.title = '从服务地址拉取可用模型列表（GET /models，OpenAI 兼容端点通用）';
-    aiModelsBtn.textContent = '📋 拉取模型列表';
-    aiModelsBtn.addEventListener('click', async () => {
-      aiModelsBtn.disabled = true;
-      const old = aiModelsBtn.textContent;
-      aiModelsBtn.textContent = '获取中…';
-      try {
-        const ids = await window.api.aiListModels(aiBaseInput.value.trim());
-        modelList.innerHTML = '';
-        for (const id of ids) {
-          const o = document.createElement('option');
-          o.value = id;
-          modelList.appendChild(o);
-        }
-        toast(ids.length ? `已获取 ${ids.length} 个模型：点击模型输入框即可下拉选择` : '服务未返回模型列表，可手动填写模型名');
-      } catch (err) {
-        toast('获取模型列表失败：' + (err.message || err));
-      } finally {
-        aiModelsBtn.disabled = false;
-        aiModelsBtn.textContent = old;
-      }
-    });
-    aiModelRow.append(aiModelInput, aiModelsBtn, modelList);
-    const aiHint = document.createElement('div');
-    aiHint.className = 'hint';
-    aiHint.textContent = '支持任意 OpenAI 兼容服务：官方 API、中转站（裸域名自动补 /v1）、局域网 Ollama / LM Studio（http 需本机或 192.168.x / 10.x / 172.16~31.x）。API Key 经 Windows DPAPI 加密保存在本机，界面不显示明文；本地服务无需 Key 时可填任意非空占位';
-    const aiAskRow = document.createElement('label');
-    aiAskRow.className = 'check-row';
-    const aiAskInput = document.createElement('input');
-    aiAskInput.type = 'checkbox';
-    aiAskInput.checked = s.aiAskBeforeApply !== false;
-    const aiAskText = document.createElement('span');
-    aiAskText.textContent = 'AI 修改文档前询问确认';
-    aiAskRow.append(aiAskInput, aiAskText);
-    aiField.append(aiTitle, presetSelect, aiBaseInput, aiKeyRow, aiModelRow, aiHint, aiAskRow);
-
     // 自动换行
     const wrapRow = document.createElement('label');
     wrapRow.className = 'check-row';
@@ -962,7 +1124,32 @@ async function boot() {
     wrapText.textContent = '自动换行';
     wrapRow.append(wrapInput, wrapText);
 
-    body.append(themeField, pyField, sizeField, saveField, sbField, indentField, aiField, wrapRow);
+    // ---------- 0.5.0 Phase 5a B8：字号 / 行高（编辑器 + 预览；快捷键 Ctrl+= / Ctrl+- / Ctrl+0） ----------
+    const mkNumField = (label, value, min, max, step) => {
+      const f = document.createElement('div');
+      f.className = 'field';
+      const l = document.createElement('label');
+      l.textContent = label;
+      const inp = document.createElement('input');
+      inp.type = 'number';
+      inp.min = min;
+      inp.max = max;
+      inp.step = step;
+      inp.value = value;
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent = `可调整范围 ${min} ~ ${max}`;
+      f.append(l, inp, hint);
+      return { field: f, input: inp, hint };
+    };
+    const fsEditor = mkNumField('编辑器字号（像素，10~32）', clampFont('editorFontSize', s.editorFontSize), 10, 32, 0.5);
+    fsEditor.hint.textContent = '快捷键：Ctrl+= 放大、Ctrl+- 缩小、Ctrl+0 复位（含预览缩放）';
+    const fsLine = mkNumField('编辑器行高（倍数，1~2.6）', clampFont('editorLineHeight', s.editorLineHeight), 1, 2.6, 0.05);
+    fsLine.hint.textContent = '行距倍数，1.65 = 改造前默认值';
+    const fsPreview = mkNumField('预览字号（像素，10~32）', clampFont('previewFontSize', s.previewFontSize), 10, 32, 0.5);
+    fsPreview.hint.textContent = 'Markdown 预览区字号（标题/代码等按比例缩放）';
+
+    body.append(themeField, pyField, sizeField, saveField, sbField, indentField, fsEditor.field, fsLine.field, fsPreview.field, wrapRow);
 
     openModal({
       title: '设置',
@@ -986,17 +1173,17 @@ async function boot() {
               scrollbarWidth: Math.min(40, Math.max(6, parseInt(sbInput.value, 10) || 10)),
               indentSize: Math.min(8, Math.max(1, parseInt(indentInput.value, 10) || 4)),
               wordWrap: wrapInput.checked,
-              aiApiKey: aiKeyInput.value.trim(),
-              ...(aiKeyClear ? { aiApiKeyClear: true } : {}),
-              aiBaseUrl: aiBaseInput.value.trim() || 'https://api.deepseek.com',
-              aiModel: aiModelInput.value.trim() || 'deepseek-chat',
-              aiAskBeforeApply: aiAskInput.checked,
+              // B8：字号 / 行高（三个键必须都在 settings.js 白名单里，否则 settings:set 会静默丢弃）
+              editorFontSize: clampFont('editorFontSize', parseFloat(fsEditor.input.value)),
+              editorLineHeight: clampFont('editorLineHeight', parseFloat(fsLine.input.value)),
+              previewFontSize: clampFont('previewFontSize', parseFloat(fsPreview.input.value)),
             };
             state.settings = await window.api.setSettings(patch);
             applyTheme(state.settings.theme); // 兜底：保证 data-theme 与落盘值一致（change 已即时预览，此处幂等）
             editor.setWordWrap(patch.wordWrap);
             editor.setIndentSize(patch.indentSize);
             applyScrollbarWidth(patch.scrollbarWidth);
+            applyFonts(state.settings); // B8：设置弹窗与快捷键走同一个落地函数
             closeModal(true); // 已保存：跳过 onClose 的「还原打开时主题」钩子
             toast('设置已保存');
           },
@@ -1184,20 +1371,8 @@ async function boot() {
     python.run();
   });
   $('#btn-settings').addEventListener('click', openSettings);
-  // AI 侧栏「自定义模型名」跳转设置
-  window.addEventListener('markhunter:open-settings', openSettings);
-  $('#btn-ai').addEventListener('click', () => {
-    aiPanel.toggle();
-    $('#ai-divider').classList.toggle('hidden', !aiPanel.isOpen());
-  });
-  $('#btn-ai-close').addEventListener('click', () => {
-    aiPanel.toggle();
-    $('#ai-divider').classList.toggle('hidden', !aiPanel.isOpen());
-  });
-
   // ---------- 各分界线拖拽调整尺寸（分隔条在目标右侧/下侧时用 reverse） ----------
   initDragResize($('#sidebar-divider'), { target: '#sidebar', dir: 'x', min: 200, max: 520 });
-  initDragResize($('#ai-divider'), { target: '#ai-panel', dir: 'x', min: 260, max: 560, reverse: true });
   initDragResize($('#bottom-divider'), { target: '#bottom-panel', dir: 'y', min: 120, max: 640, reverse: true });
   initDragResize($('#tree-search-divider'), { target: '#sidebar-search', dir: 'y', min: 80, max: 400, reverse: true });
 
@@ -1212,7 +1387,7 @@ async function boot() {
       btnPreview.textContent = previewModeNames[preview.getMode()] || '👁 分屏';
     }
   };
-  new MutationObserver(setPreviewLabel).observe($('#tabs'), { childList: true, subtree: true });
+  new MutationObserver(setPreviewLabel).observe($('#editor-panes'), { childList: true, subtree: true });
 
   // ---------- 拖拽文件到窗口直接打开 ----------
   window.addEventListener(
@@ -1253,50 +1428,95 @@ async function boot() {
     true
   );
 
-  // ---------- 快捷键 ----------
-  document.addEventListener('keydown', (e) => {
-    const mod = e.ctrlKey || e.metaKey;
-    if (mod && e.key.toLowerCase() === 'o') {
-      e.preventDefault();
-      openDirectory();
-    } else if (mod && e.key.toLowerCase() === 's') {
-      e.preventDefault();
-      editor.saveNow();
-    } else if (mod && e.key.toLowerCase() === 'f' && !e.shiftKey) {
-      e.preventDefault();
-      switchPanel('find');
-      find.focus();
-    } else if (mod && e.key.toLowerCase() === 'h' && !e.shiftKey) {
-      e.preventDefault();
-      switchPanel('find');
-      find.focusReplace();
-    } else if (mod && e.shiftKey && e.key.toLowerCase() === 'f') {
-      e.preventDefault();
-      globalSearch.focus();
-    } else if (mod && e.key.toLowerCase() === 'b') {
-      e.preventDefault();
+  // ---------- 快捷键（0.5.0 Phase 5a F1：单一数据源 = help.js 的 SHORTCUTS） ----------
+  // 这里**只提供 id → 动作**，键位判定与面板显示都来自 help.js 的同一张表 ——
+  // 「代码里真正生效的键位」与「面板显示的键位」在结构上不可能漂移（新增键位只改 help.js）。
+  // 动作体逐条保持 0.5.0 之前 if/else 链里的原样逻辑（含各自的分支差异，见注释）。
+  const SHORTCUT_ACTIONS = {
+    'quick-open': () => quickOpen.toggle(),
+    'open-dir': () => openDirectory(),
+    save: () => editor.saveNow(),
+    find: () => { switchPanel('find'); find.focus(); },
+    replace: () => { switchPanel('find'); find.focusReplace(); },
+    'global-search': () => globalSearch.focus(),
+    'preview-cycle': () => {
       const mode = preview.cycleMode();
       if (mode) btnPreview.textContent = previewModeNames[mode];
-    } else if (mod && e.key === '0') {
-      e.preventDefault();
-      preview.resetZoom();
-    } else if (mod && e.shiftKey && e.key.toLowerCase() === 'n') {
-      e.preventDefault();
-      window.api.openNewWindow(); // 多窗口：每窗口独立标签/目录，共享设置与主题
-    } else if (mod && e.key.toLowerCase() === 'w') {
-      e.preventDefault();
+    },
+    'huge-goto': () => {
+      // v0.4.0：大文件查看器行号跳转（Ctrl+G）
+      const ht = getActiveTab();
+      if (ht && ht.kind === 'huge' && ht.huge) {
+        showPrompt('跳转行号', '输入行号（1 ~ 总行数）', '', (v) => {
+          const n = parseInt(v, 10);
+          if (Number.isFinite(n)) ht.huge.gotoLine(n);
+        });
+      } else {
+        toast('当前标签不是大文件查看器（Ctrl+G 仅在大文件视图可用）');
+      }
+    },
+    'zoom-reset': () => { resetViewScale(); }, // B8：Ctrl+0 = 视图缩放复位（含预览缩放，见 resetViewScale）
+    'font-inc': () => { stepEditorFont(1); },
+    'font-dec': () => { stepEditorFont(-1); },
+    'new-window': () => { window.api.openNewWindow(); }, // 多窗口：每窗口独立标签/目录，共享设置与主题
+    'close-tab': () => {
       const tab = getActiveTab();
       if (tab) editor.closeTab(tab);
-    } else if (mod && e.key === 'Tab') {
-      e.preventDefault();
-      editor.cycleTab(e.shiftKey ? -1 : 1);
-    } else if (e.key === 'Escape') {
-      tree.hideCtx();
+    },
+    // A2（0.5.0 Phase 5a 第 2 批）：Ctrl+Shift+T 重开刚关闭的标签（栈 20 条；落栏语义见 tabs.js）
+    'reopen-closed': () => { void editor.reopenClosedTab(); },
+    'cycle-tab': (e) => { editor.cycleTab(e.shiftKey ? -1 : 1); },
+    'split-toggle': () => {
+      // 0.5.0 多视图 Phase 2（G6）：Ctrl+\ = 分屏/合屏（硬上限 2 栏；已有两栏时合并回单栏）
+      const n = editor.toggleSplit();
+      toast(n > 1 ? '已分屏（Ctrl+1 / Ctrl+2 切换栏，Ctrl+\\ 合屏）' : '已合并为单栏');
+      syncPreviewToFocus();
+      preview.applyMode();
+      setPreviewLabel();
+    },
+    'focus-pane-1': () => focusPaneByKey(0),
+    'focus-pane-2': () => focusPaneByKey(1),
+    'outline-toggle': () => { if (outline) outline.setCollapsed(!outline.getState().collapsed); },
+    'panel-collapse': () => {
+      tree.hideCtx(); // 旧行为：Esc 先收右键菜单
       // v0.2.4：弹窗打开时 Esc 只关弹窗（ui.js 统一处理），不收起底部面板
       const modalOpen = !$('#modal-mask').classList.contains('hidden');
-      if (!modalOpen && !$('#bottom-panel').classList.contains('collapsed')) {
-        $('#bottom-panel').classList.add('collapsed');
+      if (!modalOpen && !isPanelCollapsed()) {
+        setPanelCollapsed(true); // E1：Esc 收起面板（同时退出最大化，见 setPanelCollapsed）
       }
+    },
+    help: () => { help.toggle(); },
+  };
+  /** Ctrl+1 / Ctrl+2：聚焦第 idx 栏（不存在第 2 栏时提示，不自动分屏） */
+  function focusPaneByKey(idx) {
+    if (idx === 0 || editor.getPaneCount() > 1) {
+      if (editor.focusPaneIndex(idx)) {
+        syncPreviewToFocus();
+        preview.applyMode();
+        setPreviewLabel();
+        updateRunButton();
+      }
+    } else {
+      toast('当前只有一栏（Ctrl+\\ 可分屏）');
+    }
+  }
+  /** 未接线/建议补线的 id → true（面板上会标「未接线」，用例可据此断言没有漏接线） */
+  const isShortcutWired = (id) => typeof SHORTCUT_ACTIONS[id] === 'function';
+  // F1：帮助面板用**同一张动作表**（面板据此把没接线的键位标出来 —— 表与分派不可能漂移）
+  help = createHelp({ actions: SHORTCUT_ACTIONS });
+
+  document.addEventListener('keydown', (e) => {
+    // A1：快速打开浮层内的按键不参与全局分派（否则 Esc 关浮层时会连带收起底部面板）
+    if (e.target && e.target.closest && e.target.closest('.quick-open')) return;
+    const id = matchShortcut(e);
+    if (!id) return;
+    const act = SHORTCUT_ACTIONS[id];
+    if (!act) return; // 表里有、动作没接：不吞键（保持旧行为：该组合键交回系统）
+    if (id !== 'panel-collapse') e.preventDefault();
+    try {
+      act(e);
+    } catch (err) {
+      console.error('[shortcut:' + id + ']', err && err.stack ? err.stack : err);
     }
   });
 
@@ -1314,22 +1534,37 @@ async function boot() {
     }
     if (s.wordWrap !== prev.wordWrap) editor.setWordWrap(s.wordWrap);
     if (s.indentSize !== prev.indentSize) editor.setIndentSize(s.indentSize);
+    // B8：其它窗口改了字号/行高 → 本窗口即时跟随（CSS 变量挂在 :root，本窗口全部栏一起变）
+    if (s.editorFontSize !== prev.editorFontSize || s.editorLineHeight !== prev.editorLineHeight || s.previewFontSize !== prev.previewFontSize) {
+      applyFonts(s);
+    }
+    // E2：其它窗口改了侧栏折叠态 → 本窗口跟随（窗口级 UI，不写回，避免两个窗口互相覆盖）
+    if (s.sidebarCollapsed && JSON.stringify(s.sidebarCollapsed) !== JSON.stringify(prev.sidebarCollapsed)) {
+      applySidebarCollapsed(s.sidebarCollapsed);
+    }
   });
   // 同文件已在另一窗口打开（本窗口为后来者）→ 自动转只读，编辑仍可在标签右键解除；
   // 编辑窗口保存后经 file-changed 静默同步到本窗口（tabs.js 只读节流，不弹提示不抖动）
+  // v0.5.0 Phase 4：只读横幅 + 「✏️ 接管编辑」按钮由 tabs.js 按主进程锁表渲染（本订阅的
+  // 只读转换语义**一个字未改** —— scripts/smoke.js 的 mwSharedReadOnly 断言的就是这条通道）。
   window.api.onFileSharedOpen(({ path: sharedPath }) => {
     const tab = editor.findTabByPath(sharedPath);
     if (tab && !tab.kind) {
       editor.setTabReadOnly(tab, true);
-      toast(`「${tab.name}」已在另一窗口打开，本窗口以只读打开（右键标签可解除）`);
+      toast(`「${tab.name}」已在另一窗口打开，本窗口以只读打开（顶部横幅可一键接管编辑）`);
     }
   });
 
   // ---------- 恢复上次目录与会话 ----------
   await favorites.load(); // 启动时渲染收藏列表 + 同步按钮状态
-  // 右键 --dir 指定目录优先于上次目录（open-dir 事件先到达时已登记到 externalDir）
+  // 右键「用 MarkHunter 打开」/ 二次启动 --dir：优先采用指定目录。
+  // 双通道取目标：preload 缓冲（takeOpenDir，覆盖"监听注册前到达"）+ 事件回调（externalDir）；
+  // boot 收尾还会再判一次，覆盖"事件落在恢复分支 await 期间"的情况（v0.2.2 修复漏掉的那一段）。
+  externalDir = externalDir || (await window.api.takeOpenDir());
   if (externalDir) {
-    await openDirFromPath(externalDir);
+    openDirFromArg = true;
+    const opened = await openDirFromPath(externalDir, { fromLaunch: true });
+    if (!opened) toast(`无法打开指定目录：${externalDir}`);
   } else {
     // v0.2.3 多目录：恢复上次侧栏根列表（失效目录被 readTree 预检静默跳过），
     // 活动目录取 lastDirectory（不在列表时回退第一个）；无列表时退回单目录恢复
@@ -1348,13 +1583,95 @@ async function boot() {
     }
   }
   bootDirSettled = true; // 此后到达的 open-dir（second-instance 新窗口等）直接执行
-  await restoreSession(); // 恢复上次会话（先恢复目录，再恢复标签，保证树定位可用）
+  // 收尾补判：事件若落在「上面 if 判定之后、bootDirSettled 置位之前」会被旧逻辑静默吞掉
+  const lateDir = externalDir || (await window.api.takeOpenDir());
+  if (lateDir && normKey(state.rootDir || '') !== normKey(lateDir)) {
+    openDirFromArg = true;
+    const okLate = await openDirFromPath(lateDir, { fromLaunch: true });
+    if (!okLate) toast(`无法打开指定目录：${lateDir}`);
+  }
+  if (openDirFromArg) {
+    // 右键打开指定目录 = 干净窗口：不恢复上次会话（会话仍是持久化的，可在无 --dir 启动时恢复）
+    console.info('[open-dir] 指定目录启动：跳过上次会话恢复');
+  } else {
+    await restoreSession(); // 恢复上次会话（先恢复目录，再恢复标签，保证树定位可用）
+  }
   syncExternalTree(); // 需求1：启动后同步一次外部文件分支（幂等，兜底 restoreSession 提前返回的场景）
+
+  // 崩溃恢复：启动即查一次恢复区（有可恢复项才点亮状态栏入口 + 非模态 toast；失败静默）
+  await recover.init();
 
   updateRunButton();
   // S10：window.__app 仅开发环境暴露（冒烟/扩展测试在 dev 下运行，不受影响；打包版无此接口）
   if (!(await window.api.isPackaged())) {
-    window.__app = { state, editor, tree, preview, find, globalSearch, python, openDirFromPath, closeSidebarRoot, aiPanel, executeAiTool, favorites, syncExternalTree, session: { save: () => persistSession(true), restore: restoreSession }, applyTheme, THEME_NAMES, DARK_THEMES };
+    window.__app = { state, editor, tree, preview, find, globalSearch, python, openDirFromPath, closeSidebarRoot, favorites, syncExternalTree, session: { save: () => persistSession(true), restore: restoreSession }, applyTheme, THEME_NAMES, DARK_THEMES,
+      // ---------- 0.5.0 Phase 5a 测试面（dev 独有） ----------
+      // E1：底部面板折叠 / 最大化（getState 里的 bootCollapsed = boot 当下对真实 DOM 的观测快照）
+      bottomPanel: {
+        DEFAULT_COLLAPSED: BOTTOM_DEFAULT_COLLAPSED,
+        getState: () => ({
+          collapsed: isPanelCollapsed(),
+          maximized: isPanelMaximized(),
+          bootCollapsed: bottomBootCollapsed,
+          height: Math.round(panelEl.getBoundingClientRect().height),
+          bodyVisible: Array.from(document.querySelectorAll('.panel-body')).some((p) => !p.classList.contains('hidden') && p.offsetHeight > 0),
+        }),
+        collapse: () => { setPanelCollapsed(true); return isPanelCollapsed(); },
+        expand: () => { setPanelCollapsed(false); return isPanelCollapsed(); },
+        toggleMax: () => togglePanelMax(),
+        switchTo: (name) => { switchPanel(name); return name; },
+      },
+      // E2：侧栏三分区折叠（getState 返回落盘同源的展开/折叠真值）
+      sidebarSections: {
+        SECTIONS: SIDEBAR_SECTIONS.slice(),
+        getState: () => ({ ...sidebarCollapsed }),
+        toggle: (k) => toggleSidebarSection(k),
+        set: (v) => { applySidebarCollapsed(v, true); return { ...sidebarCollapsed }; },
+      },
+      // B8：字号 / 行高（设置弹窗与 Ctrl+=/-/0 的共同出口）
+      fonts: {        DEFAULTS: { ...FONT_DEFAULTS },
+        step: (delta) => stepEditorFont(delta),
+        reset: () => resetViewScale(),
+        getVars: () => {
+          const cs = getComputedStyle(document.documentElement);
+          return {
+            editorFontSize: cs.getPropertyValue('--mh-editor-font-size').trim(),
+            editorLineHeight: cs.getPropertyValue('--mh-editor-line-height').trim(),
+            previewFontSize: cs.getPropertyValue('--mh-preview-font-size').trim(),
+          };
+        },
+      },
+      // B1：大纲 / TOC（getState 里的判据与 UI 同源；supports 是纯函数，便于断言类型规则）
+      outline,
+      // A1：Ctrl+P 快速打开（getState / match 是纯数据，可结构化克隆回主进程）
+      quickOpen,
+      // 崩溃恢复（huge:doc-recover-list 的消费方）：getState 全是原始值，可结构化克隆
+      recover: {
+        getState: () => recover.getState(),
+        init: () => recover.init(), // 与 boot 同一条路（刷新 + 点亮 chip + 非模态 toast）
+        list: () => recover.refresh(),
+        openDialog: () => recover.openDialog(),
+        first: () => {
+          const it = recover.getState().items[0];
+          return it ? { key: it.key, file: it.file } : null;
+        },
+        recover: (arg) => recover.recoverItem(arg),
+        discard: (arg) => recover.discardItem(arg),
+        sampleLines: (file, picks) => recover.sampleLines(file, picks),
+      },
+      // F1：快捷键帮助面板 + 键位表（rows 不含函数，可克隆；wired 标记漏接线的 id）
+      help: {
+        panel: help,
+        rows: shortcutRows(),
+        groups: (() => {
+          const g = [];
+          for (const r of shortcutRows()) if (g.indexOf(r.group) < 0) g.push(r.group);
+          return g;
+        })(),
+        unwired: shortcutRows().map((r) => r.id).filter((id) => !isShortcutWired(id)),
+        match: (ev) => matchShortcut(ev),
+      },
+    };
   }
 }
 

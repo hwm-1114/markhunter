@@ -84,7 +84,7 @@ doneSeg:
 donePath2:
 !macroend
 
-; ---------- 安装：注册右键菜单（目录背景空白处 + 目录本身） ----------
+; ---------- 安装：注册右键菜单（目录背景空白处 + 目录本身 + 盘符） ----------
 !macro AddContextMenu
   WriteRegStr HKCU "Software\Classes\Directory\Background\shell\MarkHunter" "" "用 MarkHunter 打开"
   WriteRegStr HKCU "Software\Classes\Directory\Background\shell\MarkHunter" "Icon" "$INSTDIR\MarkHunter.exe"
@@ -92,12 +92,17 @@ donePath2:
   WriteRegStr HKCU "Software\Classes\Directory\shell\MarkHunter" "" "用 MarkHunter 打开"
   WriteRegStr HKCU "Software\Classes\Directory\shell\MarkHunter" "Icon" "$INSTDIR\MarkHunter.exe"
   WriteRegStr HKCU "Software\Classes\Directory\shell\MarkHunter\command" "" '"$INSTDIR\MarkHunter.exe" --dir "%1"'
+  ; 盘符（我的电脑里的 C: / D: …）：%1 = 盘符根，--dir 取干净窗口
+  WriteRegStr HKCU "Software\Classes\Drive\shell\MarkHunter" "" "用 MarkHunter 打开"
+  WriteRegStr HKCU "Software\Classes\Drive\shell\MarkHunter" "Icon" "$INSTDIR\MarkHunter.exe"
+  WriteRegStr HKCU "Software\Classes\Drive\shell\MarkHunter\command" "" '"$INSTDIR\MarkHunter.exe" --dir "%1"'
 !macroend
 
 ; ---------- 卸载：移除右键菜单 ----------
 !macro RemoveContextMenu
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\MarkHunter"
   DeleteRegKey HKCU "Software\Classes\Directory\shell\MarkHunter"
+  DeleteRegKey HKCU "Software\Classes\Drive\shell\MarkHunter"
 !macroend
 
 ; ---------- electron-builder 钩子 ----------

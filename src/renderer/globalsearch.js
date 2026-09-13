@@ -54,7 +54,7 @@ export function createGlobalSearch(getRootDir, onOpenFileAt) {
     try {
       const results = await window.api.globalSearch(root, query);
       renderResults(results, query);
-      count.textContent = results.length >= 3000 ? '结果过多，已截断' : `${results.length} 处匹配`;
+      count.textContent = results.length >= 10000 ? '结果过多，已截断' : `${results.length} 处匹配`;
     } catch (err) {
       const msg = String(err && err.message ? err.message : err);
       resultsEl.innerHTML = `<div class="find-empty">${msg.includes('已取消') ? '搜索已取消' : '搜索失败：' + escapeHtml(msg)}</div>`;

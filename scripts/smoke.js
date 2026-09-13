@@ -70,8 +70,8 @@ const RENDERER_TEST = `
   // 6. 设置读写
   const s0 = await api.getSettings();
   results.push(['getSettings', !!s0 && typeof s0.maxFileSizeMB === 'number']);
-  // S5：渲染进程永远拿不到 API Key 明文，仅暴露 aiApiKeySet 布尔
-  results.push(['keyNotExposed', !!s0 && s0.aiApiKey === '' && typeof s0.aiApiKeySet === 'boolean']);
+  // v0.3.0：AI 功能已整体移除 —— 设置里不应再出现任何 ai* 字段（含历史遗留的加密 API Key）
+  results.push(['noAiSettings', !!s0 && Object.keys(s0).every((k) => !/^ai[A-Z]/.test(k))]);
 
   // 7. Python 检测 + 运行
   const pys = await api.detectPython();
@@ -936,59 +936,6 @@ const RENDERER_TEST = `
       : 'from=' + sel.from + ',to=' + sel.to + ',nativeLen=' + nativeSel.length + ',bg=' + selBg;
   });
 
-  // ---- AI 侧栏开关 ----
-  await step('aiPanel', async () => {
-    document.querySelector('#btn-ai').click();
-    const visible = !document.querySelector('#ai-panel').classList.contains('hidden');
-    const hasInput = !!document.querySelector('#ai-input');
-    const hasFullBtn = !!document.querySelector('#btn-ai-full');
-    document.querySelector('#btn-ai').click(); // 收起
-    return visible && hasInput && hasFullBtn ? true : 'vis=' + visible + ',input=' + hasInput;
-  });
-
-  // ---- AI 内容写入文档（插入 / 替换） ----
-  await step('aiApplySnippet', async () => {
-    await api.writeFile(root + '/ai.md', '第一行\\n第二行\\n第三行');
-    await app.editor.openFile(root + '/ai.md');
-    const view = app.editor.getView();
-    app.editor.applySnippet('插入内容', 'insert', 0);
-    const doc1 = view.state.doc.toString();
-    view.dispatch({ selection: { anchor: 0, head: 2 } });
-    app.editor.applySnippet('XX', 'replace', 0, 2);
-    const doc2 = view.state.doc.toString();
-    return doc1.startsWith('插入内容') && doc2.startsWith('XX') ? true : 'doc1=' + doc1 + ',doc2=' + doc2;
-  });
-
-  // ---- 设置面板含 AI 配置（S5：密钥输入为 password 且不显示明文 + 清除密钥按钮 + 模型下拉） ----
-  await step('settingsAI', async () => {
-    document.querySelector('#btn-settings').click();
-    await new Promise((r) => setTimeout(r, 200));
-    const inputs = document.querySelectorAll('#modal-body input');
-    const keyHidden = Array.from(inputs).some((i) => i.type === 'password' && i.value === '');
-    const hasClearBtn = Array.from(document.querySelectorAll('#modal-body button')).some((b) => b.textContent.includes('清除密钥'));
-    const hintOk = Array.from(document.querySelectorAll('#modal-body .hint')).some((h) => h.textContent.includes('DPAPI'));
-    // v0.2.5：服务商预设下拉（含中转站/本地模型选项）替代旧「最新版/推理版」类型下拉
-    const selects = Array.from(document.querySelectorAll('#modal-body select'));
-    const presetSelect = selects.find((s2) => Array.from(s2.options).some((o) => o.textContent.includes('硅基流动')));
-    const hasModelsBtn = Array.from(document.querySelectorAll('#modal-body button')).some((b) => b.textContent.includes('拉取模型列表'));
-    document.querySelector('#modal-actions .tbtn').click();
-    return keyHidden && hasClearBtn && hintOk && !!presetSelect && hasModelsBtn
-      ? true
-      : 'key=' + keyHidden + ',clear=' + hasClearBtn + ',hint=' + hintOk + ',preset=' + !!presetSelect + ',models=' + hasModelsBtn;
-  });
-
-  // ---- AI 工具执行（function calling：读文档 / 插入文字） ----
-  await step('aiToolExec', async () => {
-    await api.writeFile(root + '/aitool.md', '工具测试内容\\n第二行');
-    await app.editor.openFile(root + '/aitool.md');
-    const read = await app.executeAiTool('read_document', {});
-    // 关闭询问后直接插入文字
-    app.state.settings.aiAskBeforeApply = false;
-    const ins = await app.executeAiTool('insert_text', { text: 'XX' });
-    const doc = app.editor.getView().state.doc.toString();
-    return read.includes('工具测试内容') && doc.includes('XX') ? true : 'read=' + read.slice(0, 20) + ',doc=' + doc;
-  });
-
   // ---- 分隔条拖拽调整尺寸 + 双击恢复 ----
   await step('dividerResize', async () => {
     const sideDiv = document.querySelector('#sidebar-divider');
@@ -1003,15 +950,6 @@ const RENDERER_TEST = `
     await new Promise((r) => setTimeout(r, 50));
     const reset = sidebar.style.width === '';
     return after > before + 50 && reset ? true : 'before=' + Math.round(before) + ',after=' + Math.round(after) + ',reset=' + reset;
-  });
-
-  // ---- AI 侧栏模型徽标（显示当前模型） ----
-  await step('aiModelBadge', async () => {
-    document.querySelector('#btn-ai').click();
-    const badge = document.querySelector('#ai-model-badge');
-    const text = badge ? badge.textContent : '';
-    document.querySelector('#btn-ai').click();
-    return text.includes('deepseek') ? true : 'badge=' + text;
   });
 
   // ---- Ctrl+Tab 循环切换标签 ----
@@ -1899,77 +1837,6 @@ const RENDERER_TEST = `
     return rejected;
   });
 
-  // ================= v0.2.5 AI：流式输出 / 工具循环 / 模型列表 / 设置通用化 =================
-  await step('aiMockChat', async () => {
-    // 全链路：裸域名 http 地址（智能补 /v1）→ SSE 流式（ai:chunk 增量）→ 工具调用循环 → 用量累计
-    const port = window.__AI_MOCK_PORT;
-    if (!port) return 'no mock port';
-    await api.setSettings({ aiApiKey: 'mock-key-e2e', aiBaseUrl: 'http://127.0.0.1:' + port, aiModel: 'mock-mini' });
-    app.state.settings = await api.getSettings();
-    const chunks = [];
-    window.api.onAiChunk((d) => chunks.push(d));
-    const res = await window.api.aiChat({
-      messages: [{ role: 'user', content: '读一下文档' }],
-      baseUrl: app.state.settings.aiBaseUrl,
-      model: 'mock-mini',
-    });
-    const hasText = (res.content || '').indexOf('文档内容已读取') >= 0;
-    // 思考过程属于第 1 轮（工具轮）：经 ai:chunk 流式到达即验证；最终轮返回值不含 reasoning 属正常
-    const hasReason = chunks.some((c) => c.reasoning);
-    // 两轮 usage 累计：15 + 12 = 27
-    const usageOk = res.usage && res.usage.total_tokens === 27;
-    const streamed = chunks.filter((c) => c.text).length >= 4; // 打字机增量确实分块到达
-    return hasText && hasReason && usageOk && streamed
-      ? true
-      : 'content=' + res.content + ',reason=' + (res.reasoning || '') + ',chunks=' + chunks.length + ',usage=' + JSON.stringify(res.usage);
-  });
-
-  await step('aiMockModels', async () => {
-    const ids = await window.api.aiListModels(app.state.settings.aiBaseUrl);
-    const sorted = ids.length === 2 && ids[0] <= ids[1];
-    return Array.isArray(ids) && ids.includes('mock-mini') && ids.includes('mock-pro') && sorted
-      ? true
-      : JSON.stringify(ids);
-  });
-
-  await step('aiSettingsUI', async () => {
-    document.querySelector('#btn-settings').click();
-    await new Promise((r) => setTimeout(r, 200));
-    const selects = Array.from(document.querySelectorAll('#modal-body select'));
-    const preset = selects.find((s2) => Array.from(s2.options).some((o) => o.textContent.includes('硅基流动')));
-    const legacyType = document.querySelector('#modal-body select.ai-model-select'); // 旧「最新版/推理版」下拉应已移除
-    const fetchBtn = Array.from(document.querySelectorAll('#modal-body button')).find((b) => b.textContent.includes('拉取模型列表'));
-    let dlOk = false;
-    if (fetchBtn) {
-      fetchBtn.click();
-      for (let i = 0; i < 20 && !dlOk; i++) {
-        await new Promise((r) => setTimeout(r, 150));
-        dlOk = document.querySelectorAll('#ai-model-datalist option').length >= 2;
-      }
-    }
-    const cancel = document.querySelector('#modal-actions .tbtn');
-    if (cancel) cancel.click();
-    return !!preset && !legacyType && !!fetchBtn && dlOk
-      ? true
-      : 'preset=' + !!preset + ',legacy=' + !!legacyType + ',btn=' + !!fetchBtn + ',dl=' + dlOk;
-  });
-
-  await step('aiClearButton', async () => {
-    const btn = document.querySelector('#btn-ai-clear');
-    if (!btn) return 'no btn';
-    // 面板未打开时 badge 未渲染内容没关系：直接点击清空 → history 复位（再发消息显示未配置提示链路完好）
-    btn.click();
-    await new Promise((r) => setTimeout(r, 100));
-    return true;
-  });
-
-  await step('aiSettingsRestore', async () => {
-    await api.setSettings({ aiBaseUrl: 'https://api.deepseek.com', aiModel: 'deepseek-chat', aiApiKeyClear: true });
-    app.state.settings = await api.getSettings();
-    const ok = app.state.settings.aiBaseUrl === 'https://api.deepseek.com' && !app.state.settings.aiApiKeySet;
-    return ok ? true : 'base=' + app.state.settings.aiBaseUrl + ',keySet=' + app.state.settings.aiApiKeySet;
-  });
-
   // ================= 多主题皮肤（阶段2：主题下拉 / 持久化 / 白名单 / 防闪白 / 明暗适配） =================
   // 本地助手：落盘 + 同步渲染层 state.settings（openSettings 读它）+ 应用。
   // 缺 state.settings 同步会导致后续用例的下拉初值与 data-theme 失真（api.setSettings 不更新渲染层状态）
@@ -2637,6 +2504,200 @@ const RENDERER_TEST = `
       : 'ok=' + ok + ',noMarker=' + noMarker + ',hasTail=' + hasTail + ',len=' + after.content.length + '/' + (before.content.length + TAIL.length);
   });
 
+  // ================= v0.3.0 Phase 0：高危缺陷回归 =================
+
+  // chunkUndoNoTruncate：分段预读/程序化重载不进撤销历史 —— Ctrl+Z 不得缩短文档。
+  // 修复前：撤销会撤掉刚预读的一整段，而 chunk.complete 仍为 true（不会补读）→
+  // 800ms 后自动保存把文件截断（实测 5.39MB → 2.10MB）。
+  await step('chunkUndoNoTruncate', async () => {
+    const p = root + '/undo-chunk.txt';
+    const lines = [];
+    for (let i = 0; i < 100000; i++) lines.push('row-' + i + '-padding-padding-padding-padding-padding-pad');
+    await api.writeFile(p, lines.join('\\n'));
+    const st0 = await api.stat(p);
+    const tab = await app.editor.openFile(p);
+    await app.editor.scrollToBottom(); // 触发 ensureFullyLoaded（补读全部段）
+    await new Promise((r) => setTimeout(r, 700));
+    const view = app.editor.getView();
+    const before = view.state.doc.length;
+    view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, keyCode: 90, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 500));
+    const after = view.state.doc.length;
+    await new Promise((r) => setTimeout(r, 1800)); // 等自动保存落盘
+    const st1 = await api.stat(p);
+    const t2 = app.editor.findTabByPath(p);
+    if (t2) app.editor.closeTab(t2);
+    await api.remove(p, false);
+    const okKind = !!tab && tab.kind === 'chunked';
+    return okKind && after >= before && st1.size >= st0.size
+      ? true
+      : 'kind=' + (tab && tab.kind) + ',doc=' + before + '→' + after + ',size=' + st0.size + '→' + st1.size;
+  });
+
+  // crlfPreserve：CRLF 文件保存后行尾保持 CRLF；LF 文件不得被写成 CRLF。
+  // 修复前：CM6 把 CRLF 归一化为 LF，任何一次保存都会把整个文件的行尾改掉。
+  await step('crlfPreserve', async () => {
+    const crlfPath = root + '/crlf.txt';
+    await api.writeFile(crlfPath, 'line1\\r\\nline2\\r\\nline3\\r\\n');
+    await app.editor.openFile(crlfPath);
+    await new Promise((r) => setTimeout(r, 200));
+    const v1 = app.editor.getView();
+    v1.dispatch({ changes: { from: 0, insert: 'X' } });
+    await new Promise((r) => setTimeout(r, 1600));
+    const c1 = (await api.readFile(crlfPath)).content;
+
+    const lfPath = root + '/lf.txt';
+    await api.writeFile(lfPath, 'a\\nb\\nc\\n');
+    await app.editor.openFile(lfPath);
+    await new Promise((r) => setTimeout(r, 200));
+    const v2 = app.editor.getView();
+    v2.dispatch({ changes: { from: 0, insert: 'Y' } });
+    await new Promise((r) => setTimeout(r, 1600));
+    const c2 = (await api.readFile(lfPath)).content;
+
+    const t1 = app.editor.findTabByPath(crlfPath);
+    if (t1) app.editor.closeTab(t1);
+    const t2 = app.editor.findTabByPath(lfPath);
+    if (t2) app.editor.closeTab(t2);
+    await api.remove(crlfPath, false);
+    await api.remove(lfPath, false);
+    return c1.includes('\\r\\n') && c1.includes('Xline1') && !c2.includes('\\r')
+      ? true
+      : 'crlf=' + JSON.stringify(c1) + ',lf=' + JSON.stringify(c2);
+  });
+
+  // deleteNoResurrect：文件被删除后关闭标签不得把文件写回（save:false）；
+  // 普通关闭仍必须保存（回归保护）。修复前删除会"复活"（dirty 标签被自动保存写回）。
+  await step('deleteNoResurrect', async () => {
+    const p = root + '/resurrect.txt';
+    await api.writeFile(p, 'v1\\n');
+    await app.editor.openFile(p);
+    await new Promise((r) => setTimeout(r, 200));
+    const v = app.editor.getView();
+    v.dispatch({ changes: { from: v.state.doc.length, insert: 'DIRTY\\n' } });
+    await api.remove(p, false); // 主进程删除
+    app.editor.closeByPath(p, false, { save: false });
+    await new Promise((r) => setTimeout(r, 1600));
+    const stillGone = await api.stat(p).then(() => false, () => true);
+
+    const q = root + '/normal-close.txt';
+    await api.writeFile(q, 'n1\\n');
+    await app.editor.openFile(q);
+    await new Promise((r) => setTimeout(r, 200));
+    const v2 = app.editor.getView();
+    v2.dispatch({ changes: { from: v2.state.doc.length, insert: 'N2\\n' } });
+    await app.editor.closeByPath(q, false); // 普通关闭：应保存
+    await new Promise((r) => setTimeout(r, 1600));
+    const c = (await api.readFile(q)).content;
+    await api.remove(q, false);
+    return stillGone && c.includes('N2') ? true : 'gone=' + stillGone + ',normalClose=' + JSON.stringify(c);
+  });
+
+  // pyOutputBigBatch：单批超过 3000 行的输出不再整批丢失。
+  // 修复前 removeChild(null) 抛 TypeError → 面板只剩命令回显/退出两行（实测 6000 行 → 22 字符）。
+  await step('pyOutputBigBatch', async () => {
+    const pyFile = root + '/py-big-batch.py';
+    await api.writeFile(pyFile, 'for i in range(6000):\\n    print(i)\\n');
+    const pys = await api.detectPython();
+    const pyExe = pys.find((p) => /\\.exe$/i.test(p)) || pys[0];
+    await app.editor.openFile(pyFile);
+    document.querySelector('#py-output').innerHTML = '';
+    await new Promise((resolve) => {
+      let done = false;
+      window.api.onPythonExit(() => { if (!done) { done = true; resolve(); } });
+      window.api.runPython(pyFile, pyExe);
+      setTimeout(() => { if (!done) { done = true; resolve(); } }, 25000);
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    const el = document.querySelector('#py-output');
+    const spans = el.childElementCount;
+    const txt = el.textContent || '';
+    await api.remove(pyFile, false);
+    return spans > 1000 && txt.includes('5999') ? true : 'spans=' + spans + ',len=' + txt.length + ',tail=' + txt.slice(-20);
+  });
+
+  // pyOutputUtf8：管道分块边界不得切出替换符（StringDecoder 流式解码）。
+  await step('pyOutputUtf8', async () => {
+    const pyFile = root + '/py-cn-big.py';
+    await api.writeFile(pyFile, 'import sys\\nsys.stdout.write("中" * 100000)\\nsys.stdout.write("\\\\n")\\n');
+    const pys = await api.detectPython();
+    const pyExe = pys.find((p) => /\\.exe$/i.test(p)) || pys[0];
+    await app.editor.openFile(pyFile);
+    document.querySelector('#py-output').innerHTML = '';
+    await new Promise((resolve) => {
+      let done = false;
+      window.api.onPythonExit(() => { if (!done) { done = true; resolve(); } });
+      window.api.runPython(pyFile, pyExe);
+      setTimeout(() => { if (!done) { done = true; resolve(); } }, 25000);
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    const txt = document.querySelector('#py-output').textContent || '';
+    await api.remove(pyFile, false);
+    const fffd = (txt.match(/\\uFFFD/g) || []).length;
+    return fffd === 0 && txt.includes('中') ? true : 'fffd=' + fffd + ',len=' + txt.length;
+  });
+
+  // pyKillAfterRestart：连续启动两次后仍能终止新进程。
+  // 修复前旧进程 close 回调无条件清空 currentProc → python:kill 返回 false（终止按钮无效）、
+  // 面板状态被旧进程退出事件覆盖（显示"已退出"但实际仍在跑）。
+  await step('pyKillAfterRestart', async () => {
+    const a = root + '/kill-a.py';
+    const b = root + '/kill-b.py';
+    await api.writeFile(a, 'import time\\ntime.sleep(2)\\n');
+    await api.writeFile(b, 'import time\\ntime.sleep(8)\\n');
+    const pys = await api.detectPython();
+    const pyExe = pys.find((p) => /\\.exe$/i.test(p)) || pys[0];
+    await app.editor.openFile(a);
+    await api.runPython(a, pyExe);
+    await new Promise((r) => setTimeout(r, 400));
+    await app.editor.openFile(b);
+    await api.runPython(b, pyExe);
+    await new Promise((r) => setTimeout(r, 1300));
+    const running = (document.getElementById('py-status').textContent || '').includes('运行中');
+    const killed = await api.killPython();
+    await new Promise((r) => setTimeout(r, 800));
+    await api.remove(a, false);
+    await api.remove(b, false);
+    return killed === true && running ? true : 'killed=' + killed + ',running=' + running;
+  });
+
+  // diffHugeInsert：超大块新增不再抛 RangeError（旧实现 push(...15 万行) 触发 V8 参数上限 →
+  // 对比区空白且标签栏不刷新，activeTab 已切到该 diff 标签）。
+  await step('diffHugeInsert', async () => {
+    const lines = [];
+    for (let i = 0; i < 150000; i++) lines.push('line ' + i);
+    let thrown = null;
+    let tab = null;
+    try {
+      tab = app.editor.openDiffTab({ leftLabel: 'empty', leftContent: '', rightLabel: 'big', rightContent: lines.join('\\n') });
+    } catch (e) {
+      thrown = String((e && e.message) || e);
+    }
+    await new Promise((r) => setTimeout(r, 700));
+    const hostLen = (document.getElementById('diff-host').innerHTML || '').length;
+    const rows = tab && tab._model ? tab._model.rows.length : 0;
+    app.editor.closeAll();
+    return !thrown && hostLen > 1000 && rows === 150000 ? true : 'thrown=' + thrown + ',host=' + hostLen + ',rows=' + rows;
+  });
+
+  // rcNestedReplace：右键/启动指定目录（fromLaunch）与已打开根存在包含关系时不再直接拒绝 ——
+  // 目标落在已打开根内 → 激活该根并在树中定位；非 fromLaunch（手动添加）仍保持"嵌套拒绝"语义。
+  await step('rcNestedReplace', async () => {
+    await api.create(root, 'rc-nested', 'dir'); // 测试根内的子目录（已有根 = 测试根）
+    const sub = root + '/rc-nested';
+    const before = app.state.sidebarRoots.length;
+    const ok = await app.openDirFromPath(sub, { fromLaunch: true });
+    const after = app.state.sidebarRoots.length;
+    const activeOk = !!app.state.rootDir && app.state.rootDir.toLowerCase() === root.toLowerCase();
+    const rejected = await app.openDirFromPath(sub); // 手动路径：仍应拒绝（既有语义不变）
+    const sameRoot = !!app.state.rootDir && app.state.rootDir.toLowerCase() === root.toLowerCase();
+    await app.openDirFromPath(root);
+    await api.remove(sub, true);
+    return ok === true && after === before && activeOk && rejected === false && sameRoot
+      ? true
+      : 'ok=' + ok + ',roots=' + before + '→' + after + ',active=' + activeOk + ',rejected=' + rejected + ',same=' + sameRoot;
+  });
+
   // findReplace（v0.1.47）：底部查找替换 —— 大小写不敏感；替换当前（选中处）+ 全部替换
   await step('findReplace', async () => {
     await api.writeFile(root + '/replace-me.md', 'foo abc foo\\nnope\\nFOO tail foo');
@@ -2782,6 +2843,26 @@ const RENDERER_TEST = `
   // boundaryViewer：3.9GB 只读查看器（滑页/跳转）+ 512MB 同档 + 4.1GB 拒绝
   await step('boundaryViewer', async () => {
     const tab = await app.editor.openFile(root + '/build/bd-3g9.bin');
+    // v0.4.0 Phase B：>1GB 改走「虚拟滚动查看器」（连续滚动 + 任意位置 O(1) 定位），
+    // 3.9GB 夹具的断言口径随实现切换；512MB 仍在阈值内，保持原分页查看器口径（防回归）。
+    if (tab && tab.kind === 'huge') {
+      const hv = tab.huge;
+      let st0 = hv ? hv.getState() : null;
+      for (let i = 0; i < 25 && !(st0 && st0.renderedRows > 0); i++) { await new Promise((r) => setTimeout(r, 400)); st0 = hv ? hv.getState() : null; }
+      const half = hv ? await hv.scrollToPercent(50) : 0;
+      const st1 = hv ? hv.getState() : null;
+      const linesOk = !!st0 && st0.lines > 0;
+      // 行数极少（全 NUL 稀疏夹具只有 1~2 行）时没有"中点"可校验 → 放行
+      const midOk = !!st0 && linesOk && (st0.lines <= 2 || Math.abs(half - st0.lines / 2) < st0.lines * 0.05);
+      const rowsOk = !!st1 && st1.renderedRows > 0 && st1.renderedRows < 400;
+      const jumpOk = hv ? (await hv.gotoLine(Math.max(1, Math.round((st0 ? st0.lines : 1) * 0.9)))) > 0 : false;
+      const t512 = await app.editor.openFile(root + '/build/bd-512mb.bin');
+      const ok512 = t512 && t512.kind === 'viewer-lg';
+      await app.editor.closeAll();
+      return linesOk && midOk && rowsOk && jumpOk && ok512
+        ? true
+        : 'huge lines=' + (st0 && st0.lines) + ',mid=' + half + ',rows=' + (st1 && st1.renderedRows) + ',jump=' + jumpOk + ',512=' + ok512;
+    }
     const kindOk = tab && tab.kind === 'viewer-lg';
     const barVisible = !document.getElementById('viewer-bar').classList.contains('hidden');
     const posText = (document.getElementById('viewer-pos').textContent || '').includes('%');
@@ -2839,7 +2920,90 @@ const RENDERER_TEST = `
     return on && saved && sizeOk && contentOk && off ? true : 'on=' + on + ',saved=' + saved + ',size=' + sizeOk + '(' + st1.size + '/' + (st0.size + 14) + '),content=' + contentOk + ',off=' + off;
   });
 
+  // viewerReadOnly：>256MB 查看器在「启用区域编辑」前必须是真只读（state.readOnly === true）。
+  // 修复前 openViewerTab 不设 readOnly，switchTab 把它重配成可编辑 → 能直接输入，
+  // 而 saveViewerRegion 因 !editing 静默返回 true（假装保存成功）→ 输入内容随翻页丢失。
+  await step('viewerReadOnly', async () => {
+    const path = root + '/build/bd-280mb.bin';
+    const tab = await app.editor.openFile(path);
+    if (!tab || tab.kind !== 'viewer-lg') {
+      await app.editor.closeAll();
+      return 'kind=' + (tab && tab.kind);
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    const view = app.editor.getView();
+    const readOnlyBefore = view.state.readOnly === true;
+    const barText = (document.getElementById('viewer-pos').textContent || '');
+    const on = await app.editor.setViewerEditing(tab, true);
+    const editableAfter = on === true && app.editor.getView().state.readOnly === false;
+    await app.editor.setViewerEditing(tab, false);
+    await app.editor.closeAll();
+    return readOnlyBefore && editableAfter && barText.includes('只读')
+      ? true
+      : 'ro=' + readOnlyBefore + ',editable=' + editableAfter + ',bar=' + barText;
+  });
+
   // bigSearchStream：15MB 文件流式搜索（原 >10MB 整档跳过；行号全局精确）
+  // v0.4.0 大文件线：行索引 / 索引缓存 / 虚拟滚动查看器（连续滚动 + CodeMirror 让位）/ 大文件搜索原生字节快路径
+  await step('hugeIndexCold', async () => {
+    const p = root + '/build/search15.txt';
+    const st = await api.stat(p);
+    const t0 = performance.now();
+    const idx = await api.hugeIndex(p);
+    const ms = Math.round(performance.now() - t0);
+    const ok = !!idx && idx.lines > 0 && !!idx.encoding && idx.sparse > 0 && idx.bytes === st.size;
+    return ok ? 'cold=' + ms + 'ms,lines=' + idx.lines : 'idx=' + JSON.stringify(idx) + ',size=' + st.size;
+  });
+
+  await step('hugeIndexCache', async () => {
+    const p = root + '/build/search15.txt';
+    const t0 = performance.now();
+    const idx = await api.hugeIndex(p);
+    const ms = Math.round(performance.now() - t0);
+    return idx && idx.cached === true ? 'hot=' + ms + 'ms' : 'cached=' + (idx && idx.cached);
+  });
+
+  // 3.9GB 稀疏夹具：只断言「渲染 + CM 让位 + 切回恢复」（该文件几乎全 NUL，行数可能只有 1~2 行，不做位置数值断言）
+  await step('hugeScrollAnywhere', async () => {
+    const p = root + '/build/bd-3g9.bin';
+    const tab = await app.editor.openFile(p);
+    const kindOk = !!tab && tab.kind === 'huge';
+    let rows = 0;
+    for (let i = 0; i < 30 && rows === 0; i++) {
+      await new Promise((r) => setTimeout(r, 400));
+      const st = tab && tab.huge ? tab.huge.getState() : null;
+      rows = st ? st.renderedRows : 0;
+    }
+    const hv = document.querySelector('.huge-view');
+    const hvH = hv ? hv.getBoundingClientRect().height : 0;
+    const cm = document.querySelector('#editor-host .cm-editor');
+    const cmDisp = cm ? getComputedStyle(cm).display : '(no-cm)';
+    const yielded = cmDisp === 'none' && hvH > 200;
+    if (tab && tab.huge) await tab.huge.scrollToPercent(90);
+    await new Promise((r) => setTimeout(r, 300));
+    const st2 = tab && tab.huge ? tab.huge.getState() : null;
+    const rowsOk = !!st2 && st2.renderedRows > 0 && st2.renderedRows < 400;
+    const q = root + '/huge-plain.txt';
+    await api.writeFile(q, 'plain text');
+    await app.editor.openFile(q);
+    await new Promise((r) => setTimeout(r, 300));
+    const cm2 = document.querySelector('#editor-host .cm-editor');
+    const cmBack = !!cm2 && getComputedStyle(cm2).display !== 'none' && cm2.getBoundingClientRect().height > 0;
+    await app.editor.closeAll();
+    await api.remove(q, false);
+    return kindOk && yielded && rowsOk && cmBack
+      ? true
+      : 'kind=' + kindOk + ',hvH=' + Math.round(hvH) + ',cm=' + cmDisp + ',rows=' + rows + '/' + (st2 && st2.renderedRows) + ',cmBack=' + cmBack;
+  });
+
+  await step('hugeSearchFast', async () => {
+    const t0 = performance.now();
+    const res = await api.globalSearch(root + '/build', 'ZZSTREAM_MARKER_ZZ');
+    const ms = Math.round(performance.now() - t0);
+    const hit = res.length >= 1 && res[0].line > 100000;
+    return hit ? 'search=' + ms + 'ms,hits=' + res.length : 'hits=' + res.length + ',line=' + (res[0] && res[0].line);
+  });
+
   await step('bigSearchStream', async () => {
     const t0 = performance.now();
     const results = await api.globalSearch(root + '/build', 'ZZSTREAM_MARKER_ZZ');
@@ -2874,6 +3038,325 @@ const RENDERER_TEST = `
     await app.editor.closeAll();
     console.log('[stress-savestream] 65MB save=' + ms + 'ms size=' + st1.size);
     return saved && sizeOk && tailOk ? true : 'saved=' + saved + ',size=' + sizeOk + '(' + st1.size + '/' + (st0.size + 3) + '),tail=' + tailOk;
+  });
+
+  // ============ v0.4.0 Phase D 第三步：huge 虚拟滚动查看器「视口内编辑」 ============
+  // 夹具口径：build/ 下唯一 >1GB 的文件是 3.9GB 稀疏 NUL（二进制 → 不可编辑），能编辑的真实文本
+  // 大文件只有 280MB 的 bd-280mb.bin，而它按默认阈值分档到 viewer-lg。因此三个用例各自：
+  //   setHugeThresholdMB(200) → 打开 → 断言 → finally { closeAll + setHugeThresholdMB(1024) }
+  // 阈值是模块级运行时值（tabs.js 的 hugeScrollThreshold），**必须恢复**，否则后续分档用例
+  // （viewer-lg / huge）的预期会被打乱。夹具本体只读保护：每个用例把 bd-280mb.bin 复制到
+  // build/huge-<tag>/ 下再编辑，用例末尾删除副本，并断言夹具本体 size + mtime 一字未动。
+  const HUGE_FIXTURE = root + '/build/bd-280mb.bin';
+  const hugeFixtureStat = () => api.stat(HUGE_FIXTURE);
+  const hugeCopyFixture = async (tag) => {
+    const dir = root + '/build/huge-' + tag;
+    await api.create(root + '/build', 'huge-' + tag, 'dir');
+    const r = await api.transferFiles(HUGE_FIXTURE, dir, 'copy'); // 同 rootDir 内副本（requireApproved 覆盖）
+    return { dir: dir, file: dir + '/bd-280mb.bin', dest: r && r.dest };
+  };
+  const hugeWaitReady = async (hv, ms) => {
+    let st = null;
+    for (let i = 0; i < 40; i++) {
+      st = hv ? hv.getState() : null;
+      if (st && st.indexed && st.renderedRows > 0) return st;
+      await new Promise((r) => setTimeout(r, ms || 250));
+    }
+    return st;
+  };
+  const hugeWaitFor = async (fn, ms) => {
+    for (let i = 0; i < 40; i++) {
+      if (fn()) return true;
+      await new Promise((r) => setTimeout(r, ms || 180));
+    }
+    return fn();
+  };
+  const hugeKey = (el, k, opts) => {
+    const o = { key: k, bubbles: true, cancelable: true };
+    if (opts) for (const kk of Object.keys(opts)) o[kk] = opts[kk];
+    el.dispatchEvent(new KeyboardEvent('keydown', o));
+  };
+
+  // hugeEditChunkCoW：视口内编辑走 overlay 块级 CoW —— 中部插入 3 行后行数 +3（渲染端 getState
+  // 与主进程 huge:doc-state 双口径一致）、isDirty 为真、undoDepth≥1，且**磁盘字节未变**
+  // （内存 vs 磁盘对照）；随后用真实 Ctrl+Z 键盘事件复原（键路由挂在 .huge-view 根节点上）。
+  await step('hugeEditChunkCoW', async () => {
+    const fix0 = await hugeFixtureStat();
+    const ctx = await hugeCopyFixture('cow');
+    app.editor.setHugeThresholdMB(200);
+    try {
+      const tab = await app.editor.openFile(ctx.file);
+      const hv = tab ? tab.huge : null;
+      const kindOk = !!tab && tab.kind === 'huge';
+      const st0 = await hugeWaitReady(hv);
+      if (!kindOk || !hv || !st0) return 'kind=' + (tab && tab.kind) + ',hv=' + !!hv + ',st=' + JSON.stringify(st0);
+      const on = await hv.setEditable(true);
+      const docId = hv.getState().docId;
+      const before = hv.getState().lines;
+      const mid = Math.max(2, Math.floor(before / 2));
+      const origMid = (await api.hugeDocLine({ docId: docId, line: mid })).text;
+      const r1 = await hv.applyEditForTest({ type: 'insert', line: mid, col: 0, text: 'MH_COW_A\\nMH_COW_B\\nMH_COW_C\\n' });
+      const st1 = hv.getState();
+      const ds1 = await api.hugeDocState({ docId: docId });
+      const linesOk = !!r1 && st1.lines === before + 3 && ds1.lines === before + 3;
+      const dirtyOk = hv.isDirty() === true && ds1.dirty === true;
+      const undoOk = st1.undoDepth >= 1 && ds1.undoDepth >= 1;
+      const midText = (await api.hugeDocLine({ docId: docId, line: mid })).text;
+      const contentOk = midText === 'MH_COW_A';
+      const diskSt = await api.stat(ctx.file);
+      const offMid = await api.hugeLineOffset(ctx.file, mid);
+      const rr = await api.readFileRange(ctx.file, Math.max(0, offMid - 8), 128);
+      const diskMid = new TextDecoder('utf-8').decode(rr.bytes);
+      const diskOk = diskSt.size === fix0.size && diskMid.indexOf('MH_COW_') < 0;
+      // 真实键盘事件：一次编辑 = 一个撤销项 → 一条 Ctrl+Z 即复原
+      const rootEl = tab.hugeEl || document.querySelector('.huge-view');
+      hugeKey(rootEl, 'z', { ctrlKey: true });
+      const backOk = await hugeWaitFor(() => hv.getState().lines === before && hv.isDirty() === false);
+      const midBack = (await api.hugeDocLine({ docId: docId, line: mid })).text;
+      const ds2 = await api.hugeDocState({ docId: docId });
+      const fix1 = await hugeFixtureStat();
+      const fixOk = fix1.size === fix0.size && fix1.mtime === fix0.mtime;
+      const ok = kindOk && on === true && linesOk && dirtyOk && undoOk && contentOk && diskOk &&
+        backOk && midBack === origMid && ds2.redoDepth >= 1 && fixOk;
+      return ok ? true
+        : 'kind=' + kindOk + ',on=' + on + ',lines=' + linesOk + '(' + st1.lines + '/' + ds1.lines + '/' + (before + 3) +
+          '),dirty=' + dirtyOk + ',undo=' + undoOk + '(' + st1.undoDepth + '),content=' + contentOk +
+          ',disk=' + diskOk + ',back=' + backOk + ',midBack=' + (midBack === origMid) + ',redo=' + ds2.redoDepth + ',fix=' + fixOk;
+    } finally {
+      await app.editor.closeAll();
+      app.editor.setHugeThresholdMB(1024);
+      // 关标签可能在后台保存（huge 关闭=先保存再关会话）→ 删除副本要重试，避免撞上临时文件/句柄
+      for (let i = 0; i < 10; i++) {
+        try { await api.remove(ctx.dir, true); break; } catch { await new Promise((r) => setTimeout(r, 400)); }
+      }
+    }
+  });
+
+  // hugeEditSaveAtomic：保存走 huge:doc-save（干净块原字节拷贝 + overlay 分片 → 临时文件 → fsync →
+  // 校验字节数 → rename）。断言全落在**磁盘事实**：字节数 = 原大小 + 插入串长度、按行索引定位后读回
+  // 标记内容（同时证明保存后行索引重建可用、跳转仍准）、目标目录无 .mh-ovl-*.tmp 残留、
+  // 进度事件序列 copy→verify→rename→done（渲染端自订阅收集）。
+  await step('hugeEditSaveAtomic', async () => {
+    const fix0 = await hugeFixtureStat();
+    const ctx = await hugeCopyFixture('save');
+    app.editor.setHugeThresholdMB(200);
+    let offProg = null;
+    try {
+      const copy0 = await api.stat(ctx.file);
+      const tab = await app.editor.openFile(ctx.file);
+      const hv = tab ? tab.huge : null;
+      const st0 = await hugeWaitReady(hv);
+      if (!tab || tab.kind !== 'huge' || !hv || !st0) return 'kind=' + (tab && tab.kind) + ',hv=' + !!hv;
+      const on = await hv.setEditable(true);
+      const before = hv.getState().lines;
+      const mid = Math.max(2, Math.floor(before / 2));
+      const MARK = 'MH_SAVE_ATOMIC_9f3c\\n';
+      const phases = [];
+      offProg = api.onHugeDocSaveProgress((d) => { if (d && d.phase) phases.push(d.phase); });
+      const r1 = await hv.applyEditForTest({ type: 'insert', line: mid, col: 0, text: MARK });
+      const dirtyBefore = hv.isDirty();
+      const saved = await hv.save();
+      // 进度事件（sender.send）与 invoke 回执同管但顺序不作保证 → 等一拍再退订，避免漏掉 'done'
+      await new Promise((r) => setTimeout(r, 400));
+      if (typeof offProg === 'function') { offProg(); offProg = null; }
+      const st1 = await api.stat(ctx.file);
+      const sizeOk = st1.size === copy0.size + MARK.length;
+      const dirtyOk = dirtyBefore === true && hv.isDirty() === false;
+      const docId = hv.getState().docId;
+      const ds = await api.hugeDocState({ docId: docId });
+      const linesOk = ds.lines === before + 1 && hv.getState().lines === before + 1;
+      const offMid = await api.hugeLineOffset(ctx.file, mid); // 保存后索引重建 → 行号定位必须仍然准
+      const rr = await api.readFileRange(ctx.file, Math.max(0, offMid - 4), 64);
+      const diskText = new TextDecoder('utf-8').decode(rr.bytes);
+      const diskOk = diskText.indexOf('MH_SAVE_ATOMIC_9f3c') >= 0;
+      const idx = await api.hugeIndex(ctx.file);
+      const idxOk = !!idx && idx.lines === ds.lines && idx.bytes === st1.size;
+      const entries = await api.readTree(ctx.dir);
+      const tmpLeft = entries.filter((e) => String(e.name).indexOf('.mh-ovl-') >= 0).length;
+      const order = ['copy', 'verify', 'rename', 'done'];
+      let seqOk = phases.indexOf('copy') >= 0;
+      for (let i = 1; i < order.length; i++) seqOk = seqOk && phases.indexOf(order[i]) > phases.indexOf(order[i - 1]);
+      const fix1 = await hugeFixtureStat();
+      const fixOk = fix1.size === fix0.size && fix1.mtime === fix0.mtime;
+      const ok = !!r1 && on === true && saved === true && sizeOk && dirtyOk && linesOk && diskOk && idxOk && tmpLeft === 0 && seqOk && fixOk;
+      return ok ? true
+        : 'on=' + on + ',saved=' + saved + ',size=' + sizeOk + '(' + st1.size + '/' + (copy0.size + MARK.length) + ')' +
+          ',dirty=' + dirtyOk + ',lines=' + linesOk + '(' + ds.lines + '/' + (before + 1) + '),disk=' + diskOk +
+          ',idx=' + idxOk + ',tmp=' + tmpLeft + ',seq=' + seqOk + '(' + phases.join('>') + '),fix=' + fixOk;
+    } finally {
+      if (typeof offProg === 'function') { offProg(); offProg = null; }
+      await app.editor.closeAll();
+      app.editor.setHugeThresholdMB(1024);
+      // 关标签可能在后台保存（huge 关闭=先保存再关会话）→ 删除副本要重试，避免撞上临时文件/句柄
+      for (let i = 0; i < 10; i++) {
+        try { await api.remove(ctx.dir, true); break; } catch { await new Promise((r) => setTimeout(r, 400)); }
+      }
+    }
+  });
+
+  // hugeEditUndo：真实键盘事件驱动的多次编辑（输入字符 / Home / Enter）+ undo/redo 往返一致 ——
+  // 反复 Ctrl+Z 回到原文（行数/内容/脏标记/canRedo 同步），再反复 Ctrl+Y 前进到编辑后状态
+  // （行数/内容/undoDepth/canUndo 同步）。
+  await step('hugeEditUndo', async () => {
+    const fix0 = await hugeFixtureStat();
+    const ctx = await hugeCopyFixture('undo');
+    app.editor.setHugeThresholdMB(200);
+    try {
+      const tab = await app.editor.openFile(ctx.file);
+      const hv = tab ? tab.huge : null;
+      const st0 = await hugeWaitReady(hv);
+      if (!tab || tab.kind !== 'huge' || !hv || !st0) return 'kind=' + (tab && tab.kind) + ',hv=' + !!hv;
+      const on = await hv.setEditable(true);
+      const rootEl = tab.hugeEl || document.querySelector('.huge-view');
+      const before = hv.getState().lines;
+      // ① 真实鼠标路径落光标：点视口内第一行（x 落在行号栏 → 列按行尾处理）
+      const rowEl = rootEl.querySelector('.huge-line');
+      if (!rowEl) return 'no row';
+      const ln = parseInt(rowEl.dataset.line, 10);
+      const rect = rowEl.getBoundingClientRect();
+      rowEl.dispatchEvent(new MouseEvent('mousedown', {
+        bubbles: true, cancelable: true, button: 0, clientX: rect.left + 30, clientY: rect.top + 8,
+      }));
+      const caretOk = await hugeWaitFor(() => {
+        const c = hv.getState().caret;
+        return !!c && c.line === ln;
+      });
+      const origLine = (await api.hugeDocLine({ docId: hv.getState().docId, line: ln })).text;
+      // ② 输入 / 换行（每步等 undoDepth 增长 → 时序确定，不靠固定 sleep）
+      const depth = () => hv.getState().undoDepth;
+      hugeKey(rootEl, 'M');
+      const d1 = await hugeWaitFor(() => depth() >= 1);
+      hugeKey(rootEl, 'H');
+      const d2 = await hugeWaitFor(() => depth() >= 2);
+      hugeKey(rootEl, 'Home');
+      const homeOk = await hugeWaitFor(() => { const c = hv.getState().caret; return !!c && c.col === 0; });
+      hugeKey(rootEl, 'Z');
+      const d3 = await hugeWaitFor(() => depth() >= 3);
+      hugeKey(rootEl, 'Enter'); // 光标在 'Z' 之后 → 行裂成两行（行数 +1）
+      const grew = await hugeWaitFor(() => hv.getState().lines === before + 1);
+      hugeKey(rootEl, 'Y');
+      const d4 = await hugeWaitFor(() => depth() >= 4);
+      hugeKey(rootEl, 'Y');
+      const d5 = await hugeWaitFor(() => depth() >= 5);
+      const docId = hv.getState().docId;
+      const editedLine = (await api.hugeDocLine({ docId: docId, line: ln })).text;
+      const editedNext = (await api.hugeDocLine({ docId: docId, line: ln + 1 })).text;
+      const editedState = hv.getState();
+      // 期望：'Z' 插到行首 → 回车把它切成两行 → 'YY' 落在新行行首
+      const editOk = editedState.lines === before + 1 && hv.isDirty() === true && editedState.canUndo === true &&
+        editedLine === 'Z' && editedNext === 'YY' + origLine + 'MH' && editedState.undoDepth >= 5;
+      // ③ 全部撤销 → 与原文逐字一致
+      let undone = 0;
+      while (hv.getState().canUndo && undone < 12) {
+        const d = hv.getState().undoDepth;
+        hugeKey(rootEl, 'z', { ctrlKey: true });
+        await hugeWaitFor(() => hv.getState().undoDepth < d, 120);
+        undone++;
+      }
+      const backState = hv.getState();
+      const backLine = (await api.hugeDocLine({ docId: docId, line: ln })).text;
+      const undoOk = backState.lines === before && hv.isDirty() === false && backLine === origLine &&
+        backState.canRedo === true && backState.undoDepth === 0 && backState.redoDepth === editedState.undoDepth;
+      // ④ 全部重做 → 回到编辑后状态
+      const redoTarget = editedState.undoDepth;
+      let redone = 0;
+      while (hv.getState().canRedo && redone < 12) {
+        const d = hv.getState().redoDepth;
+        hugeKey(rootEl, 'y', { ctrlKey: true });
+        await hugeWaitFor(() => hv.getState().redoDepth < d, 120);
+        redone++;
+      }
+      const fwdState = hv.getState();
+      const fwdLine = (await api.hugeDocLine({ docId: docId, line: ln })).text;
+      const fwdNext = (await api.hugeDocLine({ docId: docId, line: ln + 1 })).text;
+      const redoOk = fwdState.lines === before + 1 && fwdState.undoDepth === redoTarget &&
+        fwdState.canUndo === true && fwdState.canRedo === false && fwdLine === 'Z' &&
+        fwdNext === 'YY' + origLine + 'MH' && hv.isDirty() === true;
+      const fix1 = await hugeFixtureStat();
+      const fixOk = fix1.size === fix0.size && fix1.mtime === fix0.mtime;
+      // ⑤ 收尾：再全部撤销回干净状态（第三次往返一致性校验；同时避免 closeAll 又写一次 280MB）
+      let undone2 = 0;
+      while (hv.getState().canUndo && undone2 < 12) {
+        const d = hv.getState().undoDepth;
+        hugeKey(rootEl, 'z', { ctrlKey: true });
+        await hugeWaitFor(() => hv.getState().undoDepth < d, 120);
+        undone2++;
+      }
+      const cleanOk = hv.getState().lines === before && hv.isDirty() === false && redone === redoTarget;
+      const ok = on === true && caretOk && d1 && d2 && homeOk && d3 && grew && d4 && d5 && editOk && undoOk && redoOk && cleanOk && fixOk;
+      return ok ? true
+        : 'on=' + on + ',caret=' + caretOk + ',keys=' + [d1, d2, homeOk, d3, grew, d4, d5].join('/') +
+          ',edit=' + editOk + '(ln=' + editedState.lines + '/' + (before + 1) + ',l=' + JSON.stringify(editedLine.slice(0, 16)) +
+          ',n=' + JSON.stringify(editedNext.slice(0, 20)) + ',depth=' + editedState.undoDepth + ')' +
+          ',undo=' + undoOk + '(n=' + undone + ',ln=' + backState.lines + ',line=' + (backLine === origLine) + ',redo=' + backState.redoDepth + ')' +
+          ',redo=' + redoOk + '(n=' + redone + ',ln=' + fwdState.lines + ',depth=' + fwdState.undoDepth + '/' + redoTarget + ',canRedo=' + fwdState.canRedo + ')' +
+          ',clean=' + cleanOk + '(n=' + undone2 + '),fix=' + fixOk;
+    } finally {
+      await app.editor.closeAll();
+      app.editor.setHugeThresholdMB(1024);
+      // 关标签可能在后台保存（huge 关闭=先保存再关会话）→ 删除副本要重试，避免撞上临时文件/句柄
+      for (let i = 0; i < 10; i++) {
+        try { await api.remove(ctx.dir, true); break; } catch { await new Promise((r) => setTimeout(r, 400)); }
+      }
+    }
+  });
+
+  // hugeEditReadOnly（v0.5.0 挂账项）：editable === false 的**只读路径**此前只有代码、没有自动断言。
+  // 夹具：build/bd-3g9.bin = 3.9GB **稀疏 NUL** 文件 —— 正文含 NUL → src/main/overlay.js 的
+  // checkEditable（overlay.js:240-244）判「二进制内容（含 NUL 字节，按文本近似显示），暂不支持编辑」；
+  // 且 3.9GB > 1GB 默认阈值 → 天然落 huge 档，**不需要 setHugeThresholdMB**，
+  // 因此与 hugeEditChunkCoW/SaveAtomic/Undo 三条「临时降档到 200MB」的用例**不交叉**。
+  // 双口径（都不看内部 flag，只读两条真实契约）：
+  //   ① 主进程契约：直接 api.hugeDocOpen({file}) 读回 editable/reason（不经过渲染端封装）；
+  //   ② 渲染端事实：huge 视图 hv.setEditable(true) 必须被拒（返回 false），且 getState() 里
+  //      editable === false（视图没进编辑态）/ docEditable === false（主进程判定）/
+  //      editableReason 非空且与 ① 的 reason **逐字一致**；根节点上没有 huge-editable 类；
+  //      状态条文案含「只读」（hugeview.js:650-654 的落点）；且没有产生任何未保存修改。
+  await step('hugeEditReadOnly', async () => {
+    const FILE = root + '/build/bd-3g9.bin';
+    let directId = null;
+    let direct = null;
+    let directErr = '';
+    try {
+      // ① 主进程契约（此刻该 realpath 还没有任何编辑会话 → 走「新建」分支，返回必带 editable/reason）。
+      //    单独 try：即便 open 本身抛错，也要把渲染端的只读口径跑完并把错误原样带进证据串，
+      //    而不是整条用例只留一个裸 ERR（那样无法判断是契约不符还是打开失败）。
+      try {
+        direct = await api.hugeDocOpen({ file: FILE });
+      } catch (e) {
+        directErr = String((e && e.message) || e);
+      }
+      directId = direct && direct.docId != null ? direct.docId : null;
+      const directOk = !!direct && direct.editable === false &&
+        typeof direct.reason === 'string' && direct.reason.length > 0;
+      if (directId != null) { await api.hugeDocClose({ docId: directId }); directId = null; } // 立刻还回去，不留句柄
+      // ② 渲染端事实
+      const tab = await app.editor.openFile(FILE);
+      const hv = tab ? tab.huge : null;
+      const st0 = await hugeWaitReady(hv, 400);
+      if (!tab || tab.kind !== 'huge' || !hv || !st0) {
+        return 'kind=' + (tab && tab.kind) + ',hv=' + !!hv + ',st=' + JSON.stringify(st0);
+      }
+      const on = await hv.setEditable(true); // 必须被拒（hugeview.js:650）
+      const st1 = hv.getState();
+      const rootEl = tab.hugeEl || document.querySelector('.huge-view');
+      const viewOk = on === false && st1.editable === false && st1.docEditable === false;
+      const reasonOk = typeof st1.editableReason === 'string' && st1.editableReason.length > 0 &&
+        st1.editableReason === direct.reason;
+      const clsOk = !!rootEl && !rootEl.classList.contains('huge-editable');
+      const statusText = rootEl ? ((rootEl.querySelector('.huge-status-text') || {}).textContent || '') : '';
+      const statusOk = statusText.indexOf('只读') >= 0;
+      const cleanOk = st1.dirty === false && st1.undoDepth === 0 && hv.isDirty() === false;
+      const ok = directOk && viewOk && reasonOk && clsOk && statusOk && cleanOk;
+      return ok ? true
+        : 'direct=' + directOk + '(editable=' + (direct && direct.editable) + ',reason=' + JSON.stringify(direct && direct.reason) + (directErr ? ',ERR=' + directErr : '') + ')' +
+          ',view=' + viewOk + '(on=' + on + ',editable=' + st1.editable + ',docEditable=' + st1.docEditable + ')' +
+          ',reason=' + reasonOk + ',cls=' + clsOk + ',status=' + statusOk + '(' + JSON.stringify(String(statusText).slice(0, 48)) + ')' +
+          ',clean=' + cleanOk + '(dirty=' + st1.dirty + ',undo=' + st1.undoDepth + ',isDirty=' + hv.isDirty() + ')';
+    } finally {
+      if (directId != null) { try { await api.hugeDocClose({ docId: directId }); } catch { /* 已关闭 */ } }
+      await app.editor.closeAll();
+    }
   });
 
   // bigFileTeardown：恢复默认上限与干净会话
@@ -3075,6 +3558,298 @@ const RENDERER_TEST = `
     return noNull && onlyFile ? true : 'paths=' + JSON.stringify(s.paths);
   });
 
+  // ============ 0.5.0 挂账收尾：huge:doc-recover-list 的渲染端消费方（崩溃恢复） ============
+  // 夹具口径：**自造 24MB 文本**（30000 行 × 769B）——
+  //   · < 复位后的 50MB 打开上限（tabs.js:1042）⇒ **不动 settings.maxFileSizeMB**；
+  //   · > minOpenBytes(16MB) ⇒ 「huge:doc-open」**不带 force** 的那条路（hugeview.ensureDoc）也能开；
+  //   · 配 「setHugeThresholdMB(1)」 ⇒ tabs.js:1047 的 huge 判据在 viewer(>256MB)/chunked(>4MB) 之前命中。
+  // 「崩溃」= closeByPath(file, false, {save:false})：huge 关标签时 closeDoc(false) 会先 flushMeta
+  // 把块表 + 字节仓库留在 <userData>/overlay 下，源文件字节一个都不动。
+  // 断言全部落在产品事实：主进程行数（huge:doc-state）/ 抽行内容（huge:doc-line）/ 源文件 stat 与
+  // 内容 / 恢复区文件是否还在 / chip 文案 / 弹窗 DOM 结构 —— 无时序性判据（等待一律轮询到事实出现），
+  // 无长度等价性判据（等价性用内容标记）。
+  const recSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const recExists = async (p) => { try { await api.stat(p); return true; } catch (e) { return false; } };
+  // 等"恢复区条目能被列出"：关标签后的 persistMeta 是**异步强刷**（overlay.js:1221），
+  // 因此轮询到条目出现为止，而不是写一个固定 sleep 赌时序（本批 G1 就是这么踩的坑）。
+  const recWaitListed = async (file, tries) => {
+    for (let i = 0; i < (tries || 24); i++) {
+      const items = await app.recover.list();
+      const hit = items.filter((x) => x.file === file)[0];
+      if (hit) return hit;
+      await recSleep(250);
+    }
+    return null;
+  };
+  // 等主进程侧的编辑会话真的释放（「huge:doc-state」对已释放句柄会抛「DOC_GONE」，overlay-ipc.js:181）。
+  // 为什么需要它：「closeByPath(..., {save:false})」→「hv.closeDoc(false)」是 fire-and-forget，而 overlay 的
+  // 「close」是**先 await persistMeta（写 <key>.json）再 detachHandle**（overlay-ipc.js:416-417）——
+  // 所以「句柄已释放」恰好等价于「这次强刷已落盘」，此后删恢复区文件才是无竞态的（有界轮询，不赌固定延时）。
+  const recWaitSessionGone = async (docId) => {
+    for (let i = 0; i < 20; i++) {
+      let alive = true;
+      try {
+        const st = await api.hugeDocState({ docId: docId });
+        alive = !!(st && st.ok !== false && st.lines != null);
+      } catch (e) { alive = false; } // DOC_GONE：句柄已释放
+      if (!alive) return true;
+      await recSleep(150);
+    }
+    return false;
+  };
+  // 清场：把指向某文件的恢复区条目全部丢弃 → 删后 stat 复核 overlay 两文件都不在 → 返回 chip 显隐。
+  const recCleanup = async (file, dirPrefix) => {
+    const keys = [];
+    const first = await recWaitListed(file, 6);
+    if (first) keys.push(first.key);
+    for (const it of await app.recover.list()) {
+      if (it && dirPrefix && String(it.file).indexOf(dirPrefix) === 0) keys.push(it.key);
+    }
+    let removed = 0;
+    for (const k of keys) {
+      const r = await app.recover.discard({ key: k, file: file });
+      if (r && r.ok) removed++;
+    }
+    const dir = app.recover.getState().dir;
+    const left = [];
+    for (const k of keys) {
+      for (const ext of ['.json', '.tmp']) {
+        try { await api.stat(dir + '/' + k + ext); left.push(k + ext); } catch (e) { /* 已删除 */ }
+      }
+    }
+    const gs = app.recover.getState();
+    return { removed: removed, keys: keys.length, left: left, chipHidden: gs.chipVisible === false, count: gs.count };
+  };
+  // 自造夹具（24MB 文本；返回 dir/file，供 recCrashAt 与会话清理共用）
+  const recMakeFixture = async (tag) => {
+    const dir = root + '/build/recover-' + tag;
+    const file = dir + '/rec-' + tag + '.txt';
+    // 先清残留：fs:create 对已存在同名项直接抛错（ipc.js:219「已存在同名项」），
+    // 上一轮被中断的运行若留下 build/recover-<tag>/，本用例会在夹具阶段就以 ERR 红。
+    try { await api.remove(dir, true); } catch (e) { /* 不存在或残留不可删：下一步 create 会给出真实原因 */ }
+    await api.create(root + '/build', 'recover-' + tag, 'dir');
+    const lines = [];
+    for (let i = 0; i < 30000; i++) lines.push('R' + String(i).padStart(6, '0') + '|' + 'y'.repeat(760));
+    const text = lines.join('\\n') + '\\n';
+    await api.writeFile(file, text);
+    return { dir: dir, file: file, lines: lines.length };
+  };
+  // 造一条"崩溃现场"：开 huge 标签 → 启用编辑 → 中间插一行标记 → **不保存关闭**（块表保留）
+  const recCrashAt = async (ctx, marker) => {
+    const tab = await app.editor.openFile(ctx.file);
+    const hv = tab ? tab.huge : null;
+    const st0 = await hugeWaitReady(hv);
+    if (!tab || tab.kind !== 'huge' || !hv || !st0) {
+      return { err: 'kind=' + (tab && tab.kind) + ',hv=' + !!hv + ',st=' + JSON.stringify(st0) };
+    }
+    const on = await hv.setEditable(true);
+    if (on !== true) return { err: 'editable=' + on };
+    const docId = hv.getState().docId;
+    const before = hv.getState().lines;
+    const mid = Math.max(2, Math.floor(before / 2));
+    const origMid = (await api.hugeDocLine({ docId: docId, line: mid })).text;
+    const r = await hv.applyEditForTest({ type: 'insert', line: mid, col: 0, text: marker + '\\n' });
+    const ds = await api.hugeDocState({ docId: docId });
+    const fixStat = await api.stat(ctx.file);
+    app.editor.closeByPath(ctx.file, false, { save: false }); // 不保存关闭 = 崩溃现场（overlay 保留）
+    const listed = await recWaitListed(ctx.file);              // 轮询等 persistMeta 落盘（不赌固定时序）
+    return { ctx: ctx, dir: ctx.dir, file: ctx.file, marker: marker, mid: mid, origMid: origMid,
+      before: before, docLines: ds.lines, dirty: ds.dirty, inserted: !!r, fixStat: fixStat, listed: !!listed };
+  };
+
+  // hugeRecoverPrompt：入口（chip + 弹窗）→ 恢复 → 内容/行数/源文件零改动全绿 → 清场归隐
+  await step('hugeRecoverPrompt', async () => {
+    app.editor.setHugeThresholdMB(1);
+    let ctxA = null;
+    try {
+      ctxA = await recMakeFixture('a');
+      const fx = await recCrashAt(ctxA, 'MH_REC_A');
+      if (fx.err) return 'fixture=' + fx.err;
+      const crashOk = fx.dirty === true && fx.inserted === true && fx.docLines === fx.before + 1 && fx.listed === true;
+      // 入口：走 boot 同一条路（recover.init = 刷新 + 点亮状态栏 chip + 非模态提示）
+      await app.recover.init();
+      const s1 = app.recover.getState();
+      const it = s1.items.filter((x) => x.file === fx.file)[0];
+      const listOk = !!it && it.lines === fx.docLines && it.dirtyBlocks >= 1 && it.sourceExists === true;
+      const chipOk = s1.chipVisible === true && s1.chipText.indexOf('可恢复') >= 0;
+      app.recover.openDialog();
+      const s2 = app.recover.getState();
+      const row = it ? document.querySelector('.recover-item[data-key="' + it.key + '"]') : null;
+      const rowText = row ? row.textContent : '';
+      const dialogOk = s2.dialogOpen === true && !!row && !!row.querySelector('.recover-ok') &&
+        !!row.querySelector('.recover-drop') && rowText.indexOf('未保存修改') >= 0;
+      // 恢复：内容断言用**内容标记**（插入行 = 标记串；被插入行下移一位后应与编辑前逐字相同）
+      const rr = await app.recover.recover({ key: it.key, file: fx.file });
+      const s3 = app.recover.getState();
+      const callOk = !!rr && rr.ok === true && rr.lines === fx.docLines && rr.attached === true;
+      const midText = callOk ? (await api.hugeDocLine({ docId: rr.docId, line: fx.mid })).text : null;
+      const nextText = callOk ? (await api.hugeDocLine({ docId: rr.docId, line: fx.mid + 1 })).text : null;
+      const contentOk = midText === fx.marker && nextText === fx.origMid;
+      const dsAfter = callOk ? await api.hugeDocState({ docId: rr.docId }) : null;
+      const linesOk = !!dsAfter && dsAfter.lines === fx.docLines && dsAfter.dirty === true;
+      const tab2 = app.editor.findTabByPath(fx.file);
+      const tabOk = !!tab2 && tab2.kind === 'huge' && !!tab2.huge && tab2.huge.getState().docId === rr.docId;
+      const diskStat = await api.stat(fx.file);
+      const diskOk = diskStat.size === fx.fixStat.size && diskStat.mtime === fx.fixStat.mtime;
+      const msgOk = s3.msg.indexOf('已恢复') >= 0 && s3.lastError === '';
+      // 清场 + 归隐断言：恢复成功后 <key>.json/.tmp 仍在恢复区（产品语义），用例必须自己删净，
+      // 否则后续窗口 boot（mw* 的 win2、rcDir 子进程）会点亮 chip 并多一条提示。
+      //
+      // ⚠️ 清场前必须先关掉刚被恢复打开的那个标签（否则 removed=0，用例必红）——两个独立机制：
+      //   ① recover.js 的「refresh()」会用「isOpenHere(file)」**过滤掉本窗口已打开的文件**（:140）
+      //      ⇒ 恢复后该条目**根本不在列表里**，recCleanup 的 keys 为空；
+      //   ② 即便拿得到 key，「doDiscard」的守卫①是「本窗口 huge 标签且 docId 非空 ⇒ 拒绝」（:493-496）。
+      //   真实用户流程也正是「恢复 → 看过内容 → 关掉标签 → 再丢弃」。
+      // 关闭用「{save:false}」：**不写源文件**（与 closeTab 的 save:false 语义一致，tabs.js:2370/2379）；
+      // 随后必须**等到主进程句柄真的释放**再删 —— closeTab 里的「closeDoc(false)」是 fire-and-forget，
+      // 其 persistMeta 是异步 rename；不等就可能出现「先删掉 <key>.json、随后这次 flush 又把它写回来」
+      // （残留复核会抓到，但那时用例已经红了，且残留会污染后续 boot）。
+      app.editor.closeByPath(fx.file, false, { save: false });
+      const closedOk = !app.editor.findTabByPath(fx.file);
+      const goneOk = (rr && rr.docId != null) ? await recWaitSessionGone(rr.docId) : true;
+      const cl = await recCleanup(fx.file, ctxA.dir);
+      const gs4 = app.recover.getState();
+      const cleanOk = cl.removed >= 1 && cl.left.length === 0 && cl.chipHidden === true
+        && gs4.items.every((x) => x.file !== fx.file);
+      const ok = crashOk && listOk && chipOk && dialogOk && callOk && contentOk && linesOk && tabOk && diskOk && msgOk
+        && closedOk && goneOk && cleanOk;
+      return ok ? true
+        : 'crash=' + crashOk + ',list=' + listOk + '(n=' + s1.count + '),chip=' + chipOk + '[' + s1.chipText + ']' +
+          ',dialog=' + dialogOk + '(open=' + s2.dialogOpen + ',row=' + !!row + ')' +
+          ',call=' + callOk + '(' + JSON.stringify(rr) + '),content=' + contentOk +
+          '(mid=' + JSON.stringify(midText) + ',next=' + JSON.stringify(nextText) + ',want=' + JSON.stringify(fx.origMid) + ')' +
+          ',lines=' + linesOk + '(' + (dsAfter && dsAfter.lines) + '/' + fx.docLines + ',dirty=' + (dsAfter && dsAfter.dirty) + ')' +
+          ',tab=' + tabOk + ',disk=' + diskOk + '(' + diskStat.size + '/' + fx.fixStat.size + ')' +
+          ',msg=' + msgOk + '[' + s3.msg + ']' +
+          ',closed=' + closedOk + ',gone=' + goneOk +
+          ',clean=' + cleanOk + '(removed=' + cl.removed + '/keys=' + cl.keys + ',left=' + JSON.stringify(cl.left) +
+          ',chipHidden=' + cl.chipHidden + ',count=' + cl.count + ')';
+    } finally {
+      try { document.getElementById('modal-mask').classList.add('hidden'); } catch (e) {}
+      try { await app.editor.closeAll(); } catch (e) {}
+      // 阈值恢复必须无条件执行：recMakeFixture 内的 api.create/api.writeFile 会抛，抛时 ctxA 仍是 null
+      // —— 若把恢复写在 if (ctxA) 里，阈值会停在 1MB 不复位，后续所有 open 都被判成 huge 档，
+      // 把一次异常放大成一串莫名其妙的红。
+      app.editor.setHugeThresholdMB(1024);
+      if (ctxA) {
+        try { await recCleanup(ctxA.file, ctxA.dir); } catch (e) {}
+        for (let i = 0; i < 10; i++) {
+          try { await api.remove(ctxA.dir, true); break; } catch (e) { await recSleep(400); }
+        }
+      }
+    }
+  });
+
+  // hugeRecoverReject：两段拒绝路径 —— ①源文件真的变了（闸①）；②块表被贴到错误的 key 上，
+  // **即便 huge:doc-open 带 force:true 也必须由 docKey 闸拒绝**（force 只跳大小下限，不是免死金牌）。
+  // 每段都顺带验证：被拒时源文件零改动、恢复区不被误删、句柄不留悬挂、随后丢弃能清干净。
+  await step('hugeRecoverReject', async () => {
+    app.editor.setHugeThresholdMB(1);
+    let ctxB = null;
+    try {
+      ctxB = await recMakeFixture('b');
+      // ── 阶段 1：源文件真的变了（size + mtime 都变）→ 闸① 必须拒绝 ──
+      const fx = await recCrashAt(ctxB, 'MH_REC_B');
+      if (fx.err) return 'fixture=' + fx.err;
+      // fs:splice-file 在文件末尾追加 MH_EXT_CHANGE + 换行（整文件原子覆盖 → size/mtime 都变）。
+      // 说明：这是写盘 IPC（会 markSelfWrite），但本用例断言的是 recover.js 的身份闸
+      // 「api.stat(size/mtime) vs 块表 meta」，与 filewatch 的回声守卫无关。
+      // 长度**由串本身推导**（14 字节），不写死 15 —— 2026-09-13 实证：写死 15 会让 1.changed 恒假。
+      const extAppend = 'MH_EXT_CHANGE\\n';
+      await api.spliceFile(fx.file, fx.fixStat.size, 0, extAppend);
+      const st1 = await api.stat(fx.file);
+      const changed = st1.size === fx.fixStat.size + extAppend.length && st1.mtime !== fx.fixStat.mtime;
+      await app.recover.init();
+      const s1 = app.recover.getState();
+      const it1 = s1.items.filter((x) => x.file === fx.file)[0];
+      const listed1 = !!it1 && it1.lines === fx.docLines && it1.dirtyBlocks >= 1;
+      const meta1 = s1.dir + '/' + (it1 ? it1.key : '') + '.json';
+      const tmp1 = s1.dir + '/' + (it1 ? it1.key : '') + '.tmp';
+      app.recover.openDialog();
+      const rr1 = await app.recover.recover({ key: it1.key, file: fx.file });
+      const msgEl = document.getElementById('recover-msg');
+      const rej1 = !!rr1 && rr1.ok === false && String(rr1.reason).indexOf('恢复被拒绝：源文件已变化') === 0;
+      const red1 = !!msgEl && msgEl.classList.contains('recover-error') && msgEl.textContent.indexOf('恢复被拒绝') >= 0;
+      const kept1 = (await recExists(meta1)) && (await recExists(tmp1)); // 恢复区未被误删
+      const tail1 = new TextDecoder('utf-8').decode((await api.readFileRange(fx.file, st1.size - 64, 64)).bytes);
+      const disk1 = tail1.indexOf('MH_EXT_CHANGE') >= 0 && tail1.indexOf('MH_REC_B') < 0;
+      const rd1 = await app.recover.discard({ key: it1.key, file: fx.file });
+      const drop1 = !!rd1 && rd1.ok === true && !(await recExists(meta1)) && !(await recExists(tmp1));
+
+      // ── 阶段 2：身份闸当主角 —— 同一个文件上再造崩溃现场，再把块表改造为"身份已漂移" ──
+      // 真机里这种状态来自 realpath/版本漂移，或闸①通过后、open 之前的竞态；这里用「改 JSON 里的 key
+      // + 两个恢复区文件改名」伪造它，size/mtime 与当前文件保持一致 ⇒ 闸①必过，只有 docKey 闸能拦。
+      const fx2 = await recCrashAt(ctxB, 'MH_REC_B2');
+      if (fx2.err) return 'stage1-ok,fixture2=' + fx2.err;
+      const crash2 = fx2.dirty === true && fx2.listed === true && fx2.docLines === fx2.before + 1;
+      const s2 = app.recover.getState();
+      const it2 = s2.items.filter((x) => x.file === fx2.file)[0];
+      const listed2 = !!it2 && it2.lines === fx2.docLines && it2.dirtyBlocks >= 1;
+      const realKey = it2 ? it2.key : '';
+      const meta2 = s2.dir + '/' + realKey + '.json';
+      const tmp2 = s2.dir + '/' + realKey + '.tmp';
+      const rawMeta = await api.readFile(meta2);   // 读成功即 approve，同时拿到 JSON 内容
+      await api.readFileRange(tmp2, 0, 1);          // 给 .tmp 也拿 approve
+      const metaObj = JSON.parse(typeof rawMeta === 'string' ? rawMeta : rawMeta.content);
+      const fakeKey = 'ffffffffffffffffffffffffffffffffffffffff'; // 40 位 hex（recover-list 只认这个形状）
+      metaObj.key = fakeKey;                        // 只改"身份"，块表/分片表/源文件身份字段一字不动
+      await api.writeFile(meta2, JSON.stringify(metaObj));
+      await api.rename(tmp2, fakeKey + '.tmp');
+      await api.rename(meta2, fakeKey + '.json');
+      const fakeMeta = s2.dir + '/' + fakeKey + '.json';
+      const fakeTmp = s2.dir + '/' + fakeKey + '.tmp';
+      const forgedOk = (await recExists(fakeMeta)) && (await recExists(fakeTmp)) &&
+        !(await recExists(meta2)) && !(await recExists(tmp2));
+      await app.recover.list();
+      const s3 = app.recover.getState();
+      const it3 = s3.items.filter((x) => x.key === fakeKey)[0];
+      const listed3 = !!it3 && it3.lines === fx2.docLines && it3.dirtyBlocks >= 1;
+      const rr2 = await app.recover.recover({ key: fakeKey, file: fx2.file });
+      const msgEl2 = document.getElementById('recover-msg');
+      // 该前缀只可能在 huge:doc-open(force:true) **成功返回之后**才产生 → 它本身就是"open 到了、key 闸拦下"的证据
+      const rej2 = !!rr2 && rr2.ok === false && String(rr2.reason).indexOf('恢复被拒绝：文件身份校验未通过') === 0;
+      const red2 = !!msgEl2 && msgEl2.classList.contains('recover-error') && msgEl2.textContent.indexOf('文件身份校验未通过') >= 0;
+      const kept2 = (await recExists(fakeMeta)) && (await recExists(fakeTmp));
+      // 闸②失败路径必须关掉刚开的句柄（不留悬挂会话）：再开一次应当 reuse=false
+      const probe = await api.hugeDocOpen({ file: fx2.file, force: true });
+      const handleOk = !!probe && probe.reused === false;
+      if (probe && probe.docId != null) { try { await api.hugeDocClose({ docId: probe.docId, discard: true }); } catch (e) {} }
+      const st2b = await api.stat(fx2.file);
+      const tail2 = new TextDecoder('utf-8').decode((await api.readFileRange(fx2.file, st2b.size - 64, 64)).bytes);
+      const disk2 = st2b.size === fx2.fixStat.size && tail2.indexOf('MH_REC_B2') < 0;
+      // 清场（含阶段 2 伪造的 fakeKey 条目）：删除夹具前把指向本夹具的条目都丢弃
+      const cl2 = await recCleanup(fx2.file, ctxB.dir);
+      // removed ≥ 1：证明**伪造 key 的那对文件真的经产品路径被丢弃了**（否则 clean2 会退化成「空 keys ⇒
+      // left 也是空」的恒真断言，伪造的 <fakeKey>.json/.tmp 会永远留在用户的恢复区里）。
+      const clean2 = cl2.removed >= 1 && cl2.left.length === 0;
+      const ok = changed && listed1 && rej1 && red1 && kept1 && disk1 && drop1 &&
+        crash2 && listed2 && forgedOk && listed3 && rej2 && red2 && kept2 && handleOk && disk2 && clean2;
+      return ok ? true
+        : '1.changed=' + changed + '(' + st1.size + '/' + (fx.fixStat.size + extAppend.length) + ')' +
+          ',1.listed=' + listed1 + ',1.rej=' + rej1 + '[' + (rr1 && rr1.reason) + ']' +
+          ',1.red=' + red1 + ',1.kept=' + kept1 + ',1.disk=' + disk1 + '(' + JSON.stringify(tail1.slice(-24)) + ')' +
+          ',1.drop=' + drop1 + '(' + JSON.stringify(rd1) + ')' +
+          ';2.crash=' + crash2 + ',2.listed=' + listed2 + '(n=' + s2.count + ')' +
+          ',2.forged=' + forgedOk + ',2.listed3=' + listed3 + '(n=' + s3.count + ')' +
+          ',2.rej=' + rej2 + '[' + (rr2 && rr2.reason) + ']' +
+          ',2.red=' + red2 + ',2.kept=' + kept2 + ',2.handle=' + handleOk +
+          ',2.disk=' + disk2 + '(' + st2b.size + '/' + fx2.fixStat.size + ')' +
+          ',2.clean=' + clean2 + '(removed=' + cl2.removed + ',left=' + JSON.stringify(cl2.left) + ')';
+    } finally {
+      try { document.getElementById('modal-mask').classList.add('hidden'); } catch (e) {}
+      try { await app.editor.closeAll(); } catch (e) {}
+      // 阈值恢复必须无条件执行（与 hugeRecoverPrompt 同一条理由）：recMakeFixture 内的 api.create/
+      // api.writeFile 会抛，抛时 ctxB 仍是 null —— 写在 if (ctxB) 里就会让阈值停在 1MB 不复位。
+      app.editor.setHugeThresholdMB(1024);
+      if (ctxB) {
+        try { await recCleanup(ctxB.file, ctxB.dir); } catch (e) {}
+        for (let i = 0; i < 10; i++) {
+          try { await api.remove(ctxB.dir, true); break; } catch (e) { await recSleep(400); }
+        }
+      }
+    }
+  });
+
   return results;
 })()
 `;
@@ -3195,58 +3970,29 @@ async function runSmoke(win) {
           fs.writeFileSync(path.join(bigDir, 'search15.txt'), buf);
         }
       }
-      // ============ v0.2.5 AI：本地 mock OpenAI 兼容服务（SSE 流式 / 工具循环 / 模型列表） ============
-      // 只服务 127.0.0.1:18432 的 /v1/chat/completions 与 /v1/models；渲染端 aiMockChat 用例全程走真实链路
-      let aiMockPort = 0;
-      const aiMockServer = http.createServer((req, res) => {
-        let body = '';
-        req.on('data', (c) => (body += c));
-        req.on('end', () => {
-          if (req.url.endsWith('/models')) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ data: [{ id: 'mock-pro' }, { id: 'mock-mini' }] }));
-            return;
-          }
-          let j = {};
-          try { j = JSON.parse(body || '{}'); } catch { /* 忽略 */ }
-          const isToolRound = (j.messages || []).some((m) => m.role === 'assistant' && m.tool_calls);
-          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-          const chunks = isToolRound
-            ? [
-                { choices: [{ delta: { content: '文档' } }] },
-                { choices: [{ delta: { content: '内容' } }] },
-                { choices: [{ delta: { content: '已读取' } }] },
-                { choices: [{ delta: {}, finish_reason: 'stop' }] },
-                { usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 } },
-              ]
-            : [
-                { choices: [{ delta: { reasoning_content: '思考：先读文档再答' } }] },
-                { choices: [{ delta: { content: '正在读取文档…' } }] },
-                { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'read_document', arguments: '' } }] } }] },
-                { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{}' } }] } }] },
-                { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
-                { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } },
-              ];
-          let i = 0;
-          const timer = setInterval(() => {
-            if (i < chunks.length) res.write('data: ' + JSON.stringify(chunks[i++]) + '\n\n');
-            else {
-              clearInterval(timer);
-              res.write('data: [DONE]\n\n');
-              res.end();
-            }
-          }, 20);
-        });
-      });
-      await new Promise((resolve) => {
-        aiMockServer.once('error', () => resolve()); // 端口被占：aiMockPort 保持 0，AI 用例明确失败
-        aiMockServer.listen(18432, '127.0.0.1', () => {
-          aiMockPort = 18432;
-          resolve();
-        });
-      });
-      await win.webContents.executeJavaScript('window.__AI_MOCK_PORT = ' + aiMockPort + '; null');
       const results = await win.webContents.executeJavaScript(RENDERER_TEST);
+      // v0.3.0 rcDirArgParse：资源管理器右键 --dir 的 argv 解析（主进程侧）。
+      // 背景：Electron 在 second-instance 里会重排 argv，`--dir` 与它的值被拆开
+      // （实测 ["electron.exe","--dir","--allow-file-access-from-files","<app>","<目标>"]），
+      // 旧实现只取「--dir 的下一个元素」→ 拿到 Chromium 开关 → 右键目录被静默忽略。
+      {
+        const { extractDirArg } = require('../src/main/args');
+        const app2 = 'C:\\some\\app-dir';
+        const reordered = ['electron.exe', '--dir', '--allow-file-access-from-files', app2, TEST_ROOT];
+        const paired = ['MarkHunter.exe', '--dir', TEST_ROOT];
+        const eqForm = ['MarkHunter.exe', '--dir=' + TEST_ROOT];
+        const missing = ['electron.exe', '--dir', '--allow-file-access-from-files', app2, 'Z:\\not-exist-xyz'];
+        const okParse =
+          extractDirArg(reordered, { appPath: app2 }) === TEST_ROOT &&
+          extractDirArg(paired) === TEST_ROOT &&
+          extractDirArg(eqForm) === TEST_ROOT &&
+          extractDirArg(missing, { appPath: app2 }) === 'Z:\\not-exist-xyz' &&
+          extractDirArg(['electron.exe', '--smoke', app2], { appPath: app2 }) === null;
+        results.push(['rcDirArgParse', okParse,
+          'reordered=' + extractDirArg(reordered, { appPath: app2 }) +
+          ',paired=' + extractDirArg(paired) +
+          ',missing=' + extractDirArg(missing, { appPath: app2 })]);
+      }
       // v0.2.4 previewImgClip：剪贴板断言须在主进程侧（clipboard 模块不进渲染上下文）。
       // RENDERER_TEST 中 previewImgCtx 已点击「复制图片（原图）」，期间无其它用例改写剪贴板 ——
       // 此处读取应得到 1×1 原图（原图字节直写，不压缩不缩放）
@@ -3274,6 +4020,139 @@ async function runSmoke(win) {
         'bundle=' + (bundleSize >= 0 ? (bundleSize / 1024 / 1024).toFixed(2) + 'MB' : 'missing') +
           ',chunk=' + (chunkSize >= 0 ? (chunkSize / 1024 / 1024).toFixed(2) + 'MB' : 'missing'),
       ]);
+
+      // ============ v0.5.0 挂账项：huge 保存后「外部修改仍能触发 file-changed」的**运行时**断言 ============
+      // 已有证据只到文件系统层：scripts/watch-rename-probe.js（纯 node，5/5）证明 overlay 保存的
+      // rename 覆盖**不会**让 fs.watch(文件) 失效。这里补**运行时层**——保存之后由用例侧真·外部写入，
+      // 断言渲染端确实收到 file-changed 并走了 huge 的「外部修改重载」分支（tabs.js 的 onFileChanged
+      // → tab.huge.reloadExternal() + toast「已从外部重新加载 …」）。
+      // 为什么必须放主进程侧：
+      //   ① 需要 fs 直写副本模拟外部编辑器 —— 走 api.writeFile / api.writeExternal 都会被
+      //      filewatch 的 markSelfWrite（ipc.js 的写盘路径都调）当成自写回声吸收，测不出东西；
+      //   ② 追加一个 280MB 文件不可能用整串 IPC 传内容。
+      // 夹具：bd-280mb.bin 的**同 rootDir 副本**（照抄 hugeEditSaveAtomic 的复制/清理口径，
+      // 源夹具只读保护 → 末尾断言 size+mtime 一字未动）。副本目录用 build/huge-watch/。
+      {
+        const W_SRC = path.join(TEST_ROOT, 'build', 'bd-280mb.bin');
+        const W_DIR = path.join(TEST_ROOT, 'build', 'huge-watch');
+        const W_COPY = path.join(W_DIR, 'bd-280mb.bin');
+        const W_APPEND = '\nMH_EXT_AFTER_SAVE\n'; // 20 字节；追加到以 \n 结尾的文件 → 行数 +2
+        const sleepW = (ms) => new Promise((r) => setTimeout(r, ms));
+        const Wr = (code) => win.webContents.executeJavaScript(code);
+        const Wrv = (expr) => win.webContents.executeJavaScript(`(async () => { await (${expr}); })()`);
+        // 用例前的「打开上限」：必须在 try 之外声明 —— finally 里要用它逐字复原。
+        // （首跑这里写成 try 内的 const，导致 finally 抛 ReferenceError: prevMaxMB is not defined，
+        //   主进程段整体 E2E_ERROR、E2E_RESULTS 一行都没打印，而 SMOKE_OK 仍被无条件打印。）
+        let prevMaxMB = null;
+        try {
+          const src0 = fs.statSync(W_SRC);
+          fs.rmSync(W_DIR, { recursive: true, force: true });
+          fs.mkdirSync(W_DIR, { recursive: true });
+          fs.copyFileSync(W_SRC, W_COPY);
+          // 打开上限：本用例跑在**主进程段**，此时 RENDERER_TEST 末尾的 bigFileTeardown
+          // （renderer 段 :3363-3368）已把 maxFileSizeMB 复位成 50 —— 280MB 的副本会被
+          // tabs.js:822 的守卫拒绝（openFile 直接 return null，并弹出「文件过大，未打开」模态框），
+          // 表现为 kind=null,hv=false,st=null（首跑就是这样失败的）。按既有 4096 口径临时抬高，
+          // finally 逐字复原（rcDir* 段随后跑，必须回到 50）。
+          prevMaxMB = await Wr('window.api.getSettings().then((s) => s.maxFileSizeMB)').catch(() => null);
+          // 渲染端：装 toast 记录器（提示寿命 ~1.9s，轮询会漏）→ 抬上限 → 降档 → 开副本 → 编辑一行 → 保存
+          const r = await Wr(`(async () => {
+            const api = window.api, app = window.__app;
+            window.__mhWatchToasts = [];
+            const push = (el) => { try { if (el && el.classList && el.classList.contains('toast')) window.__mhWatchToasts.push(el.textContent); } catch (e) {} };
+            const mo = new MutationObserver((ms) => {
+              for (const m of ms) for (const n of m.addedNodes) { push(n); if (n && n.querySelectorAll) n.querySelectorAll('.toast').forEach(push); }
+            });
+            mo.observe(document, { childList: true, subtree: true });
+            document.querySelectorAll('.toast').forEach(push);
+            await api.setSettings({ maxFileSizeMB: 4096 });
+            app.state.settings = await api.getSettings();
+            const maxMB = app.state.settings.maxFileSizeMB;
+            app.editor.setHugeThresholdMB(200);
+            const thMB = app.editor.getHugeThresholdMB ? app.editor.getHugeThresholdMB() : null;
+            let openErr = '';
+            let tab = null;
+            try { tab = await app.editor.openFile(${JSON.stringify(W_COPY)}); }
+            catch (e) { openErr = String((e && e.message) || e); }
+            // openFile 失败路径会弹 alertBox（自定义模态，非原生对话框）→ 关掉，别留给后续用例
+            const mask = document.getElementById('modal-mask');
+            const modalShown = !!mask && !mask.classList.contains('hidden');
+            const modalBody = modalShown ? String(((document.getElementById('modal-body') || {}).textContent) || '').slice(0, 80) : '';
+            if (modalShown) { const b = document.querySelector('#modal-actions .tbtn'); if (b) b.click(); }
+            const hv = tab ? tab.huge : null;
+            let st = null;
+            for (let i = 0; i < 40; i++) {
+              st = hv ? hv.getState() : null;
+              if (st && st.indexed && st.renderedRows > 0) break;
+              await new Promise((res) => setTimeout(res, 250));
+            }
+            if (!tab || tab.kind !== 'huge' || !hv || !st) {
+              return { ok: false, why: 'kind=' + (tab && tab.kind) + ',hv=' + !!hv + ',st=' + JSON.stringify(st) +
+                ',openErr=' + JSON.stringify(openErr) + ',modal=' + modalShown + ':' + JSON.stringify(modalBody) +
+                ',maxMB=' + maxMB + ',thMB=' + thMB };
+            }
+            const on = await hv.setEditable(true);
+            const lines0 = hv.getState().lines;
+            const mid = Math.max(2, Math.floor(lines0 / 2));
+            const edit = await hv.applyEditForTest({ type: 'insert', line: mid, col: 0, text: 'MH_WATCH_MARK_1a2b\\n' });
+            const saved = await hv.save();
+            const st1 = hv.getState();
+            return { ok: true, on: on === true, edit: !!edit, saved: saved === true, lines0: lines0, lines1: st1.lines, dirty: st1.dirty === true, maxMB: maxMB, thMB: thMB };
+          })()`);
+          if (!r || r.ok !== true) {
+            results.push(['hugeWatchAfterSave', 'ERR: ' + JSON.stringify(r)]);
+          } else {
+            const sizeAfterSave = fs.statSync(W_COPY).size;
+            // 跨过三道自写回声守卫：filewatch SELF_WRITE_GRACE_MS=2000（主进程 mtime+size 匹配）、
+            // tabs.js 的 tab.lastSavedAt 1200ms（普通分支）、huge 分支的 hvSt.savedAt 3000ms。
+            // 取 3600ms 一次性越过三者，避免"等待不足 → 事件被吸收 → 假阴性"。
+            await sleepW(3600);
+            fs.appendFileSync(W_COPY, W_APPEND, 'utf8'); // ← 真·外部写：不经过 app 的写盘 IPC，不打 markSelfWrite
+            const sizeAfterAppend = fs.statSync(W_COPY).size;
+            let seen = null;
+            for (let i = 0; i < 60; i++) {
+              await sleepW(400);
+              const s = await Wr(`(() => {
+                const t = window.__app.editor.findTabByPath(${JSON.stringify(W_COPY)});
+                const hv = t ? t.huge : null;
+                const g = hv ? hv.getState() : null;
+                return { toasts: (window.__mhWatchToasts || []).slice(), lines: g ? g.lines : null, indexed: g ? g.indexed : false };
+              })()`).catch(() => null);
+              if (!s) continue;
+              seen = s;
+              const hit = (s.toasts || []).some((x) => String(x).indexOf('已从外部重新加载') >= 0);
+              if (hit && typeof s.lines === 'number' && s.lines > r.lines1) break;
+            }
+            const toastOk = !!seen && (seen.toasts || []).some((x) => String(x).indexOf('已从外部重新加载') >= 0);
+            // 追加串以 '\n' 开头又以 '\n' 结尾、且原文件以 '\n' 结尾 → 行数精确 +2
+            const linesOk = !!seen && seen.lines === r.lines1 + 2;
+            const sizeOk = sizeAfterAppend === sizeAfterSave + Buffer.byteLength(W_APPEND, 'utf8');
+            const src1 = fs.statSync(W_SRC);
+            const fixOk = src1.size === src0.size && src1.mtimeMs === src0.mtimeMs;
+            const ok = r.on && r.edit && r.saved && r.dirty === false && toastOk && linesOk && sizeOk && fixOk;
+            results.push(['hugeWatchAfterSave', ok,
+              'on=' + r.on + ',edit=' + r.edit + ',saved=' + r.saved + ',dirtyAfterSave=' + r.dirty +
+              ',maxMB=' + r.maxMB + ',thMB=' + r.thMB +
+              ',lines=' + r.lines0 + '→' + r.lines1 + '→' + (seen && seen.lines) + '(期望 +2)=' + linesOk +
+              ',toast=' + toastOk + ',size=' + sizeOk + '(' + sizeAfterSave + '+' + Buffer.byteLength(W_APPEND, 'utf8') + '=' + sizeAfterAppend + ')' +
+              ',fixUntouched=' + fixOk + ',toasts=' + JSON.stringify(((seen && seen.toasts) || []).slice(-3))]);
+          }
+        } catch (err) {
+          results.push(['hugeWatchAfterSave', 'ERR: ' + (err && err.stack ? err.stack.split('\n').slice(0, 3).join(' // ') : String(err))]);
+        } finally {
+          // 收尾：先关掉可能残留的 alertBox 模态 → 关标签（huge 关标签=先保存再关会话）→
+          // 复原「打开上限」与「huge 阈值」→ 删副本（重试：关标签可能在后台写盘）
+          await Wr(`(() => { const m = document.getElementById('modal-mask'); if (m && !m.classList.contains('hidden')) { const b = document.querySelector('#modal-actions .tbtn'); if (b) b.click(); } return true; })()`).catch(() => {});
+          await Wrv('window.__app.editor.closeAll()').catch(() => {});
+          await Wr('window.__app.editor.setHugeThresholdMB(1024)').catch(() => {});
+          // maxFileSizeMB 逐字复原（首跑前它是 bigFileTeardown 复位后的 50；拿不到就回落 50）
+          const restoreMB = Number.isFinite(Number(prevMaxMB)) && Number(prevMaxMB) > 0 ? Math.floor(Number(prevMaxMB)) : 50;
+          await Wr(`(async () => { await window.api.setSettings({ maxFileSizeMB: ${restoreMB} }); window.__app.state.settings = await window.api.getSettings(); return true; })()`).catch(() => {});
+          for (let i = 0; i < 10; i++) {
+            try { fs.rmSync(W_DIR, { recursive: true, force: true }); break; } catch { await sleepW(400); }
+          }
+        }
+      }
 
       // ============ v0.1.51 多窗口：主进程编排第二窗口（show:false 后台运行，不干扰桌面） ============
       {
@@ -3396,6 +4275,3488 @@ async function runSmoke(win) {
           })()`).catch(() => {});
         }
       }
+      // ================= v0.5.0 多视图 Phase 2「左右双栏分屏」：7 项端到端回归 =================
+      // 位置：mw* 多窗口段之后、rcDir* 段之前。rcDir* 会起子进程 / 改写侧栏根并断言 `.tab` 总数，
+      // 因此分屏用例必须排在它前面，且**每条用例收尾都把栏数收回 1**（不把双栏状态留给后面的用例）。
+      // 断言口径：全部落在**渲染事实**（#editor-panes 的栏数 / 两栏各自 .pane-tabs 的 .tab 数量 /
+      // 两个 .cm-editor 的几何尺寸与 scrollTop / .active-pane 去饱和类 / 分隔条拖动后的真实宽度）
+      // 或**磁盘事实**（window.api.getSettings() 读回的 lastSession 结构）上 —— 不断言内部 flag。
+      {
+        const SP_A = path.join(TEST_ROOT, 'split-a.md');
+        const SP_B = path.join(TEST_ROOT, 'split-b.md');
+        const SP_C = path.join(TEST_ROOT, 'split-c.md');
+        const SP_FILES = [SP_A, SP_B, SP_C];
+        // 夹具：220 行足以让两栏各自产生可滚动的高度（独立滚动断言需要 scrollHeight > clientHeight）
+        for (let i = 0; i < SP_FILES.length; i++) {
+          const body = Array.from({ length: 220 }, (_, n) => `分屏夹具 ${i + 1} · 第 ${n + 1} 行 内容 content`).join('\n') + '\n';
+          fs.writeFileSync(SP_FILES[i], body, 'utf8');
+        }
+        const sleepS = (ms) => new Promise((r) => setTimeout(r, ms));
+        /** 取值型求值：表达式结果会被**结构化克隆**回主进程 —— 只能返回原始值/纯对象/纯数组 */
+        const W = (code) => win.webContents.executeJavaScript(code);
+        /** 副作用型求值：只改渲染端状态、**不取回值**。
+         *  ⚠️ 必须走这个包装：`openFile()` 返回的是 tab 文档对象（内含 `EditorView`/DOM 引用），
+         *  裸调 `W('window.__app.editor.openFile(p)')` 会让 executeJavaScript 去克隆它并抛
+         *  `An object could not be cloned.`（Phase 2 首轮验收里 6 个 split* 用例全 ERR 的根因）。
+         *  这里包成 async IIFE：**await 表达式**后再返回 undefined，既不克隆文档对象、又不丢等待语义。 */
+        const Wv = (expr) => win.webContents.executeJavaScript(`(async () => { await (${expr}); })()`);
+        const splitCase = async (name, fn) => {
+          let r;
+          try {
+            r = await fn();
+          } catch (err) {
+            r = { ok: false, detail: 'ERR: ' + (err && err.stack ? err.stack.split('\n').slice(0, 3).join(' // ') : String(err)), evidence: '' };
+          }
+          results.push([name, r && r.ok === true ? true : ((r && r.detail) || 'false'), (r && r.evidence) || '']);
+        };
+        // 每条用例前/后的统一收尾：先合栏再关标签（顺序反了会把「关最后一个标签自动撤栏」的路径也走一遍，
+        // 那样测的就不是本条用例的语义了）。返回收尾后的栏数，便于在证据里记录。
+        const resetPanes = async () => {
+          const n = await W(`(() => {
+            const e = window.__app.editor;
+            if (e.getPaneCount() > 1) e.mergePanes();
+            e.closeAll();
+            return e.getPaneCount();
+          })()`).catch(() => -1);
+          await sleepS(120);
+          return n;
+        };
+        // 双栏布局快照（全部来自真实 DOM 几何）
+        const LAYOUT = `(() => {
+          const e = window.__app.editor;
+          const panesRoot = document.getElementById('editor-panes');
+          const kids = Array.from(panesRoot.children);
+          const roots = kids.filter((el) => el.classList.contains('pane'));
+          const div = kids.find((el) => el.classList.contains('pane-divider')) || null;
+          const cms = roots.map((r) => r.querySelector('.editor-host > .cm-editor'));
+          const hosts = roots.map((r) => r.querySelector('.editor-host'));
+          const bars = roots.map((r) => r.querySelector('.pane-tabs'));
+          const bodies = roots.map((r) => r.querySelector('.pane-body'));
+          return {
+            layout: e.getPaneLayout(),
+            rootCount: roots.length,
+            divider: !!div,
+            dividerW: div ? Math.round(div.getBoundingClientRect().width) : 0,
+            paneW: roots.map((r) => Math.round(r.getBoundingClientRect().width)),
+            cmCount: cms.filter(Boolean).length,
+            cmH: cms.map((c) => (c ? Math.round(c.getBoundingClientRect().height) : 0)),
+            cmHidden: cms.map((c) => (c ? getComputedStyle(c).display === 'none' : true)),
+            hostHuge: hosts.map((h) => (h ? h.classList.contains('huge-active') : false)),
+            tabCounts: bars.map((b) => (b ? b.querySelectorAll('.tab').length : -1)),
+            tabNames: bars.map((b) => Array.from(b ? b.querySelectorAll('.tab') : []).map((t) => (t.querySelector('.tab-name') || {}).textContent || '')),
+            activeInBar: bars.map((b) => {
+              const a = b ? b.querySelector('.tab.active') : null;
+              return a ? ((a.querySelector('.tab-name') || {}).textContent || '') : null;
+            }),
+            activePaneCount: roots.filter((r) => r.classList.contains('active-pane')).length,
+            activePaneIdx: roots.findIndex((r) => r.classList.contains('active-pane')),
+            focusInPane: roots.findIndex((r) => r.contains(document.activeElement)),
+            scrollTops: bodies.map((b) => {
+              const sc = b ? b.querySelector('.cm-scroller') : null;
+              return sc ? Math.round(sc.scrollTop) : -1;
+            }),
+            scrollable: bodies.map((b) => {
+              const sc = b ? b.querySelector('.cm-scroller') : null;
+              return sc ? sc.scrollHeight - sc.clientHeight : -1;
+            }),
+            p0HostId: hosts[0] ? hosts[0].id : null,
+            p1HostId: hosts[1] ? hosts[1].id : null,
+            tabsIdP0: bars[0] ? bars[0].id : null,
+          };
+        })()`;
+        // 文档 → 栏（渲染端真实归属，不是内部 flag 的镜像）
+        const DOC_PANE = (p) => `(() => { const t = window.__app.editor.findTabByPath(${JSON.stringify(p)}); return t ? window.__app.editor.paneIdOf(t) : null; })()`;
+
+        try {
+          // ---------- 1. splitBasic：两栏渲染 + 两栏各自一个 CM + 滚动互不影响 ----------
+          await splitCase('splitBasic', async () => {
+            await resetPanes();
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SP_A)})`);
+            await sleepS(250);
+            const one = await W(LAYOUT);
+            await Wv(`window.__app.editor.toggleSplit()`);
+            await sleepS(200);
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SP_B)})`);
+            await sleepS(350);
+            const s = await W(LAYOUT);
+            // 独立滚动：只滚左栏，右栏 scrollTop 不动
+            const scrolled = await W(`(() => {
+              const e = window.__app.editor;
+              const a = e.getPaneEls(0).view.scrollDOM;
+              const b = e.getPaneEls(1).view.scrollDOM;
+              const before = b.scrollTop;
+              a.scrollTop = 260;
+              return { a: Math.round(a.scrollTop), bBefore: Math.round(before), bAfter: Math.round(b.scrollTop) };
+            })()`);
+            await sleepS(150);
+            const after = await W(LAYOUT);
+            const twoCm = s.cmCount === 2 && s.cmH.every((h) => h > 100) && s.cmHidden.every((v) => v === false);
+            const twoPanes = s.rootCount === 2 && s.divider === true;
+            const bVisible = s.paneW.length === 2 && s.paneW.every((w) => w > 200);
+            const indepTabs = s.tabCounts[0] === 1 && s.tabCounts[1] === 1 && s.tabNames[0][0] !== s.tabNames[1][0];
+            const indepScroll = scrolled.a > 0 && scrolled.bAfter === scrolled.bBefore && after.scrollTops[1] === scrolled.bAfter;
+            const ok = one.rootCount === 1 && twoPanes && twoCm && bVisible && indepTabs && indepScroll;
+            return {
+              ok,
+              detail: 'onePane=' + one.rootCount + ',twoPanes=' + twoPanes + ',twoCm=' + twoCm + ',paneW=' + JSON.stringify(s.paneW) +
+                ',tabs=' + JSON.stringify(s.tabNames) + ',indepScroll=' + indepScroll + '(' + JSON.stringify(scrolled) + ')',
+              evidence: 'cmH=' + JSON.stringify(s.cmH) + ' cmHidden=' + JSON.stringify(s.cmHidden) +
+                ' scrollTops=' + JSON.stringify(after.scrollTops) + ' scrollable=' + JSON.stringify(s.scrollable) +
+                ' dividerW=' + s.dividerW + ' layout=' + JSON.stringify(s.layout.panes),
+            };
+          });
+
+          // ---------- 2. splitIndependentTabs：两栏各自标签栏（数量/高亮/点击不互相影响） ----------
+          await splitCase('splitIndependentTabs', async () => {
+            await resetPanes();
+            await W(`(async () => { const e = window.__app.editor; await e.openFile(${JSON.stringify(SP_A)}); await e.openFile(${JSON.stringify(SP_C)}); })()`);
+            await sleepS(350);
+            const before = await W(LAYOUT);
+            await Wv(`window.__app.editor.toggleSplit()`);
+            await sleepS(200);
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SP_B)})`);
+            await sleepS(300);
+            const s = await W(LAYOUT);
+            // 点左栏的第一个标签（切换左栏活动项）→ 右栏高亮必须原样不动
+            const afterClick = await W(`(() => {
+              const e = window.__app.editor;
+              const bar0 = e.getPaneEls(0).tabsEl;
+              const p1Before = e.getPaneLayout().panes[1].active;
+              bar0.querySelectorAll('.tab')[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              const p1After = e.getPaneLayout().panes[1].active;
+              return { p1Before, p1After, p0: e.getPaneLayout().panes[0].active };
+            })()`);
+            await sleepS(200);
+            const s2 = await W(LAYOUT);
+            const barsSeparate = s.tabCounts[0] === 2 && s.tabCounts[1] === 1;
+            const highlightPerPane = s.activeInBar[0] !== null && s.activeInBar[1] !== null && s.activeInBar[0] !== s.activeInBar[1];
+            const clickIsolated = afterClick.p1Before === afterClick.p1After;
+            const docHome = (await W(DOC_PANE(SP_A))) === 'p0' && (await W(DOC_PANE(SP_C))) === 'p0' && (await W(DOC_PANE(SP_B))) === 'p1';
+            const p0DomKeepsId = s.p0HostId === 'editor-host' && s.tabsIdP0 === 'tabs' && !s.p1HostId;
+            const ok = before.rootCount === 1 && barsSeparate && highlightPerPane && clickIsolated && docHome && p0DomKeepsId;
+            return {
+              ok,
+              detail: 'bars=' + JSON.stringify(s.tabCounts) + ',highlight=' + JSON.stringify(s.activeInBar) +
+                ',clickIsolated=' + clickIsolated + ' (' + afterClick.p1Before + '→' + afterClick.p1After + ')' +
+                ',docHome=' + docHome + ',p0DomKeepsId=' + p0DomKeepsId,
+              evidence: 'names=' + JSON.stringify(s.tabNames) + ' p0HostId=' + s.p0HostId + ' p1HostId=' + s.p1HostId +
+                ' tabsIdP0=' + s.tabsIdP0 + ' p0Active=' + afterClick.p0 + ' tabCountsAfter=' + JSON.stringify(s2.tabCounts),
+            };
+          });
+
+          // ---------- 3. splitDragDrop：拖标签到编辑区右边缘 → 该侧开栏 ----------
+          await splitCase('splitDragDrop', async () => {
+            await resetPanes();
+            await W(`(async () => { const e = window.__app.editor; await e.openFile(${JSON.stringify(SP_A)}); await e.openFile(${JSON.stringify(SP_C)}); })()`);
+            await sleepS(350);
+            const dropped = await W(`(() => {
+              const e = window.__app.editor;
+              const body = e.getPaneEls(0).body;
+              const tabs = e.getPaneEls(0).tabsEl.querySelectorAll('.tab');
+              const target = tabs[tabs.length - 1]; // 拖第 2 个标签（split-c.md）
+              const name = (target.querySelector('.tab-name') || {}).textContent;
+              const r = body.getBoundingClientRect();
+              const x = r.left + r.width * 0.88; // 右侧 30% 区间内 → 「该侧开栏」
+              const y = r.top + r.height * 0.4;
+              const dt = new DataTransfer();
+              target.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+              const hintRight = body.classList.contains('pane-drop-right');
+              body.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: x, clientY: y }));
+              const hintAfterOver = body.classList.contains('pane-drop-right');
+              body.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt, clientX: x, clientY: y }));
+              target.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt }));
+              return { name, hintRight, hintAfterOver, panes: e.getPaneCount(), layout: e.getPaneLayout() };
+            })()`);
+            await sleepS(300);
+            const s = await W(LAYOUT);
+            const bPane = await W(DOC_PANE(SP_C));
+            const aPane = await W(DOC_PANE(SP_A));
+            const opened = dropped.panes === 2 && s.rootCount === 2 && s.divider === true;
+            const moved = bPane === 'p1' && aPane === 'p0';
+            const hint = dropped.hintAfterOver === true;
+            const focusedNew = dropped.layout.focused === 'p1';
+            const ok = opened && moved && hint && focusedNew && s.tabCounts[0] === 1 && s.tabCounts[1] === 1;
+            return {
+              ok,
+              detail: 'panes=' + dropped.panes + ',moved=' + moved + '(A=' + aPane + ',C=' + bPane + '),hint=' + hint +
+                ',focusedNew=' + focusedNew + ',tabs=' + JSON.stringify(s.tabCounts),
+              evidence: 'dragged=' + dropped.name + ' hintBeforeOver=' + dropped.hintRight + ' hintAfterOver=' + dropped.hintAfterOver +
+                ' names=' + JSON.stringify(s.tabNames) + ' paneW=' + JSON.stringify(s.paneW) + ' cmCount=' + s.cmCount,
+            };
+          });
+
+          // ---------- 4. splitResize：拖分隔条改比例 + 最小宽度夹取 + 双击等分 ----------
+          await splitCase('splitResize', async () => {
+            await resetPanes();
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SP_A)})`);
+            await sleepS(250);
+            await Wv(`window.__app.editor.toggleSplit()`);
+            await sleepS(200);
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SP_B)})`);
+            await sleepS(300);
+            const drag = async (dx) => W(`(() => {
+              const div = document.querySelector('.pane-divider');
+              const r = div.getBoundingClientRect();
+              const x0 = r.left + r.width / 2;
+              const y0 = r.top + r.height / 2;
+              div.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, clientX: x0, clientY: y0 }));
+              document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x0 + (${dx}), clientY: y0 }));
+              document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x0 + (${dx}), clientY: y0 }));
+              const L = window.__app.editor.getPaneLayout();
+              return { w: L.panes.map((p) => p.width), ratio: +L.ratio.toFixed(4), dragging: div.classList.contains('dragging') };
+            })()`);
+            const base = await W(LAYOUT);
+            const widened = await drag(140);
+            const clampedLeft = await drag(-4000);
+            const clampedRight = await drag(8000);
+            const equalized = await W(`(() => {
+              document.querySelector('.pane-divider').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+              const L = window.__app.editor.getPaneLayout();
+              return { w: L.panes.map((p) => p.width), ratio: +L.ratio.toFixed(4) };
+            })()`);
+            const usable = base.paneW[0] + base.paneW[1];
+            const grew = widened.w[0] > base.paneW[0] + 100;
+            // 最小宽度：夹取后两栏都 ≥ 200px（MIN_PANE_PX），且没有某一栏被压成 0
+            const minHeld = clampedLeft.w[0] >= 199 && clampedLeft.w[1] >= 199 && clampedRight.w[0] >= 199 && clampedRight.w[1] >= 199;
+            const noOverflow = Math.abs((clampedLeft.w[0] + clampedLeft.w[1]) - usable) <= 2;
+            const equal = equalized.ratio > 0.42 && equalized.ratio < 0.58;
+            const ok = base.rootCount === 2 && grew && minHeld && noOverflow && equal && widened.dragging === false;
+            return {
+              ok,
+              detail: 'base=' + JSON.stringify(base.paneW) + ',widen+140=' + JSON.stringify(widened.w) + ' (grew=' + grew + ')' +
+                ',clampLeft=' + JSON.stringify(clampedLeft.w) + ',clampRight=' + JSON.stringify(clampedRight.w) + ' (minHeld=' + minHeld + ')' +
+                ',equalize=' + JSON.stringify(equalized.w) + ' ratio=' + equalized.ratio + ' (equal=' + equal + ') noOverflow=' + noOverflow,
+              evidence: 'usable=' + usable + ' dividerW=' + base.dividerW + ' ratios=' + JSON.stringify([widened.ratio, clampedLeft.ratio, clampedRight.ratio]) +
+                ' draggingClassLeaked=' + widened.dragging,
+            };
+          });
+
+          // ---------- 5. splitFocusKeys：Ctrl+2 / Ctrl+1 聚焦栏、Ctrl+\ 分屏与合屏 ----------
+          await splitCase('splitFocusKeys', async () => {
+            await resetPanes();
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SP_A)})`);
+            await sleepS(250);
+            const key = (k, extra) => `(() => {
+              document.dispatchEvent(new KeyboardEvent('keydown', Object.assign({ key: ${JSON.stringify(k)}, code: ${JSON.stringify(k)}, bubbles: true, cancelable: true }, ${JSON.stringify(extra || {})})));
+              const e = window.__app.editor;
+              const roots = Array.from(document.getElementById('editor-panes').children).filter((el) => el.classList.contains('pane'));
+              return { panes: e.getPaneCount(), focus: e.getFocusPaneId(), activePaneIdx: roots.findIndex((r) => r.classList.contains('active-pane')),
+                focusInPane: roots.findIndex((r) => r.contains(document.activeElement)) };
+            })()`;
+            const beforeKey = await W(LAYOUT);
+            const splitByKey = await W(key('\\', { ctrlKey: true }));
+            await sleepS(250);
+            const opened = splitByKey.panes === 2 && splitByKey.focus === 'p1';
+            // 右栏开个文件后，Ctrl+1 回左栏、Ctrl+2 再回右栏；焦点 DOM 元素要跟着走
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SP_B)})`);
+            await sleepS(300);
+            const toP0 = await W(key('1', { ctrlKey: true }));
+            await sleepS(120);
+            const toP1 = await W(key('2', { ctrlKey: true }));
+            await sleepS(120);
+            const s = await W(LAYOUT);
+            const merged = await W(key('\\', { ctrlKey: true }));
+            await sleepS(250);
+            const sAfter = await W(LAYOUT);
+            const focusWorks = toP0.focus === 'p0' && toP0.activePaneIdx === 0 && toP0.focusInPane === 0 &&
+              toP1.focus === 'p1' && toP1.activePaneIdx === 1 && toP1.focusInPane === 1;
+            const oneActivePane = s.activePaneCount === 1 && s.activePaneIdx === 1;
+            const mergeOk = merged.panes === 1 && sAfter.rootCount === 1 && sAfter.divider === false && sAfter.activePaneIdx === 0;
+            // 合栏后文档不丢：两个文件仍在（标签全部并回 p0）
+            const kept = sAfter.tabCounts[0] === 2 && (await W(DOC_PANE(SP_A))) === 'p0' && (await W(DOC_PANE(SP_B))) === 'p0';
+            const ok = beforeKey.rootCount === 1 && opened && focusWorks && oneActivePane && mergeOk && kept;
+            return {
+              ok,
+              detail: 'splitKey=' + opened + '(focus=' + splitByKey.focus + '),focusWorks=' + focusWorks +
+                ',oneActivePane=' + oneActivePane + ',merge=' + mergeOk + ',docsKept=' + kept,
+              evidence: 'toP0=' + JSON.stringify(toP0) + ' toP1=' + JSON.stringify(toP1) + ' merged=' + JSON.stringify(merged) +
+                ' afterTabs=' + JSON.stringify(sAfter.tabCounts) + ' afterNames=' + JSON.stringify(sAfter.tabNames),
+            };
+          });
+
+          // ---------- 6. splitCloseLast：关掉右栏最后一个标签 → 该栏撤掉，回落单栏 ----------
+          await splitCase('splitCloseLast', async () => {
+            await resetPanes();
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SP_A)})`);
+            await sleepS(250);
+            await Wv(`window.__app.editor.toggleSplit()`);
+            await sleepS(200);
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SP_B)})`);
+            await sleepS(300);
+            const before = await W(LAYOUT);
+            // 点右栏那个标签的 ✕（真实用户动作，而不是直接调 closeTab）
+            const closed = await W(`(() => {
+              const e = window.__app.editor;
+              const tabs = e.getPaneEls(1).tabsEl.querySelectorAll('.tab');
+              const name = (tabs[0].querySelector('.tab-name') || {}).textContent;
+              tabs[0].querySelector('.tab-close').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              return { name, panes: e.getPaneCount(), focus: e.getFocusPaneId() };
+            })()`);
+            await sleepS(300);
+            const s = await W(LAYOUT);
+            // 只取回字符串（不裸返回 tab 对象 —— 那会被结构化克隆拒收，见 Wv 的说明）
+            const survivor = await W(`(() => { const t = window.__app.editor.getActiveTab(); return t ? t.name : null; })()`);
+            const collapsed = s.rootCount === 1 && s.divider === false;
+            const survivorOk = survivor === 'split-a.md';
+            const hostIdOk = s.p0HostId === 'editor-host' && s.tabsIdP0 === 'tabs';
+            const singleCm = s.cmCount === 1;
+            const ok = before.rootCount === 2 && closed.panes === 1 && collapsed && survivorOk && hostIdOk && singleCm;
+            return {
+              ok,
+              detail: 'before=' + before.rootCount + ',closedPanes=' + closed.panes + ',collapsed=' + collapsed +
+                ',survivor=' + survivor + ',hostIdOk=' + hostIdOk + ',singleCm=' + singleCm,
+              evidence: 'closedTab=' + closed.name + ' focusAfter=' + s.focus + ' afterNames=' + JSON.stringify(s.tabNames) +
+                ' afterTabs=' + JSON.stringify(s.tabCounts) + ' cmH=' + JSON.stringify(s.cmH),
+            };
+          });
+
+          // ---------- 7. splitSessionShape：会话结构（内存 + 磁盘）—— 双栏文件都在 + Phase 3 起有 layout ----------
+          // Phase 3 变更（施工简报 §7-R7 预警）：会话 schema 从三键扩成"三键 + layout"。
+          // 三键**一个都没删**（旧版本仍读得懂），layout 是新增的布局快照；这里同步把断言改成
+          // 「三键仍在**且** layout 出现**且** layout 形状与当前两栏一致」。
+          await splitCase('splitSessionShape', async () => {
+            await resetPanes();
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SP_A)})`);
+            await sleepS(250);
+            await Wv(`window.__app.editor.toggleSplit()`);
+            await sleepS(200);
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SP_B)})`);
+            await sleepS(300);
+            const mem = await W(`(() => { const s = window.__app.editor.getSession(); return { keys: Object.keys(s).sort(), paths: s.paths, active: s.active, pinned: s.pinned, focused: window.__app.editor.getFocusPaneId(), layout: s.layout }; })()`);
+            const disk = await W(`(async () => {
+              window.__app.session.save();
+              await new Promise((r) => setTimeout(r, 500));
+              const st = await window.api.getSettings();
+              const ls = st.lastSession;
+              return { hasFocus: document.hasFocus(), ls: ls ? { keys: Object.keys(ls).sort(), paths: ls.paths, active: ls.active, pinned: ls.pinned, layout: ls.layout || null } : null };
+            })()`);
+            const expectKeys = JSON.stringify(['active', 'layout', 'paths', 'pinned']);
+            const memShape = JSON.stringify(mem.keys) === expectKeys;
+            const memHasBoth = mem.paths.length === 2 && mem.paths.includes(SP_A) && mem.paths.includes(SP_B);
+            // active 下标指向**焦点栏**的活动文档（Phase 2 口径未变）
+            const memActive = mem.paths[mem.active] === SP_B && mem.focused === 'p1';
+            // layout（Phase 3 新增）：两栏 + 每栏各一个文档 + 焦点栏下标 = 1 + 比例归一化
+            const L = mem.layout;
+            const memLayout = !!L && L.orientation === 'h' && Array.isArray(L.panes) && L.panes.length === 2 &&
+              L.panes[0].docs.includes(SP_A) && L.panes[1].docs.includes(SP_B) && L.focus === 1 &&
+              Array.isArray(L.sizes) && L.sizes.length === 2 && Math.abs(L.sizes[0] + L.sizes[1] - 1) < 0.01;
+            // paths 是**文档级去重**：同一文件不会因多栏而重复
+            const memDedupe = new Set(mem.paths).size === mem.paths.length;
+            const diskShape = !!disk.ls && JSON.stringify(disk.ls.keys) === expectKeys;
+            const diskHasBoth = !!disk.ls && disk.ls.paths.length === 2 && disk.ls.paths.includes(SP_A) && disk.ls.paths.includes(SP_B);
+            const hasLayout = !!disk.ls && !!disk.ls.layout && Array.isArray(disk.ls.layout.panes) && disk.ls.layout.panes.length === 2;
+            const ok = memShape && memHasBoth && memActive && memLayout && memDedupe && diskShape && diskHasBoth && hasLayout;
+            return {
+              ok,
+              detail: 'mem.keys=' + JSON.stringify(mem.keys) + ',mem.paths=' + mem.paths.length + ',mem.active=' + mem.active +
+                '(=' + mem.paths[mem.active] + '),memLayout=' + memLayout + ',dedupe=' + memDedupe +
+                ',disk.keys=' + JSON.stringify(disk.ls && disk.ls.keys) + ',disk.paths=' + (disk.ls ? disk.ls.paths.length : 'null') +
+                ',diskLayout=' + hasLayout,
+              evidence: 'memPaths=' + JSON.stringify(mem.paths) + ' diskPaths=' + JSON.stringify(disk.ls && disk.ls.paths) +
+                ' layout=' + JSON.stringify(L) + ' diskActive=' + (disk.ls && disk.ls.active) + ' hasFocus=' + disk.hasFocus,
+            };
+          });
+        } finally {
+          // 收尾：合栏 + 清标签 + 删夹具（rcDir* 段随后会断言 `.tab` 总数并起子进程，必须看到干净的单栏窗口）
+          await resetPanes().catch(() => {});
+          for (const f of SP_FILES) {
+            try { fs.rmSync(f, { force: true }); } catch { /* 已被删则忽略 */ }
+          }
+        }
+      }
+
+      // ================= v0.5.0 多视图 Phase 3「同文件多视图 + 布局持久化」：7 项端到端回归 =================
+      // 位置：Phase 2 split* 段之后、rcDir* 段之前（同样的位置约束：rcDir* 会断言 .tab 总数并起子进程）。
+      // 断言口径全部落在**渲染事实**（#editor-panes 的栏数 / 两栏 .pane-tabs 的 .tab 与名称 /
+      // 两个 .cm-editor 的几何与 textContent / 两个 EditorView 的 state.doc 逐字符相等 / 两个 view
+      // 对象的身份 / .cm-scroller 的 scrollTop / 选区 head / #modal-mask 显隐）与**磁盘事实**
+      // （fs 直读夹具文件、window.api.getSettings().lastSession 的 layout）上。
+      // 每条用例首尾都收尾（合栏 + closeAll），不把双栏/多视图状态留给后续用例。
+      {
+        const SF_A = path.join(TEST_ROOT, 'same-a.md');
+        const SF_B = path.join(TEST_ROOT, 'same-b.md');
+        // huge 负向断言用夹具：60MB 真实文本（>16MB 的 overlay 下限；见上方建仓的 big-a.bin），
+        // 用例内临时把 huge 阈值降到 10MB 并抬高打开上限，finally 逐字复原。
+        const SF_HUGE = path.join(TEST_ROOT, 'build', 'big-a.bin');
+        const SF_FILES = [SF_A, SF_B];
+        for (let i = 0; i < SF_FILES.length; i++) {
+          const body = Array.from({ length: 220 }, (_, n) => '同文件夹具 ' + (i + 1) + ' · 第 ' + (n + 1) + ' 行 content').join('\n') + '\n';
+          fs.writeFileSync(SF_FILES[i], body, 'utf8');
+        }
+        const SF_ORIG_A = fs.readFileSync(SF_A, 'utf8');
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        /** 取值型求值：只返回原始值/纯对象（裸返回 tab/DOM/EditorView 会被结构化克隆拒收） */
+        const W = (code) => win.webContents.executeJavaScript(code);
+        /** 副作用型求值：只改渲染端状态、不取回值（openFile/attach 返回的是文档对象） */
+        const Wv = (expr) => win.webContents.executeJavaScript(`(async () => { await (${expr}); })()`);
+        const mvCase = async (name, fn) => {
+          let r;
+          try {
+            r = await fn();
+          } catch (err) {
+            r = { ok: false, detail: 'ERR: ' + (err && err.stack ? err.stack.split('\n').slice(0, 3).join(' // ') : String(err)), evidence: '' };
+          }
+          results.push([name, r && r.ok === true ? true : ((r && r.detail) || 'false'), (r && r.evidence) || '']);
+        };
+        // 收尾：先合栏再清标签（顺序反了会把「关最后一个标签自动撤栏」的路径也走一遍）
+        const resetAll = async () => {
+          const n = await W(`(() => {
+            const e = window.__app.editor;
+            if (e.getPaneCount() > 1) e.mergePanes();
+            e.closeAll();
+            return e.getPaneCount();
+          })()`).catch(() => -1);
+          await sleep(140);
+          return n;
+        };
+        // 两栏渲染快照（栏数/几何/CM 文本/两个文档内容/滚动/空态/模态显隐，全部来自真实 DOM 或 view.state）
+        const SNAP = `(() => {
+          const e = window.__app.editor;
+          const root = document.getElementById('editor-panes');
+          const kids = Array.from(root.children);
+          const paneEls = kids.filter((el) => el.classList.contains('pane'));
+          const div = kids.find((el) => el.classList.contains('pane-divider')) || null;
+          const cms = paneEls.map((p) => p.querySelector('.editor-host > .cm-editor'));
+          const scs = paneEls.map((p) => p.querySelector('.cm-scroller'));
+          const n = e.getPaneCount();
+          const docs = [];
+          const views = [];
+          for (let i = 0; i < n; i++) {
+            const pe = e.getPaneEls(i);
+            const v = pe && pe.view ? pe.view : null;
+            views.push(v);
+            docs.push(v ? v.state.doc.toString() : null);
+          }
+          return {
+            rootCount: paneEls.length,
+            paneCount: n,
+            divider: !!div,
+            paneW: paneEls.map((p) => Math.round(p.getBoundingClientRect().width)),
+            cmCount: cms.filter(Boolean).length,
+            cmH: cms.map((c) => (c ? Math.round(c.getBoundingClientRect().height) : 0)),
+            cmTextLen: cms.map((c) => (c ? c.textContent.length : -1)),
+            docLens: docs.map((t) => (t === null ? -1 : t.length)),
+            docSame: n === 2 && docs[0] !== null && docs[0] === docs[1],
+            viewSame: n === 2 && views[0] === views[1],
+            scrollTops: scs.map((s) => (s ? Math.round(s.scrollTop) : -1)),
+            scrollable: scs.map((s) => (s ? s.scrollHeight - s.clientHeight : -1)),
+            layout: e.getPaneLayout(),
+            emptyVisible: paneEls.map((p) => { const em = p.querySelector('.editor-empty'); return !!em && !em.classList.contains('hidden'); }),
+            modalHidden: document.getElementById('modal-mask').classList.contains('hidden'),
+            focus: e.getFocusPaneId(),
+          };
+        })()`;
+        // 建立「同一文件两栏各一个视图」：p0 开 → 分屏 → 新栏用 forceNew 再开同一文件（同一 Document）
+        const openTwoViews = async (p) => {
+          await Wv(`window.__app.editor.openFile(${JSON.stringify(p)})`);
+          await sleep(260);
+          await Wv(`window.__app.editor.toggleSplit()`);
+          await sleep(200);
+          await Wv(`window.__app.editor.openFile(${JSON.stringify(p)}, { forceNew: true })`);
+          await sleep(360);
+        };
+        // toast 记录器（提示只活 ~1.9s，靠 MutationObserver 才拿得稳；本段内多个用例读它）
+        const HINT = '撤销按栏独立';
+        const TOAST_REC = `(() => {
+          if (window.__mhToastRec) { window.__mhToastRec.length = 0; return 'reset'; }
+          window.__mhToastRec = [];
+          const push = (el) => { try { if (el && el.classList && el.classList.contains('toast')) window.__mhToastRec.push(el.textContent); } catch (e) {} };
+          const mo = new MutationObserver((ms) => {
+            for (const m of ms) for (const n of m.addedNodes) { push(n); if (n && n.querySelectorAll) n.querySelectorAll('.toast').forEach(push); }
+          });
+          mo.observe(document, { childList: true, subtree: true });
+          document.querySelectorAll('.toast').forEach(push);
+          return 'ok';
+        })()`;
+        // 自动保存延迟临时调大：本段的断言依赖「编辑后磁盘未变」，不能被 800ms 的自动保存抢跑
+        let prevAutoSave = null;
+        try {
+          prevAutoSave = await W('window.api.getSettings().then((s) => s.autoSaveDelay)').catch(() => null);
+          await W(`(async () => { await window.api.setSettings({ autoSaveDelay: 30000 }); window.__app.state.settings = await window.api.getSettings(); return true; })()`);
+          await W(TOAST_REC);
+
+          // ---------- 1. sameFileTwoPanes：同一文件在两栏各一个视图（独立 state + 独立滚动/光标） ----------
+          await mvCase('sameFileTwoPanes', async () => {
+            await resetAll();
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SF_A)})`);
+            await sleep(260);
+            const one = await W(SNAP);
+            await Wv(`window.__app.editor.toggleSplit()`);
+            await sleep(200);
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SF_A)}, { forceNew: true })`);
+            await sleep(360);
+            const s = await W(SNAP);
+            // 独立滚动：只滚左栏
+            const sc = await W(`(() => {
+              const e = window.__app.editor;
+              const a = e.getPaneEls(0).view.scrollDOM;
+              const b = e.getPaneEls(1).view.scrollDOM;
+              const b0 = Math.round(b.scrollTop);
+              a.scrollTop = 300;
+              return { a: Math.round(a.scrollTop), b0: b0 };
+            })()`);
+            await sleep(200);
+            const s2 = await W(SNAP);
+            // 独立光标：只动左栏（右栏 head 必须还是 0）
+            const sel = await W(`(() => {
+              const e = window.__app.editor;
+              e.getPaneEls(0).view.dispatch({ selection: { anchor: 100 } });
+              return { left: e.getPaneEls(0).view.state.selection.main.head, right: e.getPaneEls(1).view.state.selection.main.head };
+            })()`);
+            // ---- 负向断言（硬口径 ①）：**禁止两个 huge 视图看同一文件** ----
+            // overlay 编辑会话是路径单例（overlay-ipc 的 handles/pathToId/locks）：第二次同文件打开
+            // 必须被拒绝并回落「聚焦已有栏 + toast」，绝不新开第二个 huge 视图。
+            let neg = null;
+            let prevMaxMB = null;
+            try {
+              prevMaxMB = await W('window.api.getSettings().then((s) => s.maxFileSizeMB)').catch(() => null);
+              await resetAll();
+              await W(`(async () => {
+                await window.api.setSettings({ maxFileSizeMB: 4096 });
+                window.__app.state.settings = await window.api.getSettings();
+                window.__app.editor.setHugeThresholdMB(10);
+                return true;
+              })()`);
+              await Wv(`window.__app.editor.openFile(${JSON.stringify(SF_HUGE)})`);
+              await sleep(1200);
+              await Wv(`window.__app.editor.toggleSplit()`);
+              await sleep(200);
+              neg = await W(`(async () => {
+                const e = window.__app.editor;
+                const before = (window.__mhToastRec || []).length;
+                await e.openFile(${JSON.stringify(SF_HUGE)}, { forceNew: true });
+                await new Promise((r) => setTimeout(r, 300));
+                const t = e.findTabByPath(${JSON.stringify(SF_HUGE)});
+                const L = e.getPaneLayout();
+                return {
+                  kind: t ? t.kind : null,
+                  homes: t ? e.panesOfDoc(t).length : -1,
+                  views: t ? e.viewCountOf(t) : -1,
+                  p1Docs: L.panes[1] ? L.panes[1].docs : -1,
+                  paneCount: e.getPaneCount(),
+                  focus: e.getFocusPaneId(),
+                  toasts: (window.__mhToastRec || []).slice(before)
+                };
+              })()`);
+            } catch (err) {
+              neg = { err: String(err && err.message ? err.message : err) };
+            } finally {
+              await resetAll().catch(() => {});
+              const restoreMB = Number.isFinite(Number(prevMaxMB)) && Number(prevMaxMB) > 0 ? Math.floor(Number(prevMaxMB)) : 50;
+              await W(`(async () => {
+                await window.api.setSettings({ maxFileSizeMB: ${restoreMB} });
+                window.__app.state.settings = await window.api.getSettings();
+                window.__app.editor.setHugeThresholdMB(1024);
+                return true;
+              })()`).catch(() => {});
+            }
+            const refused = !!neg && !neg.err && (neg.toasts || []).some((x) => String(x).indexOf('大文件视图不支持同文件多视图') >= 0);
+            const hugeNeg = refused && neg.kind === 'huge' && neg.homes === 1 && neg.views === 1 && neg.p1Docs === 0 && neg.paneCount === 2 && neg.focus === 'p0';
+            const twoPanes = one.rootCount === 1 && s.rootCount === 2 && s.divider === true;
+            const twoCm = s.cmCount === 2 && s.cmH.every((h) => h > 100) && s.cmTextLen.every((n) => n > 0) && s.cmTextLen[0] === s.cmTextLen[1];
+            const sameFile = s.layout.panes.length === 2 && s.layout.panes[0].path === SF_A && s.layout.panes[1].path === SF_A && s.docSame === true;
+            const diffViews = s.viewSame === false;
+            const indepScroll = sc.a > 0 && sc.b0 === 0 && s2.scrollTops[0] > 100 && Math.abs(s2.scrollTops[1]) <= 2;
+            const indepCaret = sel.left === 100 && sel.right === 0;
+            const wide = s.paneW.length === 2 && s.paneW.every((w) => w >= 199);
+            const ok = twoPanes && twoCm && sameFile && diffViews && indepScroll && indepCaret && wide && hugeNeg;
+            return {
+              ok,
+              detail: 'onePane=' + one.rootCount + ',twoPanes=' + twoPanes + '(rootCount=' + s.rootCount + ',divider=' + s.divider + ')' +
+                ',twoCm=' + twoCm + ',sameFile=' + sameFile + ',diffViews=' + diffViews +
+                ',indepScroll=' + indepScroll + '(' + JSON.stringify(sc) + '→' + JSON.stringify(s2.scrollTops) + ')' +
+                ',indepCaret=' + indepCaret + '(' + JSON.stringify(sel) + '),wide=' + wide + '(' + JSON.stringify(s.paneW) + ')' +
+                ',hugeNeg=' + hugeNeg + (neg ? '(' + JSON.stringify(neg) + ')' : ''),
+              evidence: 'cmH=' + JSON.stringify(s.cmH) + ' cmTextLen=' + JSON.stringify(s.cmTextLen) +
+                ' docLens=' + JSON.stringify(s.docLens) + ' scrollable=' + JSON.stringify(s.scrollable) +
+                ' layoutPanes=' + JSON.stringify(s.layout.panes) + ' focus=' + s.focus,
+            };
+          });
+
+          // ---------- 2. sameFileEditSync：左改右看（内容实时一致、磁盘不动、脏标记只标一次） ----------
+          await mvCase('sameFileEditSync', async () => {
+            await resetAll();
+            await openTwoViews(SF_A);
+            // 广播是**异步**的（按文档串行的 Promise 队列，回调在微任务里跑）→ 派发后同一同步块里
+            // 右栏必然还没追上（这是设计口径，不是缺陷）。这里只记录"左栏已变"，追平由下面的
+            // 180ms 等待 + 内容断言负责；另测一次真实传播延迟（证据项）。
+            const edit = await W(`(() => {
+              const e = window.__app.editor;
+              e.getPaneEls(0).view.dispatch({ changes: { from: 0, insert: 'X' } });
+              return { leftHead: e.getPaneEls(0).view.state.doc.sliceString(0, 2), rightHead: e.getPaneEls(1).view.state.doc.sliceString(0, 2) };
+            })()`);
+            const lag = await W(`(async () => {
+              const e = window.__app.editor;
+              const t0 = Date.now();
+              const L = e.getPaneEls(0).view.state.doc.toString();
+              while (Date.now() - t0 < 800) {
+                if (e.getPaneEls(1).view.state.doc.toString() === L) return Date.now() - t0;
+                await new Promise((r) => setTimeout(r, 10));
+              }
+              return -1;
+            })()`);
+            await sleep(180);
+            const sync = await W(`(() => {
+              const e = window.__app.editor;
+              const L = e.getPaneEls(0).view.state.doc.toString();
+              const R = e.getPaneEls(1).view.state.doc.toString();
+              const t = e.findTabByPath(${JSON.stringify(SF_A)});
+              const s = e.getSession();
+              return {
+                same: L === R, len: L.length,
+                bothX: L.charAt(0) === 'X' && R.charAt(0) === 'X',
+                dirty: !!t && t.dirty === true,
+                pathOnce: s.paths.filter((p) => p === ${JSON.stringify(SF_A)}).length,
+                pathsTotal: s.paths.length
+              };
+            })()`);
+            const diskAfter = fs.readFileSync(SF_A, 'utf8');
+            // 反向：右栏输入 → 左栏跟着变
+            const rev = await W(`(async () => {
+              const e = window.__app.editor;
+              const v = e.getPaneEls(1).view;
+              v.dispatch({ changes: { from: v.state.doc.length, insert: 'Y' } });
+              await new Promise((r) => setTimeout(r, 200));
+              const L = e.getPaneEls(0).view.state.doc.toString();
+              const R = e.getPaneEls(1).view.state.doc.toString();
+              return { same: L === R, bothY: L.slice(-1) === 'Y' && R.slice(-1) === 'Y', len: L.length };
+            })()`);
+            // 连打 20 次（广播队列串行）：不得回环、不得丢/重字符
+            const burst = await W(`(async () => {
+              const e = window.__app.editor;
+              const v = e.getPaneEls(0).view;
+              for (let i = 0; i < 20; i++) v.dispatch({ changes: { from: v.state.doc.length, insert: 'q' } });
+              await new Promise((r) => setTimeout(r, 320));
+              const L = e.getPaneEls(0).view.state.doc.toString();
+              const R = e.getPaneEls(1).view.state.doc.toString();
+              return { same: L === R, diff: L.length - R.length, len: L.length };
+            })()`);
+            const noWrite = diskAfter === SF_ORIG_A;
+            // 判定不含「同一同步块里右栏已追平」（那与异步广播的设计相悖，见上面的 edit 注释）；
+            // 追平由 sync.same/bothX 断言，传播延迟只作证据
+            const lenOk = sync.len === SF_ORIG_A.length + 1;
+            const lagOk = lag >= 0 && lag <= 800;
+            const burstLenOk = burst.len === sync.len + 21;
+            const ok = sync.same && sync.bothX && lenOk && sync.dirty &&
+              sync.pathOnce === 1 && sync.pathsTotal === 1 && lagOk &&
+              noWrite && rev.same && rev.bothY && burst.same && burst.diff === 0 && burstLenOk;
+            return {
+              ok,
+              detail: 'same=' + sync.same + '(len=' + sync.len + ',lenOk=' + lenOk + '),bothX=' + sync.bothX + ',dirty=' + sync.dirty +
+                ',pathOnce=' + sync.pathOnce + '/' + sync.pathsTotal + ',syncLagMs=' + lag + '(lagOk=' + lagOk + ')' +
+                ',noWrite=' + noWrite + ',rev=' + rev.same + '/' + rev.bothY + ',burst=' + burst.same + '(diff=' + burst.diff + ',len=' + burst.len + ',lenOk=' + burstLenOk + ')',
+              evidence: 'headsSync=' + JSON.stringify(edit) + '（右栏落后是异步广播的预期：同一同步块内必然未追平）' +
+                ' revLen=' + rev.len + ' diskBytes=' + diskAfter.length + '/' + SF_ORIG_A.length,
+            };
+          });
+
+          // ---------- 3. sameFileUndo：**记录并断言当前语义**（撤销按栏独立，可能撤掉对方刚输入的内容） ----------
+          await mvCase('sameFileUndo', async () => {
+            await resetAll();
+            await openTwoViews(SF_A);
+            const rec = await W(`(async () => {
+              const e = window.__app.editor;
+              const L = e.getPaneEls(0).view, R = e.getPaneEls(1).view;
+              L.dispatch({ changes: { from: L.state.doc.length, insert: 'A' } });
+              await new Promise((r) => setTimeout(r, 160));
+              R.dispatch({ changes: { from: R.state.doc.length, insert: 'B' } });
+              await new Promise((r) => setTimeout(r, 220));
+              const l0 = L.state.doc.toString(), r0 = R.state.doc.toString();
+              const before = { same: l0 === r0, tail: l0.slice(-2), len: l0.length };
+              // 左栏真实 Ctrl+Z（与 chunkUndoNoTruncate 同一手法：contentDOM 上的 KeyboardEvent）
+              L.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, keyCode: 90, bubbles: true, cancelable: true }));
+              await new Promise((r) => setTimeout(r, 300));
+              const l1 = L.state.doc.toString(), r1 = R.state.doc.toString();
+              const hints = (window.__mhToastRec || []).filter((x) => String(x).indexOf(${JSON.stringify(HINT)}) >= 0);
+              return {
+                before: before,
+                afterSame: l1 === r1,
+                afterLen: l1.length,
+                leftTail: l1.slice(-1),
+                rightTail: r1.slice(-1),
+                rightLost: r1.slice(-1) !== 'B',
+                leftShrank: l1.length < l0.length,
+                hints: hints.length,
+                hintText: hints.length ? hints[0] : '',
+                modalHidden: document.getElementById('modal-mask').classList.contains('hidden')
+              };
+            })()`);
+            // 「第二次分屏不再弹」：再完整走一遍"两栏同文件"的挂载
+            await resetAll();
+            await openTwoViews(SF_A);
+            const hintsAfter = await W(`(window.__mhToastRec || []).filter((x) => String(x).indexOf(${JSON.stringify(HINT)}) >= 0).length`);
+            // 当前语义（实测）：左栏 undo 把**右栏刚输入的 B** 一并撤掉，两栏内容仍然一致
+            const u1_beforeSame = rec.before.same === true;
+            const u2_beforeAB = rec.before.tail === 'AB';
+            const u3_afterSame = rec.afterSame === true;
+            const u4_rightLost = rec.rightLost === true;
+            const u5_leftShrank = rec.leftShrank === true;
+            const u6_noModal = rec.modalHidden === true;
+            const undoSemantics = u1_beforeSame && u2_beforeAB && u3_afterSame && u4_rightLost && u5_leftShrank && u6_noModal;
+            const h1_once = rec.hints === 1;
+            const h2_text = rec.hintText.indexOf(HINT) >= 0;
+            const h3_stillOnce = hintsAfter === 1;
+            const hintOk = h1_once && h2_text && h3_stillOnce;
+            const ok = undoSemantics && hintOk;
+            return {
+              ok,
+              detail: 'undoSemantics=' + undoSemantics +
+                '[beforeSame=' + u1_beforeSame + ',beforeTailAB=' + u2_beforeAB + '(' + JSON.stringify(rec.before.tail) + ')' +
+                ',afterSame=' + u3_afterSame + ',rightLostB=' + u4_rightLost + '(' + rec.rightTail + ')' +
+                ',leftShrank=' + u5_leftShrank + '(' + rec.before.len + '→' + rec.afterLen + '),noModal=' + u6_noModal + ']' +
+                ',hintOnce=' + hintOk + '[first=' + rec.hints + '(once=' + h1_once + '),textHasHint=' + h2_text +
+                ',after2ndMount=' + hintsAfter + '(stillOnce=' + h3_stillOnce + ')]',
+              evidence: 'hintText=' + JSON.stringify(rec.hintText),
+            };
+          });
+
+          // ---------- 4. sameFileCloseOne：关一个视图 ≠ 关文件（不落盘/不清脏/文档仍在）；关最后一个才走文档级 ----------
+          await mvCase('sameFileCloseOne', async () => {
+            await resetAll();
+            await openTwoViews(SF_A);
+            // 磁盘基线在**编辑之前**取：此时上一用例的 `saveNow` 早已落盘（closeTab 里的保存是排队异步的），
+            // 取在编辑之后会与"排队中的旧保存"竞态，把无关抖动误判成"关视图时写盘"。
+            const diskBeforeClose = fs.readFileSync(SF_A, 'utf8');
+            const typed = await W(`(async () => {
+              const e = window.__app.editor;
+              const v = e.getPaneEls(0).view;
+              v.dispatch({ changes: { from: 0, insert: 'ZZ' } });
+              await new Promise((r) => setTimeout(r, 200));
+              const t = e.findTabByPath(${JSON.stringify(SF_A)});
+              return { dirty: !!t && t.dirty === true, rightHead: e.getPaneEls(1).view.state.doc.sliceString(0, 2), rightLen: e.getPaneEls(1).view.state.doc.length };
+            })()`);
+            // 点右栏那条 .tab 的 ✕（真实用户动作）。
+            // 注意：栏的收缩是**同步**的 —— closeViewInPane → detachViewFromPane → removeEmptyPane
+            // → mergePanes 全在点击派发的同一个同步块里跑完，所以点完读到的栏数已经是 1。
+            const closed = await W(`(() => {
+              const e = window.__app.editor;
+              const panesBefore = e.getPaneCount();
+              const tabs = e.getPaneEls(1).tabsEl.querySelectorAll('.tab');
+              const name = (tabs[0].querySelector('.tab-name') || {}).textContent;
+              tabs[0].querySelector('.tab-close').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              return { name: name, panesBefore: panesBefore, panes: e.getPaneCount(), modalHidden: document.getElementById('modal-mask').classList.contains('hidden') };
+            })()`);
+            await sleep(320);
+            const s = await W(SNAP);
+            const afterOne = await W(`(() => {
+              const e = window.__app.editor;
+              const t = e.findTabByPath(${JSON.stringify(SF_A)});
+              return {
+                exists: !!t, dirty: !!t && t.dirty === true,
+                path: e.getPaneLayout().panes[0].path,
+                panes: e.getPaneCount(),
+                docHead: e.getPaneEls(0).view.state.doc.sliceString(0, 2),
+                home: t ? e.paneIdOf(t) : null
+              };
+            })()`);
+            const diskAfterOne = fs.readFileSync(SF_A, 'utf8');
+            // 再关最后一个视图 → 文档级关闭（脏内容落盘、文档被移除、空态出现）
+            const closed2 = await W(`(() => {
+              const e = window.__app.editor;
+              const tabs = e.getPaneEls(0).tabsEl.querySelectorAll('.tab');
+              if (!tabs.length) return { clicked: false, panes: e.getPaneCount() };
+              tabs[0].querySelector('.tab-close').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              return { clicked: true, panes: e.getPaneCount() };
+            })()`);
+            await sleep(450);
+            const final = await W(`(() => {
+              const e = window.__app.editor;
+              const t = e.findTabByPath(${JSON.stringify(SF_A)});
+              const act = e.getActiveTab();
+              return {
+                exists: !!t, active: act ? act.name : null, panes: e.getPaneCount(),
+                emptyVisible: !document.getElementById('editor-empty').classList.contains('hidden'),
+                docLen: e.getPaneEls(0).view.state.doc.length,
+                modalHidden: document.getElementById('modal-mask').classList.contains('hidden')
+              };
+            })()`);
+            const diskFinal = fs.readFileSync(SF_A, 'utf8');
+            // G3 的判据（不许把「关一个视图」变成一次写盘）用**内容**判定，不用跨时间窗口的逐字节相等：
+            // 同一文件上可能还有排队中的旧保存落地（saveQueue 是应用级串行链，关标签时的保存不 await），
+            // 那与本用例无关，但会让逐字节比较变红。这里断言「磁盘长度未变」+「刚输入的 ZZ 没被写进去」。
+            const diskNoEdit = diskAfterOne.indexOf('ZZ') !== 0;
+            const diskLenSame = diskAfterOne.length === diskBeforeClose.length;
+            // 每个合取项都单独算成布尔并**全部**进 detail（首轮红就是"失败的是没打进 detail 的那一项"）：
+            const c1_panesBefore = closed.panesBefore === 2;   // 点击前确实是双栏
+            const c2_panesAfterClick = closed.panes === 1;     // 收缩是同步的（见上面的注释）
+            const c3_noModal = closed.modalHidden === true;
+            const c4_exists = afterOne.exists === true;
+            const c5_dirty = afterOne.dirty === true;
+            const c6_panes = afterOne.panes === 1;
+            const c7_path = afterOne.path === SF_A;
+            const c8_headZZ = afterOne.docHead === 'ZZ';
+            const c9_rootCount = s.rootCount === 1;
+            const c10_noDivider = s.divider === false;
+            const viewCloseClean = c1_panesBefore && c2_panesAfterClick && c3_noModal && c4_exists && c5_dirty &&
+              c6_panes && c7_path && c8_headZZ && diskNoEdit && diskLenSame && c9_rootCount && c10_noDivider;
+            const docCloseWorked = closed2.clicked === true && final.exists === false && final.active === null &&
+              final.panes === 1 && final.emptyVisible === true && final.docLen === 0 &&
+              diskFinal.indexOf('ZZ') === 0;
+            // 共同点：全程没有弹过模态框（当前实现关标签是"脏则静默保存"，从不弹确认框 —— 见交付说明的诚实清单）
+            const noModal = closed.modalHidden === true && final.modalHidden === true;
+            const ok = viewCloseClean && docCloseWorked && noModal && typed.dirty && typed.rightHead === 'ZZ';
+            return {
+              ok,
+              detail: 'viewClose=' + viewCloseClean +
+                '[panesBefore2=' + c1_panesBefore + '(' + closed.panesBefore + '),panesAfterClick1=' + c2_panesAfterClick + '(' + closed.panes + ')' +
+                ',modalHidden=' + c3_noModal + ',exists=' + c4_exists + ',dirty=' + c5_dirty + ',panes=' + c6_panes + '(' + afterOne.panes + ')' +
+                ',path=' + c7_path + ',headZZ=' + c8_headZZ + '(' + JSON.stringify(afterOne.docHead) + ')' +
+                ',rootCount1=' + c9_rootCount + '(' + s.rootCount + '),noDivider=' + c10_noDivider +
+                ',diskNoEdit=' + diskNoEdit + ',diskLenSame=' + diskLenSame + '(' + diskAfterOne.length + ')' +
+                ',diskByteIdentical=' + (diskAfterOne === diskBeforeClose) + ']' +
+                ',docClose=' + docCloseWorked + '(exists=' + final.exists + ',active=' + final.active + ',empty=' + final.emptyVisible +
+                ',diskHasZZ=' + (diskFinal.indexOf('ZZ') === 0) + ')' + ',noModal=' + noModal,
+              evidence: 'closedTab=' + closed.name + ' rightLenBefore=' + typed.rightLen + ' docLenAfter=' + final.docLen +
+                ' diskLen=before/afterOne/final ' + diskBeforeClose.length + '/' + diskAfterOne.length + '/' + diskFinal.length,
+            };
+          });
+
+          // ---------- 5. multiViewExternalChange：外部修改广播到**全部**视图（一次 toast、重载后清脏） ----------
+          await mvCase('multiViewExternalChange', async () => {
+            await resetAll();
+            await openTwoViews(SF_A);
+            // 外部内容刻意与"上一用例留下的长度"错开：只比长度会被**长度巧合**骗过
+            // （实测：上一用例的文档 5636 == 旧 ext1 的 5636，导致轮询第一轮就误判"已追平"、
+            //  从不等待事件到达 —— 这是本用例首轮红的真因，不是产品缺陷）。
+            const MARK = '外部追加行 EXT-1\n外部追加行 EXT-2\n外部追加行 EXT-3\n';
+            const ext1 = SF_ORIG_A + MARK;
+            const ext2 = ext1 + '外部追加行 EXT-4（重试）\n';
+            // 自写回声宽限：前面的用例保存过同一夹具（filewatch SELF_WRITE_GRACE_MS=2000 + 300ms 防抖），
+            // 不等过窗口就外部写会被当成自身回声吸收 → 假阴性（实测：等待 ~1.2s 时确实被吸收）。
+            await sleep(2400);
+            // 真正的外部写：主进程 fs（不经 app 的写盘 IPC，不打 markSelfWrite）
+            fs.writeFileSync(SF_A, ext1, 'utf8');
+            let seen = null;
+            let expect = ext1.length;
+            let wrote = 1;
+            for (let round = 0; round < 3; round++) {
+              for (let i = 0; i < 10; i++) {
+                await sleep(300);
+                const snap = await W(`(() => {
+                  const e = window.__app.editor;
+                  const L = e.getPaneEls(0).view.state.doc.toString();
+                  const R = e.getPaneEls(1).view.state.doc.toString();
+                  const t = e.findTabByPath(${JSON.stringify(SF_A)});
+                  return {
+                    len: L.length, same: L === R,
+                    hasMark: L.indexOf('EXT-1') >= 0 && L.indexOf('EXT-3') >= 0,
+                    dirty: !!t && t.dirty === true,
+                    toasts: (window.__mhToastRec || []).filter((x) => String(x).indexOf('已从外部重新加载') >= 0).length,
+                    modalHidden: document.getElementById('modal-mask').classList.contains('hidden')
+                  };
+                })()`).catch(() => null);
+                if (!snap) continue;
+                seen = snap;
+                // 必须**按内容**判定追平（长度相同不代表内容已换）；hasMark 为真才可能 break
+                if (snap.hasMark && snap.same && snap.len === expect) break;
+              }
+              if (seen && seen.hasMark && seen.same && seen.len === expect) break;
+              // 兜底重试：内容再变一次（长度与上一次差 16 字节，杜绝长度巧合）
+              if (round < 2) {
+                expect = ext1.length + 16 * (round + 1);
+                fs.writeFileSync(SF_A, ext1 + '外部追加行 EXT-4（重试）\n'.repeat(round + 1), 'utf8');
+                wrote++;
+              }
+            }
+            const bothReloaded = !!seen && seen.len === expect && seen.same === true && seen.hasMark === true;
+            const oneToast = !!seen && seen.toasts === 1;
+            const cleanAfterReload = !!seen && seen.dirty === false;
+            const ok = bothReloaded && oneToast && cleanAfterReload && seen.modalHidden === true;
+            return {
+              ok,
+              detail: 'bothReloaded=' + bothReloaded + '(len=' + (seen ? seen.len : -1) + '/' + expect +
+                ',same=' + (seen ? seen.same : '?') + ',hasMark=' + (seen ? seen.hasMark : '?') + ')' +
+                ',oneToast=' + oneToast + '(n=' + (seen ? seen.toasts : -1) + '),clean=' + cleanAfterReload +
+                ',modalHidden=' + (seen ? seen.modalHidden : '?'),
+              evidence: 'writes=' + wrote + ' dirty=' + (seen ? seen.dirty : '?') +
+                ' 外部写=主进程 fs.writeFileSync（无 markSelfWrite）；等待 2400ms 跨过自写宽限',
+            };
+          });
+
+          // ---------- 6. layoutPersist：布局落盘（比例用区间断言 —— 拖拽有像素取整） ----------
+          await mvCase('layoutPersist', async () => {
+            await resetAll();
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SF_A)})`);
+            await sleep(280);
+            await Wv(`window.__app.editor.toggleSplit()`);
+            await sleep(200);
+            await Wv(`window.__app.editor.openFile(${JSON.stringify(SF_B)})`);
+            await sleep(320);
+            const dragged = await W(`(() => {
+              const e = window.__app.editor;
+              const root = document.getElementById('editor-panes');
+              const div = document.querySelector('.pane-divider');
+              const rr = root.getBoundingClientRect();
+              const dw = div.getBoundingClientRect().width;
+              const usable = Math.max(1, rr.width - dw);
+              const x0 = div.getBoundingClientRect().left + dw / 2;
+              const y0 = div.getBoundingClientRect().top + 20;
+              const x1 = rr.left + usable * 0.35;
+              div.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, clientX: x0, clientY: y0 }));
+              document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x1, clientY: y0 }));
+              document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x1, clientY: y0 }));
+              e.focusPaneIndex(1); // 焦点放右栏
+              const L = e.getPaneLayout();
+              return { ratio: +L.ratio.toFixed(4), sizes: e.getPaneSizes(), focus: e.getFocusPaneId(), panes: L.panes.map((p) => p.path) };
+            })()`);
+            const disk = await W(`(async () => {
+              window.__app.session.save();
+              await new Promise((r) => setTimeout(r, 500));
+              window.__app.state.settings = await window.api.getSettings();
+              const st = await window.api.getSettings();
+              const ls = st.lastSession;
+              if (!ls) return { ls: null, hasFocus: document.hasFocus() };
+              const ly = ls.layout || null;
+              return {
+                hasFocus: document.hasFocus(),
+                keys: Object.keys(ls).sort(),
+                paths: ls.paths, active: ls.active, pinned: ls.pinned,
+                layout: ly ? { orientation: ly.orientation, sizes: ly.sizes, focus: ly.focus, panes: ly.panes } : null
+              };
+            })()`);
+            const ly = disk.layout;
+            const shape = !!ly && ly.panes.length === 2 && ly.orientation === 'h';
+            const leftHasA = !!ly && ly.panes[0].docs.indexOf(SF_A) >= 0;
+            const rightHasB = !!ly && ly.panes[1].docs.indexOf(SF_B) >= 0;
+            const focusOk = !!ly && ly.focus === 1;
+            const sizeOk = !!ly && Array.isArray(ly.sizes) && ly.sizes[0] > 0.3 && ly.sizes[0] < 0.42 && Math.abs(ly.sizes[0] + ly.sizes[1] - 1) < 0.01;
+            // 三键仍在 + paths 是**文档级去重**（同一文件在两栏也只出现一次）
+            const keysOk = !!disk.paths && disk.keys.join(',') === 'active,layout,paths,pinned';
+            const dedupe = Array.isArray(disk.paths) && new Set(disk.paths).size === disk.paths.length &&
+              disk.paths.indexOf(SF_A) >= 0 && disk.paths.indexOf(SF_B) >= 0;
+            const inPathsOnce = !!disk.paths && disk.paths.filter((p) => p === SF_A).length === 1;
+            const ok = shape && leftHasA && rightHasB && focusOk && sizeOk && keysOk && dedupe && inPathsOnce &&
+              dragged.focus === 'p1' && disk.hasFocus === true;
+            return {
+              ok,
+              detail: 'layout=' + shape + '(panes=' + (ly ? ly.panes.length : -1) + ',focus=' + (ly ? ly.focus : '?') +
+                ',sizes=' + JSON.stringify(ly ? ly.sizes : null) + ' sizeOk=' + sizeOk + ')' +
+                ',leftHasA=' + leftHasA + ',rightHasB=' + rightHasB + ',focusOk=' + focusOk + '(layout.focus=' + (ly ? ly.focus : '?') + ')' +
+                ',docs=' + (ly ? JSON.stringify(ly.panes.map((p) => p.docs.map((d) => d.split(/[\\\\/]/).pop()))) : 'null') +
+                ',keys=' + JSON.stringify(disk.keys) + ' keysOk=' + keysOk + ',dedupe=' + dedupe + ',inPathsOnce=' + inPathsOnce +
+                ',draggedFocus=' + dragged.focus + ',hasFocus=' + disk.hasFocus,
+              evidence: 'dragged=' + JSON.stringify(dragged) + ' paths=' + JSON.stringify((disk.paths || []).map((p) => p.split(/[\\\\/]/).pop())),
+            };
+          });
+
+          // ---------- 7. layoutBackCompat：旧会话（无 layout）回落单栏，三键逐位还原 ----------
+          await mvCase('layoutBackCompat', async () => {
+            const preReset = await resetAll();
+            // 诊断项：恢复前的栏数（上一用例 layoutPersist 留的是双栏；resetAll 合并失败会让本用例
+            // 的 singlePane 变红，但看不出是谁的问题 → 把它记进 detail/evidence）
+            const preSnap = await W(`(() => {
+              const e = window.__app.editor;
+              return { panes: e.getPaneCount(), dom: document.querySelectorAll('#editor-panes > .pane').length, divider: !!document.querySelector('.pane-divider') };
+            })()`);
+            const setOld = await W(`(async () => {
+              await window.api.setSettings({ lastSession: { paths: [${JSON.stringify(SF_A)}, ${JSON.stringify(SF_B)}], active: 1, pinned: [0] } });
+              window.__app.state.settings = await window.api.getSettings();
+              return true;
+            })()`);
+            await Wv(`window.__app.session.restore()`);
+            await sleep(420);
+            const s = await W(SNAP);
+            const st = await W(`(() => {
+              const e = window.__app.editor;
+              const sess = e.getSession();
+              const act = e.getActiveTab();
+              const tA = e.findTabByPath(${JSON.stringify(SF_A)});
+              return {
+                paths: sess.paths, active: act ? act.path : null,
+                pinnedA: !!tA && tA.pinned === true,
+                tabsInP0: e.getPaneLayout().panes[0].docs,
+                paneCount: e.getPaneCount(),
+                modalHidden: document.getElementById('modal-mask').classList.contains('hidden')
+              };
+            })()`);
+            const keysOk = st.paths.length === 2 && st.paths[0] === SF_A && st.paths[1] === SF_B;
+            // ⚠️ 首轮红的真因：这里曾读 `s.paneCount`，而 SNAP 当时**没有**这个字段 ⇒ undefined === 1 恒假，
+            // 与真实栏数无关（其余子项全 true 却整体判红）。现已给 SNAP 补上 paneCount，并与
+            // `st.paneCount`（渲染端 e.getPaneCount()）双口径同时断言。
+            const sp1_rootCount = s.rootCount === 1;
+            const sp2_divider = s.divider === false;
+            const sp3_snapPanes = s.paneCount === 1;
+            const sp4_apiPanes = st.paneCount === 1;
+            const singlePane = sp1_rootCount && sp2_divider && sp3_snapPanes && sp4_apiPanes;
+            const activeOk = st.active === SF_B;
+            const pinOk = st.pinnedA === true;
+            const silentOk = st.modalHidden === true;
+            // 再存一次 → 写出 layout（升级路径），paths 与恢复前一致
+            const disk = await W(`(async () => {
+              window.__app.session.save();
+              await new Promise((r) => setTimeout(r, 500));
+              window.__app.state.settings = await window.api.getSettings();
+              const st2 = await window.api.getSettings();
+              const ls = st2.lastSession || {};
+              return {
+                hasFocus: document.hasFocus(),
+                keys: Object.keys(ls).sort(),
+                paths: ls.paths || [],
+                layout: ls.layout ? { panes: ls.layout.panes, focus: ls.layout.focus, sizes: ls.layout.sizes } : null
+              };
+            })()`);
+            const upgradeOk = !!disk.layout && disk.layout.panes.length === 1 && disk.layout.panes[0].docs.length === 2 &&
+              disk.paths.length === 2 && disk.paths[0] === SF_A && disk.paths[1] === SF_B;
+            // 旧格式 + 缺失文件：静默跳过、只开 1 个标签、不弹 alertBox
+            await resetAll();
+            const missing = path.join(TEST_ROOT, 'same-missing-xyz.md');
+            await W(`(async () => {
+              await window.api.setSettings({ lastSession: { paths: [${JSON.stringify(missing)}, ${JSON.stringify(SF_B)}], active: 1, pinned: [] } });
+              window.__app.state.settings = await window.api.getSettings();
+              return true;
+            })()`);
+            await Wv(`window.__app.session.restore()`);
+            await sleep(420);
+            const st2 = await W(`(() => {
+              const e = window.__app.editor;
+              const act = e.getActiveTab();
+              return {
+                tabs: e.getSession().paths.length,
+                hasMissing: !!e.findTabByPath(${JSON.stringify(missing)}),
+                active: act ? act.path : null,
+                modalHidden: document.getElementById('modal-mask').classList.contains('hidden')
+              };
+            })()`);
+            const missingOk = st2.tabs === 1 && st2.hasMissing === false && st2.active === SF_B && st2.modalHidden === true;
+            // 有 layout 的恢复（G4 的正向路径）：两栏 + **同一文件在两栏各一个视图且两栏都显示它** →
+            // 读盘只发生一次（paths 里该文件只出现 1 次）、比例/焦点/各栏活动项按快照还原。
+            // 焦点刻意取 **0**（不是 1）：逐栏激活时最后一栏正好是第 2 栏，用 focus=1 会掩盖
+            // "激活过程把焦点冲掉"的排序缺陷（focus=0 才能把它钉住）。
+            await resetAll();
+            await W(`(async () => {
+              await window.api.setSettings({ lastSession: {
+                paths: [${JSON.stringify(SF_A)}, ${JSON.stringify(SF_B)}], active: 0, pinned: [],
+                layout: { orientation: 'h', sizes: [0.35, 0.65], focus: 0, panes: [
+                  { docs: [${JSON.stringify(SF_A)}, ${JSON.stringify(SF_B)}], active: 0, pinned: [] },
+                  { docs: [${JSON.stringify(SF_A)}], active: 0, pinned: [] }
+                ] }
+              } });
+              window.__app.state.settings = await window.api.getSettings();
+              return true;
+            })()`);
+            await Wv(`window.__app.session.restore()`);
+            await sleep(700);
+            const lay = await W(`(() => {
+              const e = window.__app.editor;
+              const sess = e.getSession();
+              const t = e.findTabByPath(${JSON.stringify(SF_A)});
+              const L = e.getPaneLayout();
+              const v0 = e.getPaneEls(0).view, v1 = e.getPaneEls(1).view;
+              return {
+                panes: e.getPaneCount(), divider: !!document.querySelector('.pane-divider'),
+                paths: sess.paths.length, aOnce: sess.paths.filter((p) => p === ${JSON.stringify(SF_A)}).length,
+                homesA: t ? e.panesOfDoc(t).length : -1, viewsA: t ? e.viewCountOf(t) : -1,
+                p0Docs: L.panes[0].docs, p1Docs: L.panes[1].docs,
+                focus: e.getFocusPaneId(), sizes: e.getPaneSizes(),
+                p0ActiveIsA: L.panes[0].path === ${JSON.stringify(SF_A)},
+                p1ActiveIsA: L.panes[1].path === ${JSON.stringify(SF_A)},
+                same: v0.state.doc.toString() === v1.state.doc.toString(),
+                views: v0 !== v1, modalHidden: document.getElementById('modal-mask').classList.contains('hidden')
+              };
+            })()`);
+            const layoutRestoreOk = lay.panes === 2 && lay.divider === true && lay.paths === 2 && lay.aOnce === 1 &&
+              lay.homesA === 2 && lay.viewsA === 2 && lay.p0Docs === 2 && lay.p1Docs === 1 &&
+              lay.focus === 'p0' && Math.abs(lay.sizes[0] - 0.35) < 0.08 &&
+              lay.p0ActiveIsA === true && lay.p1ActiveIsA === true && lay.same === true && lay.views === true && lay.modalHidden === true;
+            // 只读是**文档级**决定（C5）：多视图下必须两个视图都转只读
+            const ro = await W(`(() => {
+              const e = window.__app.editor;
+              const t = e.findTabByPath(${JSON.stringify(SF_A)});
+              return e.setTabReadOnly(t, true).then(() => {
+                const v0 = e.getPaneEls(0).view, v1 = e.getPaneEls(1).view;
+                return { t0: v0.state.readOnly === true, t1: v1.state.readOnly === true };
+              });
+            })()`);
+            const readOnlyBoth = ro && ro.t0 === true && ro.t1 === true;
+            const ok = singlePane && keysOk && activeOk && pinOk && silentOk && upgradeOk && missingOk &&
+              layoutRestoreOk && readOnlyBoth && disk.hasFocus === true;
+            return {
+              ok,
+              detail: 'singlePane=' + singlePane +
+                '[rootCount1=' + sp1_rootCount + '(' + s.rootCount + '),noDivider=' + sp2_divider +
+                ',snapPanes1=' + sp3_snapPanes + '(' + s.paneCount + '),apiPanes1=' + sp4_apiPanes + '(' + st.paneCount + ')' +
+                ',preReset=' + preReset + ',preSnap=' + JSON.stringify(preSnap) + ']' +
+                ',paths=' + JSON.stringify(st.paths.map((p) => p.split(/[\\\\/]/).pop())) + ' keysOk=' + keysOk +
+                ',active=' + (st.active || '').split(/[\\\\/]/).pop() + ' activeOk=' + activeOk + ',pin=' + pinOk + ',silent=' + silentOk +
+                ',upgrade=' + upgradeOk + '(keys=' + JSON.stringify(disk.keys) + ')' +
+                ',layoutRestore=' + layoutRestoreOk + '(' + JSON.stringify(lay) + '),readOnlyBoth=' + readOnlyBoth,
+              evidence: 'missing=' + missingOk + ' tabs=' + st2.tabs + ' missingTab=' + st2.hasMissing +
+                ' upgradedLayout=' + JSON.stringify(disk.layout) + ' modal=' + st2.modalHidden +
+                ' layoutRestore=' + JSON.stringify(lay),
+            };
+          });
+        } finally {
+          // 收尾：还原自动保存延迟与设置、合栏清标签、删夹具（rcDir* 段随后会断言 .tab 总数并起子进程）
+          const restoreDelay = Number.isFinite(Number(prevAutoSave)) && Number(prevAutoSave) > 0 ? Math.floor(Number(prevAutoSave)) : 800;
+          await W(`(async () => {
+            await window.api.setSettings({ autoSaveDelay: ${restoreDelay}, lastSession: null });
+            window.__app.state.settings = await window.api.getSettings();
+            return true;
+          })()`).catch(() => {});
+          await resetAll().catch(() => {});
+          for (const f of SF_FILES) {
+            try { fs.rmSync(f, { force: true }); } catch { /* 已被删则忽略 */ }
+          }
+        }
+      }
+
+      // ================= v0.3.0「右键 --dir 打开 + 测试 profile 隔离」：6 项端到端回归（v0.4.0 追加） =================
+      // 位置：mw* 多窗口段之后、E2E_RESULTS 之前。理由：后 3 项会在首实例里新开窗口、改写侧栏根与主进程
+      // 「侧栏根集合」（fs:set-roots），只有在全部既有用例跑完之后做，才不会污染它们对启动/根状态的假设。
+      // 断言口径（不只断言函数返回值）：冷启动与第二实例都起**真实子进程**，用 CDP（--remote-debugging-port）
+      // 读子进程渲染端真实 DOM/__app 状态；坏路径额外断言可见 toast 文本、渲染进程未崩、窗口仍可继续干活。
+      {
+        const { spawn, execFileSync } = require('child_process');
+        const { BrowserWindow } = require('electron'); // 本块自用（mw* 段里的 BrowserWindow 只在它自己的块作用域）
+        const crypto = require('crypto');
+        const REPO = path.join(__dirname, '..');
+        const TMP = app.getPath('temp');
+        const DRIVE = path.parse(REPO).root; // 本机 = F:\（按实际盘符取，不写死）
+        const STAMP = String(process.pid) + '-' + String(Date.now());
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const nk = (p) => String(p || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase(); // 'F:\' → 'f:'
+        const under = (child, parent) => nk(child) !== nk(parent) && nk(child).startsWith(nk(parent) + '\\');
+        const RENDERER_HTML = path.join(REPO, 'src', 'renderer', 'index.html');
+        const PRELOAD = path.join(REPO, 'src', 'preload', 'preload.js');
+        const { extractDirArg } = require('../src/main/args');
+
+        // 用例包装：单个用例异常不影响其它用例，也不影响 E2E_RESULTS 的输出
+        const runCase = async (name, fn) => {
+          let r;
+          try {
+            r = await fn();
+          } catch (err) {
+            r = { ok: false, detail: 'ERR: ' + (err && err.stack ? err.stack.split('\n').slice(0, 3).join(' // ') : String(err)), evidence: '' };
+          }
+          results.push([name, r && r.ok === true ? true : ((r && r.detail) || 'false'), (r && r.evidence) || '']);
+        };
+
+        // ---- 空闲端口（子进程 DevTools 端点；避免与其它进程抢占固定端口） ----
+        const freePort = () => new Promise((resolve) => {
+          const srv = require('net').createServer();
+          srv.on('error', () => resolve(0));
+          srv.listen(0, '127.0.0.1', () => {
+            const p = srv.address().port;
+            srv.close(() => resolve(p));
+          });
+        });
+
+        // ---- 子进程 CDP 取证小工具 ----
+        const cdpList = (port) => new Promise((resolve) => {
+          const req = http.get({ host: '127.0.0.1', port, path: '/json/list', timeout: 700 }, (res) => {
+            let b = '';
+            res.on('data', (d) => { b += d; });
+            res.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve(null); } });
+          });
+          req.on('error', () => resolve(null));
+          req.on('timeout', () => { req.destroy(); resolve(null); });
+        });
+        const cdpEval = (wsUrl, expression, timeoutMs = 10000) => new Promise((resolve, reject) => {
+          const ws = new WebSocket(wsUrl);
+          const timer = setTimeout(() => { try { ws.close(); } catch { /* 忽略 */ } reject(new Error('CDP 求值超时')); }, timeoutMs);
+          ws.addEventListener('open', () => {
+            ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression, awaitPromise: true, returnByValue: true } }));
+          });
+          ws.addEventListener('message', (ev) => {
+            let m = null;
+            try { m = JSON.parse(String(ev.data)); } catch { /* 非 JSON 帧忽略 */ }
+            if (!m || m.id !== 1) return;
+            clearTimeout(timer);
+            try { ws.close(); } catch { /* 忽略 */ }
+            const r = m.result || {};
+            if (r.exceptionDetails) reject(new Error('渲染端异常：' + JSON.stringify(r.exceptionDetails).slice(0, 200)));
+            else resolve(r.result ? r.result.value : undefined);
+          });
+          ws.addEventListener('error', () => { clearTimeout(timer); reject(new Error('CDP WebSocket 连接失败')); });
+        });
+        // toast 记录器：子进程 boot 的提示只活 ~1.9s，装上 MutationObserver 才拿得稳
+        const TOAST_REC = `(() => {
+          if (window.__mhToastRec) return 'ok';
+          window.__mhToastRec = [];
+          const push = (el) => { try { if (el && el.classList && el.classList.contains('toast')) window.__mhToastRec.push(el.textContent); } catch (e) {} };
+          const mo = new MutationObserver((ms) => {
+            for (const m of ms) for (const n of m.addedNodes) { push(n); if (n && n.querySelectorAll) n.querySelectorAll('.toast').forEach(push); }
+          });
+          mo.observe(document, { childList: true, subtree: true });
+          document.querySelectorAll('.toast').forEach(push);
+          return 'ok';
+        })()`;
+        // 子进程窗口的真实 DOM/状态快照（注意树根行是 #file-tree 的直接子节点，子节点在 .tree-children 里）
+        const CHILD_SNAP = `(() => ({
+          hasApp: !!window.__app,
+          roots: window.__app ? window.__app.state.sidebarRoots.slice() : null,
+          rootDir: window.__app ? window.__app.state.rootDir : null,
+          dirLabel: (document.getElementById('dir-label') || {}).textContent || null,
+          tabs: document.querySelectorAll('.tab').length,
+          emptyTree: !!document.querySelector('.tree-empty'),
+          rootRows: Array.from(document.querySelectorAll('#file-tree > .tree-node')).map((el) => el.dataset.path || null),
+          toasts: (window.__mhToastRec || []).slice(),
+        }))()`;
+        // 等子进程页面目标（DevTools）出现，并尽早在渲染端装 toast 记录器
+        const childPage = async (port, budgetMs) => {
+          const t0 = Date.now();
+          let pages = [];
+          while (Date.now() - t0 < budgetMs) {
+            const list = await cdpList(port);
+            if (Array.isArray(list)) {
+              pages = list.filter((t) => t.type === 'page');
+              const ready = pages.filter((t) => String(t.url).includes('src/renderer/index.html'));
+              if (ready.length) {
+                for (let i = 0; i < 20; i++) {
+                  const r = await cdpEval(ready[0].webSocketDebuggerUrl, TOAST_REC, 3000).catch(() => null);
+                  if (r === 'ok') break;
+                  await sleep(60);
+                }
+                return { pages, page: ready[0] };
+              }
+            }
+            await sleep(120);
+          }
+          return { pages, page: null };
+        };
+        // 轮询子进程状态直到条件满足（返回最后一次快照）
+        const waitSnap = async (page, cond, budgetMs) => {
+          const t0 = Date.now();
+          let snap = null;
+          while (Date.now() - t0 < budgetMs) {
+            snap = await cdpEval(page.webSocketDebuggerUrl, CHILD_SNAP, 6000).catch(() => null);
+            if (snap && cond(snap)) return snap;
+            await sleep(150);
+          }
+          return snap;
+        };
+
+        // ---- 真实子进程（继承主进程环境；MH_USERDATA 决定 profile 与单实例锁归属） ----
+        const spawnChild = (args, profile) => {
+          const env = { ...process.env, MH_USERDATA: profile };
+          delete env.ELECTRON_RUN_AS_NODE; // 若从 ELECTRON_RUN_AS_NODE 环境派生出子进程，必须清掉（否则子进程不是 app）
+          const child = spawn(process.execPath, args, { cwd: REPO, env, stdio: ['ignore', 'pipe', 'pipe'] });
+          const st = { out: '', err: '', exited: false, code: null };
+          child.stdout.on('data', (d) => { st.out += d; });
+          child.stderr.on('data', (d) => { st.err += d; });
+          child.on('exit', (code) => { st.exited = true; st.code = code; });
+          return { child, st };
+        };
+        // 结束子进程：taskkill 整棵进程树并等它真的退出（不留孤儿）
+        const killChild = async (h) => {
+          if (!h || !h.child || h.st.exited) return 'exited';
+          try { execFileSync('taskkill', ['/PID', String(h.child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* 已退出 */ }
+          for (let i = 0; i < 60 && !h.st.exited; i++) await sleep(100);
+          return h.st.exited ? 'killed' : 'STILL-RUNNING';
+        };
+        const electronProcs = () => {
+          try {
+            const img = path.basename(process.execPath);
+            const csv = execFileSync('tasklist', ['/FI', 'IMAGENAME eq ' + img, '/FO', 'CSV', '/NH'], { encoding: 'utf8' });
+            return csv.split(/\r?\n/).filter((l) => l.toLowerCase().includes(img.toLowerCase())).length;
+          } catch { return -1; }
+        };
+
+        // ---- 夹具：临时目录 / 预置脏 profile（均放 %TEMP%，与 .smoke-test 无关） ----
+        const mkDir = (name, files) => {
+          const p = path.join(TMP, name);
+          fs.rmSync(p, { recursive: true, force: true });
+          fs.mkdirSync(p, { recursive: true });
+          for (const f of files || []) {
+            fs.mkdirSync(path.dirname(path.join(p, f)), { recursive: true });
+            fs.writeFileSync(path.join(p, f), '# ' + f + '\n', 'utf8');
+          }
+          return p;
+        };
+        const mkProfile = (name, settings) => {
+          const p = path.join(TMP, name);
+          fs.rmSync(p, { recursive: true, force: true });
+          fs.mkdirSync(p, { recursive: true });
+          if (settings) fs.writeFileSync(path.join(p, 'settings.json'), JSON.stringify(settings, null, 2), 'utf8');
+          return p;
+        };
+        const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
+        const childDirs = []; // 结束时统一清理
+        const TEMP_DIRS = [];
+
+        try {
+          // ---------- 1. testIsolation：--smoke 必须跑在隔离 profile，且真实 userData 没被本次运行写入 ----------
+          await runCase('testIsolation', async () => {
+            const isolated = app.getPath('userData');
+            const expected = path.join(TMP, 'markhunter-test-smoke'); // main.js: temp + 'markhunter-test' + '-smoke'
+            const real = path.join(app.getPath('appData'), app.getName()); // 未隔离时的真实 profile：%APPDATA%\MarkHunter
+            const snapFile = (p) => {
+              try {
+                const st = fs.statSync(p);
+                const buf = fs.readFileSync(p);
+                return { mtime: st.mtimeMs, sha: crypto.createHash('sha1').update(buf).digest('hex').slice(0, 10), text: buf.toString('utf8') };
+              } catch { return null; }
+            };
+            const realSettings = path.join(real, 'settings.json');
+            const isoSettings = path.join(isolated, 'settings.json');
+            const realBefore = snapFile(realSettings);
+            const isoBefore = snapFile(isoSettings);
+            // 正向对照：经隔离 profile 的设置 IPC 真写一次（值写回原值，不影响后续用例）
+            const cur = await win.webContents.executeJavaScript('window.api.getSettings().then((s) => s.autoSaveDelay)');
+            await win.webContents.executeJavaScript(`window.api.setSettings({ autoSaveDelay: ${Number(cur) || 800} })`);
+            await sleep(400);
+            const realAfter = snapFile(realSettings);
+            const isoAfter = snapFile(isoSettings);
+            // 真实 profile「没被写」：原本不存在 → 现在也不能被创建；存在 → 内容与 mtime 都不许变
+            const realUntouched = realBefore === null
+              ? !fs.existsSync(realSettings)
+              : (!!realAfter && realBefore.text === realAfter.text && realBefore.mtime === realAfter.mtime);
+            const isoWritten = !!isoAfter && (!isoBefore || isoBefore.text !== isoAfter.text || isoBefore.mtime !== isoAfter.mtime);
+            const flag = process.argv.includes('--smoke');
+            const isoOk = nk(isolated) === nk(expected) && fs.existsSync(isolated);
+            const disjoint = nk(isolated) !== nk(real) && !under(isolated, real) && !under(real, isolated);
+            const ok = flag && isoOk && disjoint && isoWritten && realUntouched;
+            return {
+              ok,
+              detail: 'smokeFlag=' + flag + ',userData=' + isoOk + ',disjoint=' + disjoint + ',isoWritten=' + isoWritten + ',realUntouched=' + realUntouched,
+              evidence: 'iso=' + isolated + ' real=' + real +
+                ' realSettings=' + (realBefore ? (realUntouched ? 'untouched' : 'CHANGED') + '(sha ' + realBefore.sha + ' mtime ' + Math.round(realBefore.mtime) + '→' + (realAfter ? realAfter.sha + ' ' + Math.round(realAfter.mtime) : 'gone') + ')' : (realAfter ? 'CREATED!' : 'absent-both')) +
+                ' isoSettings=' + (isoBefore ? isoBefore.sha + ' mtime ' + Math.round(isoBefore.mtime) : 'absent') + '→' + (isoAfter ? isoAfter.sha + ' mtime ' + Math.round(isoAfter.mtime) : 'missing'),
+            };
+          });
+
+          // ---------- 2. rcDirColdStart：冷启动 --dir <目标> → 首个窗口直接把该目录开成根 ----------
+          // 场景刻意做「脏」：profile 预置上次侧栏根 + 上次会话标签（真实用户升级后的状态），
+          // 断言目标目录胜出（既不是空白，也不是上次会话）。
+          const STALE_A = mkDir('mh-smoke-stale-a-' + STAMP, ['prev.md', 'prev2.md']);
+          const TARGET_A = mkDir('mh-smoke-dir-a-' + STAMP, ['note.md', 'sub/x.md']);
+          const PROF_A = mkProfile('mh-smoke-cold-a-' + STAMP, {
+            lastDirectory: STALE_A,
+            sidebarRoots: [STALE_A],
+            // 会话快照的真实结构见 app.js persistSession：{ paths, active, pinned }（不是 tabs）
+            lastSession: { paths: [path.join(STALE_A, 'prev.md'), path.join(STALE_A, 'prev2.md')], active: 1, pinned: [] },
+          });
+          TEMP_DIRS.push(STALE_A, TARGET_A, PROF_A);
+          await runCase('rcDirColdStart', async () => {
+            const port = await freePort();
+            const h = spawnChild(['.', '--dir', TARGET_A, '--remote-debugging-port=' + port], PROF_A);
+            childDirs.push(h);
+            try {
+              const { pages, page } = await childPage(port, 25000);
+              if (!page) {
+                return { ok: false, detail: '子进程 DevTools 目标未就绪 pages=' + pages.length, evidence: 'pid=' + h.child.pid + ' stdout=' + JSON.stringify(h.st.out.slice(0, 150)) + ' err=' + JSON.stringify(h.st.err.slice(0, 150)) };
+              }
+              const snap = await waitSnap(page, (s) => s.hasApp && (s.roots || []).length > 0 && s.rootRows.length > 0, 25000);
+              const roots = (snap && snap.roots) || [];
+              const persisted = readJson(path.join(PROF_A, 'settings.json'));
+              const okRoot = roots.length === 1 && nk(roots[0]) === nk(TARGET_A);
+              const okLabel = !!snap && snap.dirLabel === TARGET_A && nk(snap.rootDir) === nk(TARGET_A);
+              const okTree = !!snap && !snap.emptyTree && snap.rootRows.length === 1 && nk(snap.rootRows[0]) === nk(TARGET_A);
+              const staleGone = !roots.some((r) => nk(r) === nk(STALE_A));
+              const okPersist = !!persisted && Array.isArray(persisted.sidebarRoots) && persisted.sidebarRoots.length === 1 && nk(persisted.sidebarRoots[0]) === nk(TARGET_A);
+              const alive = !h.st.exited;
+              const ok = okRoot && okLabel && okTree && staleGone && okPersist && alive;
+              return {
+                ok,
+                detail: 'roots=' + JSON.stringify(roots) + ',label=' + (snap && snap.dirLabel) + ',treeRows=' + (snap && snap.rootRows.length) + ',staleGone=' + staleGone + ',persisted=' + okPersist + ',alive=' + alive,
+                evidence: 'pid=' + h.child.pid + ' port=' + port + ' target=' + TARGET_A + ' roots=' + JSON.stringify(roots) +
+                  ' label=' + (snap && snap.dirLabel) + ' treeRows=' + (snap && snap.rootRows.length) + ' tabs=' + (snap && snap.tabs) + ' stale=' + STALE_A,
+              };
+            } finally {
+              await killChild(h);
+            }
+          });
+
+          // ---------- 3. rcDirCleanWindow：干净的单一窗口（rcDirColdStart 的「无副作用」对照） ----------
+          const STALE_B = mkDir('mh-smoke-stale-b-' + STAMP, ['old1.md', 'old2.md']);
+          const TARGET_B = mkDir('mh-smoke-dir-b-' + STAMP, ['clean.md']);
+          const PROF_B = mkProfile('mh-smoke-clean-b-' + STAMP, {
+            lastDirectory: STALE_B,
+            sidebarRoots: [STALE_B],
+            // 会话快照的真实结构见 app.js persistSession：{ paths, active, pinned }
+            lastSession: { paths: [path.join(STALE_B, 'old1.md'), path.join(STALE_B, 'old2.md')], active: 0, pinned: [] },
+          });
+          TEMP_DIRS.push(STALE_B, TARGET_B, PROF_B);
+          await runCase('rcDirCleanWindow', async () => {
+            const port = await freePort();
+            const h = spawnChild(['.', '--dir', TARGET_B, '--remote-debugging-port=' + port], PROF_B);
+            childDirs.push(h);
+            try {
+              const { pages, page } = await childPage(port, 25000);
+              if (!page) {
+                return { ok: false, detail: '子进程 DevTools 目标未就绪 pages=' + pages.length, evidence: 'pid=' + h.child.pid + ' stdout=' + JSON.stringify(h.st.out.slice(0, 150)) };
+              }
+              const snap = await waitSnap(page, (s) => s.hasApp && (s.roots || []).length > 0 && s.rootRows.length > 0, 25000);
+              const roots = (snap && snap.roots) || [];
+              const pageTargets = (await cdpList(port) || []).filter((t) => t.type === 'page' && String(t.url).includes('src/renderer/index.html')).length;
+              const oneWindow = pageTargets === 1;
+              const uniqueRoots = roots.length === 1 && new Set(roots.map(nk)).size === 1; // 无重复根
+              const rootOk = uniqueRoots && nk(roots[0]) === nk(TARGET_B);
+              const noNest = !roots.some((r) => roots.some((s) => under(r, s)));
+              const noTabs = !!snap && snap.tabs === 0; // 预置的 2 个会话标签一个都没被恢复
+              const opened = !!snap && snap.dirLabel === TARGET_B && !snap.emptyTree && snap.rootRows.length === 1 && nk(snap.rootRows[0]) === nk(TARGET_B);
+              const alive = !h.st.exited;
+              const ok = oneWindow && rootOk && noNest && noTabs && opened && alive;
+              return {
+                ok,
+                detail: 'pageTargets=' + pageTargets + ',roots=' + JSON.stringify(roots) + ',noNest=' + noNest + ',tabs=' + (snap && snap.tabs) + ',opened=' + opened + ',alive=' + alive,
+                evidence: 'pid=' + h.child.pid + ' port=' + port + ' pageTargets=' + pageTargets + ' target=' + TARGET_B + ' roots=' + JSON.stringify(roots) +
+                  ' label=' + (snap && snap.dirLabel) + ' treeRows=' + (snap && snap.rootRows.length) + ' tabs=' + (snap && snap.tabs),
+              };
+            } finally {
+              await killChild(h);
+            }
+          });
+
+          // ---------- 4. rcDirBadPath：--dir 指向不存在路径 / 文件路径 → 不崩 + 可见提示 + 仍可用 ----------
+          // 开窗方式与 main.js createWindow 完全一致（additionalArguments 同步投递 + did-finish-load 的
+          // open-dir 事件双通道）；argv 段用真实「Electron 重排」形态并过 args.js，链路与右键启动一致。
+          await runCase('rcDirBadPath', async () => {
+            const launchWin = async (dir) => {
+              const w = new BrowserWindow({
+                width: 900,
+                height: 600,
+                show: false,
+                webPreferences: {
+                  preload: PRELOAD,
+                  contextIsolation: true,
+                  nodeIntegration: false,
+                  sandbox: true,
+                  spellcheck: false,
+                  additionalArguments: dir ? ['--mh-open-dir=' + encodeURIComponent(dir)] : [],
+                },
+              });
+              let gone = null;
+              w.webContents.on('render-process-gone', (_e, d) => { gone = d.reason; });
+              await w.loadFile(RENDERER_HTML);
+              if (dir && !w.isDestroyed()) w.webContents.send('open-dir', dir);
+              return { w, goneReason: () => gone };
+            };
+            const pollToast = async (w, expected, budgetMs) => {
+              const seen = [];
+              const t0 = Date.now();
+              // 双保险：boot 的提示可能在我开始轮询前就出现（提示寿命 ~1.9s），故先装 MutationObserver
+              // 记录器，轮询时把「实时 .toast」与「记录器捕获」取并集。
+              await w.webContents.executeJavaScript(TOAST_REC).catch(() => null);
+              while (Date.now() - t0 < budgetMs) {
+                const list = await w.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.toast')).map((e) => e.textContent).concat(window.__mhToastRec || [])`).catch(() => null);
+                if (Array.isArray(list)) for (const t of list) if (!seen.includes(t)) seen.push(t);
+                if (seen.includes(expected)) return { ok: true, seen };
+                await sleep(120);
+              }
+              return { ok: false, seen };
+            };
+            // 等渲染端 boot 收尾（`window.__app` 是 boot **最后一行**才挂上的）。
+            // 2026-08-30 实测：toast 已经出现、但紧接其后的一次性读取拿到 `app:false`（boot 尚未收尾）
+            // → noCrash/notOpened 双红。提示出现的时机早于 `__app` 赋值，故必须轮询等待而不是单次读取。
+            const waitApp = async (w, budgetMs) => {
+              const t0 = Date.now();
+              while (Date.now() - t0 < budgetMs) {
+                const ok = await w.webContents.executeJavaScript('!!window.__app').catch(() => false);
+                if (ok === true) return true;
+                await sleep(120);
+              }
+              return false;
+            };
+            const badMissing = 'Z:\\not-exist-xyz';
+            // Electron 在 second-instance 里会把 --dir 与它的值拆开（实测形态），故解析结果才是真实入参
+            const parsedMissing = extractDirArg(['electron.exe', '--dir', '--allow-file-access-from-files', REPO, badMissing], { appPath: REPO });
+            const badFile = path.join(TEST_ROOT, 'rc-bad-file-' + STAMP + '.md');
+            fs.writeFileSync(badFile, 'x', 'utf8');
+            const parsedFile = extractDirArg(['electron.exe', '--dir', '--allow-file-access-from-files', REPO, badFile], { appPath: REPO });
+            const recoverFile = path.join(TEST_ROOT, 'rc-bad-recover-' + STAMP + '.md');
+            let w1 = null;
+            let w2 = null;
+            try {
+              // ① 不存在的盘符路径
+              const a = await launchWin(parsedMissing);
+              w1 = a.w;
+              const t1 = await pollToast(w1, '无法打开指定目录：' + badMissing, 10000);
+              await waitApp(w1, 6000); // boot 收尾（__app 是最后一行才挂上）
+              await sleep(400);
+              const s1 = await w1.webContents.executeJavaScript(`({
+                app: !!window.__app,
+                roots: window.__app ? window.__app.state.sidebarRoots.length : -1,
+                emptyTree: !!document.querySelector('.tree-empty'),
+                tabs: document.querySelectorAll('.tab').length,
+              })`).catch(() => null);
+              const noCrash1 = !!s1 && s1.app === true && a.goneReason() === null && !w1.isDestroyed();
+              const notOpened1 = !!s1 && s1.roots === 0;
+              // 仍可用：写文件 + 打开正常目录 + 打开文件
+              const rec = await w1.webContents.executeJavaScript(`(async () => {
+                const ok = await window.__app.openDirFromPath(${JSON.stringify(TEST_ROOT)});
+                await window.api.writeFile(${JSON.stringify(recoverFile)}, '恢复写入 ok');
+                await window.__app.editor.openFile(${JSON.stringify(recoverFile)});
+                await new Promise((r) => setTimeout(r, 400));
+                return {
+                  ok,
+                  roots: window.__app.state.sidebarRoots.slice(),
+                  tabs: document.querySelectorAll('.tab').length,
+                  rows: Array.from(document.querySelectorAll('#file-tree > .tree-node')).map((el) => el.dataset.path),
+                };
+              })()`).catch((e) => ({ err: String(e && e.message) }));
+              const usable = !!rec && rec.ok === true && Array.isArray(rec.roots) && rec.roots.length === 1 &&
+                nk(rec.roots[0]) === nk(TEST_ROOT) && rec.tabs === 1 && rec.rows.length === 1 && nk(rec.rows[0]) === nk(TEST_ROOT);
+              // ② --dir 指向一个真实文件（args.js 兜底分支）
+              const b = await launchWin(parsedFile);
+              w2 = b.w;
+              const t2 = await pollToast(w2, '无法打开指定目录：' + badFile, 10000);
+              await waitApp(w2, 6000); // 同上：toast 早于 __app 赋值，单次读取会偶发 app:false
+              const s2 = await w2.webContents.executeJavaScript(`({
+                app: !!window.__app,
+                roots: window.__app ? window.__app.state.sidebarRoots.length : -1,
+              })`).catch(() => null);
+              const noCrash2 = !!s2 && s2.app === true && b.goneReason() === null && !w2.isDestroyed();
+              const notOpened2 = !!s2 && s2.roots === 0;
+              const ok = parsedMissing === badMissing && parsedFile === badFile &&
+                t1.ok && noCrash1 && notOpened1 && usable && t2.ok && noCrash2 && notOpened2;
+              return {
+                ok,
+                detail: 'parsedMissing=' + JSON.stringify(parsedMissing) + ',parsedFile=' + JSON.stringify(parsedFile) +
+                  ',toastMissing=' + t1.ok + ',noCrash1=' + noCrash1 + ',notOpened1=' + notOpened1 + ',usable=' + usable +
+                  ',toastFile=' + t2.ok + ',noCrash2=' + noCrash2 + ',notOpened2=' + notOpened2,
+                evidence: 'toasts1=' + JSON.stringify(t1.seen) + ' toasts2=' + JSON.stringify(t2.seen) + ' recover=' + JSON.stringify(rec && rec.roots) +
+                  ' s1=' + JSON.stringify(s1) + ' s2=' + JSON.stringify(s2),
+              };
+            } finally {
+              for (const w of [w1, w2]) {
+                try { if (w && !w.isDestroyed()) w.destroy(); } catch { /* 已销毁 */ }
+              }
+              await sleep(300);
+            }
+          });
+
+          // ---------- 5. rcDirDriveRoot：--dir 为盘符根 → 不产生「盘符根 + 其子目录」两个嵌套根 ----------
+          // ① 真实冷启动 --dir <盘符根>：唯一根 = 盘符根；② 同窗口 fromLaunch 语义：已有被盘符根包含的
+          // 根时，用盘符根**替换**它们（而不是嵌套共存），并断言提示文案、根条数与根路径集合。
+          const PROF_C = mkProfile('mh-smoke-drive-' + STAMP, { lastDirectory: TEST_ROOT, sidebarRoots: [TEST_ROOT], lastSession: null });
+          TEMP_DIRS.push(PROF_C);
+          await runCase('rcDirDriveRoot', async () => {
+            const port = await freePort();
+            const h = spawnChild(['.', '--dir', DRIVE, '--remote-debugging-port=' + port], PROF_C);
+            childDirs.push(h);
+            try {
+              const { page } = await childPage(port, 25000);
+              if (!page) {
+                return { ok: false, detail: '子进程 DevTools 目标未就绪', evidence: 'pid=' + h.child.pid + ' stdout=' + JSON.stringify(h.st.out.slice(0, 150)) };
+              }
+              const snap = await waitSnap(page, (s) => s.hasApp && (s.roots || []).length > 0 && s.rootRows.length > 0, 25000);
+              const roots = (snap && snap.roots) || [];
+              const persisted = readJson(path.join(PROF_C, 'settings.json'));
+              const driveOnly = roots.length === 1 && nk(roots[0]) === nk(DRIVE);
+              const noContained = !roots.some((r) => under(r, DRIVE)); // 不含 F:\VibeCode 这类被包含根
+              const noNest1 = !roots.some((r) => roots.some((s) => under(r, s)));
+              const treeOk = !!snap && !snap.emptyTree && snap.rootRows.length === 1 && nk(snap.rootRows[0]) === nk(DRIVE);
+              const persistOk = !!persisted && Array.isArray(persisted.sidebarRoots) && persisted.sidebarRoots.length === 1 && nk(persisted.sidebarRoots[0]) === nk(DRIVE);
+              const coldOk = driveOnly && noContained && noNest1 && treeOk && persistOk && !h.st.exited;
+
+              // ② 同窗口 fromLaunch 替换语义（主窗口；先保证侧栏里至少有一个位于盘符根内的根）
+              const W = (code) => win.webContents.executeJavaScript(code);
+              await W(`window.__app.openDirFromPath(${JSON.stringify(TEST_ROOT)})`);
+              await sleep(300);
+              const before = await W('window.__app.state.sidebarRoots.slice()');
+              const contained = before.filter((r) => under(r, DRIVE));
+              const keep = before.filter((r) => !under(r, DRIVE) && nk(r) !== nk(DRIVE));
+              const expected = keep.concat([DRIVE]);
+              const expectedToast = `已用「${DRIVE}」替换侧栏中 ${contained.length} 个被包含的目录`;
+              const toastWatch = (async () => {
+                const seen = [];
+                const t0 = Date.now();
+                while (Date.now() - t0 < 10000) {
+                  const list = await W(`Array.from(document.querySelectorAll('.toast')).map((e) => e.textContent)`).catch(() => null);
+                  if (Array.isArray(list)) for (const t of list) if (!seen.includes(t)) seen.push(t);
+                  if (seen.includes(expectedToast)) return { ok: true, seen };
+                  await sleep(120);
+                }
+                return { ok: false, seen };
+              })();
+              const applied = await W(`window.__app.openDirFromPath(${JSON.stringify(DRIVE)}, { fromLaunch: true })`);
+              const toast = await toastWatch;
+              await sleep(500);
+              const st = await W(`({
+                roots: window.__app.state.sidebarRoots.slice(),
+                rows: Array.from(document.querySelectorAll('#file-tree > .tree-node')).map((el) => el.dataset.path),
+                empty: !!document.querySelector('.tree-empty'),
+              })`);
+              const setOk = st.roots.length === expected.length && expected.every((e) => st.roots.some((r) => nk(r) === nk(e)));
+              const rowsOk = st.rows.length === expected.length && expected.every((e) => st.rows.some((r) => nk(r) === nk(e)));
+              const noDup = !st.roots.some((r) => st.roots.some((s) => under(r, s))); // 无嵌套重复
+              const noChildRoot = !st.roots.some((r) => nk(r) !== nk(DRIVE) && under(r, DRIVE)); // 不出现「F:\ 与 F:\VibeCode 两个根」
+              const replaceOk = contained.length >= 1 && applied === true && toast.ok && setOk && rowsOk && noDup && noChildRoot && !st.empty;
+              // 还原侧栏（不影响后续用例）
+              await W(`window.__app.closeSidebarRoot(${JSON.stringify(DRIVE)})`);
+              const restored = await W(`window.__app.openDirFromPath(${JSON.stringify(TEST_ROOT)})`);
+              const back = await W('window.__app.state.sidebarRoots.slice()');
+              const restoredOk = restored === true && back.some((r) => nk(r) === nk(TEST_ROOT));
+              const ok = coldOk && replaceOk && restoredOk;
+              return {
+                ok,
+                detail: 'cold[driveOnly=' + driveOnly + ',noContained=' + noContained + ',noNest=' + noNest1 + ',tree=' + treeOk + ',persisted=' + persistOk + ',alive=' + !h.st.exited + ']' +
+                  ' replace[contained=' + contained.length + ',applied=' + applied + ',toast=' + toast.ok + ',setOk=' + setOk + ',rowsOk=' + rowsOk + ',noDup=' + noDup + ',noChildRoot=' + noChildRoot + ']' +
+                  ' restore=' + restoredOk,
+                evidence: 'drive=' + DRIVE + ' coldRoots=' + JSON.stringify(roots) + ' afterRoots=' + JSON.stringify(st.roots) + ' expect=' + JSON.stringify(expected) + ' toasts=' + JSON.stringify(toast.seen),
+              };
+            } finally {
+              await killChild(h);
+            }
+          });
+
+          // ---------- 6. rcDirSecondInstance：真·第二进程 → 单实例分支 → 首实例打开目标目录 ----------
+          // 必须与首实例同 profile（MH_USERDATA），否则第二进程会另起一个 app、根本走不到 single-instance。
+          const TARGET_SI = mkDir('mh-smoke-si-target-' + STAMP, ['si.md']);
+          TEMP_DIRS.push(TARGET_SI);
+          await runCase('rcDirSecondInstance', async () => {
+            const profile = process.env.MH_USERDATA || app.getPath('userData');
+            const procsBefore = electronProcs();
+            const winsBefore = BrowserWindow.getAllWindows().slice();
+            const captured = [];
+            const onSecond = (_e, argv) => { captured.push(argv); };
+            app.on('second-instance', onSecond);
+            const h = spawnChild(['.', '--dir', TARGET_SI], profile);
+            let fresh = [];
+            try {
+              const t0 = Date.now();
+              while (Date.now() - t0 < 25000 && (!captured.length || !h.st.exited)) await sleep(200);
+              const argv = captured[0] || null;
+              const parsed = argv ? extractDirArg(argv) : null;
+              const exitedOk = h.st.exited && h.st.code === 0; // 第二进程自行退出 = 走了单实例分支
+              await sleep(1500); // 等首实例把 second-instance 新窗口 boot 起来
+              const winsAfter = BrowserWindow.getAllWindows();
+              fresh = winsAfter.filter((w) => !winsBefore.includes(w));
+              let shot = null;
+              if (fresh.length === 1) {
+                shot = await fresh[0].webContents.executeJavaScript(`(async () => {
+                  for (let i = 0; i < 150 && !window.__app; i++) await new Promise((r) => setTimeout(r, 100));
+                  for (let i = 0; i < 100; i++) {
+                    if (window.__app && window.__app.state.sidebarRoots.length) break;
+                    await new Promise((r) => setTimeout(r, 100));
+                  }
+                  return {
+                    roots: window.__app.state.sidebarRoots.slice(),
+                    label: (document.getElementById('dir-label') || {}).textContent,
+                    tabs: document.querySelectorAll('.tab').length,
+                    rows: Array.from(document.querySelectorAll('#file-tree > .tree-node')).map((el) => el.dataset.path),
+                  };
+                })()`).catch((e) => ({ err: String(e && e.message) }));
+              }
+              const mainWinAlive = !win.isDestroyed() && (await win.webContents.executeJavaScript('!!window.__app').catch(() => false)) === true;
+              const oneMore = winsAfter.length === winsBefore.length + 1;
+              const opened = !!shot && Array.isArray(shot.roots) && shot.roots.length === 1 && nk(shot.roots[0]) === nk(TARGET_SI) &&
+                shot.label === TARGET_SI && shot.tabs === 0 && shot.rows.length === 1 && nk(shot.rows[0]) === nk(TARGET_SI);
+              // 收尾放在断言之前：既证明没留孤儿进程/残留窗口，也让证据里的进程数可读
+              for (const w of fresh) {
+                try { if (!w.isDestroyed()) w.destroy(); } catch { /* 已销毁 */ }
+              }
+              const killState = await killChild(h);
+              await sleep(600);
+              const procsAfter = electronProcs();
+              const winsCleaned = BrowserWindow.getAllWindows().length === winsBefore.length;
+              const noOrphan = h.st.exited;
+              const ok = captured.length >= 1 && parsed === TARGET_SI && exitedOk && oneMore && opened && mainWinAlive && winsCleaned && noOrphan;
+              return {
+                ok,
+                detail: 'secondInstanceEvents=' + captured.length + ',parsed=' + JSON.stringify(parsed) + ',childExit=' + (h.st.exited ? h.st.code : 'still-running') +
+                  ',windows=' + winsBefore.length + '→' + winsAfter.length + ',openedInFirstInstance=' + opened + ',mainWinAlive=' + mainWinAlive +
+                  ',winsCleaned=' + winsCleaned + ',noOrphan=' + noOrphan,
+                evidence: 'argv=' + JSON.stringify(argv) + ' newWin=' + JSON.stringify(shot) + ' stdout=' + JSON.stringify(h.st.out.slice(0, 120)) +
+                  ' kill=' + killState + ' procs=' + procsBefore + '→' + procsAfter + ' windows=' + winsBefore.length + '→' + BrowserWindow.getAllWindows().length,
+              };
+            } finally {
+              app.removeListener('second-instance', onSecond);
+              for (const w of fresh) {
+                try { if (!w.isDestroyed()) w.destroy(); } catch { /* 已销毁 */ }
+              }
+              await killChild(h); // 幂等：已退出则直接返回
+            }
+          });
+        } finally {
+          // 6 项自身的残留清理：子进程（含未走完的）、临时夹具、脏 profile
+          for (const h of childDirs) await killChild(h);
+          for (const d of TEMP_DIRS) {
+            try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* 占用则忽略 */ }
+          }
+        }
+      }
+
+      // ================= v0.5.0 多视图 Phase 4「跨窗口接管编辑」：4 项端到端回归 =================
+      // 位置：全部既有用例（含 rcDir* 子进程段）之后、E2E_RESULTS 之前 —— 真·append。理由：
+      //   ① rcDir* 段会断言首实例的 `.tab` 总数与窗口数，本段排在它之后，任何标签/窗口残留都波及不到它；
+      //   ② 本段自带第二窗口（照抄 v0.1.51 mw* 段的 BrowserWindow 口径），结束时 destroy + 清会话。
+      // 断言口径：渲染事实（横幅/按钮存在性、tab.readOnly、toast 文本、DOM 冲突横幅、文档内容）+
+      //   主进程可观测事实（filewatch 锁表快照、fs.unwatchFile 是否带 listener）。
+      // **逐合取项 detail**：每个合取项单独命名打印（"失败的是没进 detail 的那一项"是本会话踩过的坑）。
+      // 夹具文件都在 TEST_ROOT 内（不是 build/，不参与分档）。
+      {
+        const { BrowserWindow } = require('electron');
+        const fwatch = require('../src/main/filewatch'); // 与主进程同一模块实例（锁表/B3 探针）
+        const P4_A = path.join(TEST_ROOT, 'mw-claim-a.md');
+        const P4_B = path.join(TEST_ROOT, 'mw-claim-b.md');
+        // 故意**不存在**的路径：fs.watch 对不存在的文件同步抛 ENOENT（node 实测）→ filewatch 必然
+        // 走 fallbackToPoll 的 1000ms 轮询兜底 —— 这是让 B3 可复现的唯一确定性手段
+        // （真实文件在 Windows 上 fs.watch 恒成功，无法从外部强制降级）。
+        const P4_GHOST = path.join(TEST_ROOT, 'mw-poll-ghost.md');
+        const p4J = (v) => JSON.stringify(v);
+        const p4Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        /** 取值型求值：返回值会被**结构化克隆**回主进程 —— 只返回原始值/纯对象/纯数组 */
+        const p4Eval = (w, code) => w.webContents.executeJavaScript(code);
+        /** 副作用型求值：只改渲染端状态、不取回值（裸返回 tab/DOM/EditorView 会抛 could not be cloned） */
+        const p4Effect = (w, expr) => w.webContents.executeJavaScript(`(async () => { await (${expr}); })()`);
+        const p4Case = async (name, fn) => {
+          let r;
+          try {
+            r = await fn();
+          } catch (err) {
+            r = { ok: false, detail: 'ERR: ' + (err && err.stack ? err.stack.split('\n').slice(0, 3).join(' // ') : String(err)), evidence: '' };
+          }
+          results.push([name, r && r.ok === true ? true : ((r && r.detail) || 'false'), (r && r.evidence) || '']);
+        };
+        /** 合取项汇总：逐项命名 → detail 串每项独立可见（全真才算 true） */
+        const p4Fail = (conj, evidence) => ({
+          ok: Object.keys(conj).every((k) => conj[k] === true),
+          detail: Object.keys(conj).map((k) => k + '=' + conj[k]).join(','),
+          evidence: evidence || '',
+        });
+        // toast 记录器：toast 寿命 ~1.9s（ui.js），轮询必漏 —— MutationObserver 记录（口径同 hugeWatchAfterSave）
+        const P4_TOAST_REC = `(() => {
+          window.__mhLockToasts = [];
+          const push = (el) => { try { if (el && el.classList && el.classList.contains('toast')) window.__mhLockToasts.push(el.textContent); } catch (e) {} };
+          const mo = new MutationObserver((ms) => { for (const m of ms) for (const n of m.addedNodes) { push(n); if (n && n.querySelectorAll) n.querySelectorAll('.toast').forEach(push); } });
+          mo.observe(document, { childList: true, subtree: true });
+          document.querySelectorAll('.toast').forEach(push);
+          return true;
+        })()`;
+        const p4ClearToasts = (w) => p4Eval(w, 'window.__mhLockToasts = []; true');
+        // 只读横幅快照（p0 的横幅 = #lock-banner；每栏各一份 .lock-banner）
+        const P4_BANNER = `(() => {
+          const b = document.getElementById('lock-banner');
+          const btn = b ? b.querySelector('.lock-claim') : null;
+          return {
+            shown: !!b && !b.classList.contains('hidden'),
+            text: b ? ((b.querySelector('.lock-text') || {}).textContent || '') : '',
+            path: b ? (b.dataset.path || '') : '',
+            hasBtn: !!btn,
+            btnHidden: !!(btn && btn.classList.contains('hidden')),
+          };
+        })()`;
+        const p4Tab = (p) => `window.__app.editor.findTabByPath(${p4J(p)})`;
+        const p4DocOf = (p) => `(() => { const ed = window.__app.editor; const t = ed.findTabByPath(${p4J(p)}); if (!t) return null; const els = ed.getPaneElsById(ed.paneIdOf(t)); return els && els.view ? els.view.state.doc.toString() : null; })()`;
+        /** 点击某窗口横幅上的「✏️ 接管编辑」（真·DOM 点击，不调内部 API） */
+        const p4ClickClaim = (w) => p4Eval(w, `(() => {
+          const b = document.getElementById('lock-banner');
+          const btn = b ? b.querySelector('.lock-claim') : null;
+          if (!b || b.classList.contains('hidden') || !btn || btn.classList.contains('hidden')) return { clicked: false };
+          btn.click();
+          return { clicked: true };
+        })()`);
+        /** 轮询等待条件成立（返回值给 evidence）；超时返回最后一次取值 */
+        const p4Wait = async (w, code, pred, ms = 6000, step = 300) => {
+          const t0 = Date.now();
+          let v = null;
+          for (;;) {
+            v = await p4Eval(w, code).catch(() => null);
+            if (v && pred(v)) return v;
+            if (Date.now() - t0 > ms) return v;
+            await p4Sleep(step);
+          }
+        };
+        const win2 = new BrowserWindow({
+          width: 1200,
+          height: 800,
+          show: false,
+          webPreferences: {
+            preload: path.join(__dirname, '..', 'src', 'preload', 'preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            spellcheck: false,
+          },
+        });
+        const p4Eval2 = (code) => p4Eval(win2, code);
+        const p4Effect2 = (expr) => p4Effect(win2, expr);
+        // 用例前的设置快照：必须在 try 之外声明 —— finally 里要逐字复原（首跑踩过 ReferenceError 的坑）
+        let p4PrevDelay = null;
+        try {
+          await win2.loadFile(path.join(__dirname, '..', 'src', 'renderer', 'index.html'));
+          await p4Eval2(`(async () => { for (let i = 0; i < 120 && !window.__app; i++) await new Promise((r) => setTimeout(r, 100)); return !!window.__app; })()`);
+          if (!(await p4Eval2('!!window.__app'))) throw new Error('第二窗口未 boot（__app 未就绪）');
+          // 第二窗口：目录上下文（写盘/读盘走 security.js 的 rootDir 白名单）+ 清掉可能恢复的会话标签
+          await p4Effect2(`window.__app.openDirFromPath(${p4J(TEST_ROOT)})`);
+          await p4Effect2('window.__app.editor.closeAll()');
+          await p4Sleep(600); // 等第二窗口的会话恢复彻底收尾（恢复是异步的，别让它的激活动作插进用例中间）
+          await p4Eval(win, P4_TOAST_REC);
+          await p4Eval2(P4_TOAST_REC);
+          // 自动保存延迟抬到 60s：本段要在"有未保存修改"的瞬间做断言，800ms 自动保存会把脏状态抹掉
+          // （settings:set 是既有键，广播到两个窗口；finally 逐字复原）
+          p4PrevDelay = await p4Eval(win, 'window.api.getSettings().then((s) => s.autoSaveDelay)').catch(() => null);
+          await p4Effect(win, 'window.api.setSettings({ autoSaveDelay: 60000 })');
+          await p4Sleep(300);
+
+          // ---------- 1. mwClaimEdit：B 接管 → A 转只读 + toast（横幅/按钮/锁表三面证据） ----------
+          await p4Case('mwClaimEdit', async () => {
+            fs.writeFileSync(P4_A, 'claim-a-v1\n', 'utf8');
+            // win1 先开 = 编辑权持有者
+            const o1 = await p4Eval(win, `(async () => {
+              const ed = window.__app.editor;
+              ed.closeByPath(${p4J(P4_A)});
+              const t = await ed.openFile(${p4J(P4_A)});
+              await new Promise((r) => setTimeout(r, 300));
+              return { opened: !!(t && t.path), readOnly: !!(t && t.readOnly) };
+            })()`);
+            await p4Sleep(600);
+            // win2 后开 = 只读观察窗（主进程发 file-shared-open → app.js 转只读；语义与 v0.1.51 相同）
+            const o2 = await p4Eval2(`(async () => {
+              const ed = window.__app.editor;
+              const t = await ed.openFile(${p4J(P4_A)});
+              await new Promise((r) => setTimeout(r, 800));
+              return { opened: !!(t && t.path), readOnly: !!(t && t.readOnly) };
+            })()`);
+            const b0 = await p4Eval2(P4_BANNER);
+            await p4ClearToasts(win);
+            await p4ClearToasts(win2);
+            const click = await p4ClickClaim(win2);
+            // 主进程降级 win1 → file-lock-changed → 转只读 + toast（等事件落地）
+            const a1 = await p4Wait(win, `(async () => {
+              const t = ${p4Tab(P4_A)};
+              const st = await window.api.docLockState(${p4J(P4_A)});
+              return { readOnly: !!(t && t.readOnly), mode: st.mode, editCount: st.editCount, multiEdit: st.multiEdit, toasts: (window.__mhLockToasts || []).slice() };
+            })()`, (v) => v.readOnly === true && v.toasts.some((s) => String(s).includes('接管')));
+            const a1b = await p4Eval(win, P4_BANNER);
+            const b1 = await p4Eval2(`(async () => {
+              const t = ${p4Tab(P4_A)};
+              const st = await window.api.docLockState(${p4J(P4_A)});
+              return { readOnly: !!(t && t.readOnly), mode: st.mode, owner: st.owner, self: st.self, editCount: st.editCount };
+            })()`);
+            const b1b = await p4Eval2(P4_BANNER);
+            const conj = {
+              'win1-edit-first': o1.opened === true && o1.readOnly === false,
+              'win2-readonly-shared': o2.opened === true && o2.readOnly === true,
+              'win2-banner+claimBtn': b0.shown === true && b0.hasBtn === true && b0.btnHidden === false && b0.path === P4_A,
+              'claim-clicked': click.clicked === true,
+              'win2-editable-after': b1.readOnly === false,
+              'win2-banner-hidden-after': b1b.shown === false,
+              'win1-readonly-after': a1.readOnly === true,
+              'win1-banner-after': a1b.shown === true && a1b.hasBtn === true && a1b.path === P4_A,
+              'win1-toast-接管': a1.toasts.some((s) => String(s).includes('接管')),
+              'lock-table-single-owner': b1.mode === 'edit' && b1.self === b1.owner && b1.editCount === 1 && a1.mode === 'read' && a1.editCount === 1 && a1.multiEdit === false,
+            };
+            return p4Fail(conj, 'o1=' + p4J(o1) + ' o2=' + p4J(o2) + ' b0=' + p4J(b0) + ' click=' + p4J(click) +
+              ' win1=' + p4J({ readOnly: a1.readOnly, mode: a1.mode, editCount: a1.editCount, toasts: a1.toasts }) +
+              ' win1Banner=' + p4J(a1b) + ' win2=' + p4J(b1) + ' win2Banner=' + p4J(b1b));
+          });
+
+          // ---------- 2. mwClaimBack：A 再接管回来（反向路径 + 双向 toast） ----------
+          await p4Case('mwClaimBack', async () => {
+            await p4ClearToasts(win);
+            await p4ClearToasts(win2);
+            const clickA = await p4ClickClaim(win);
+            const a2 = await p4Wait(win, `(async () => {
+              const t = ${p4Tab(P4_A)};
+              const st = await window.api.docLockState(${p4J(P4_A)});
+              return { readOnly: !!(t && t.readOnly), mode: st.mode, editCount: st.editCount, toasts: (window.__mhLockToasts || []).slice() };
+            })()`, (v) => v.readOnly === false && v.toasts.some((s) => String(s).includes('接管')));
+            const a2b = await p4Eval(win, P4_BANNER);
+            const b2 = await p4Wait(win2, `(async () => {
+              const t = ${p4Tab(P4_A)};
+              const st = await window.api.docLockState(${p4J(P4_A)});
+              return { readOnly: !!(t && t.readOnly), mode: st.mode, editCount: st.editCount, toasts: (window.__mhLockToasts || []).slice() };
+            })()`, (v) => v.readOnly === true && v.toasts.some((s) => String(s).includes('接管')));
+            const b2b = await p4Eval2(P4_BANNER);
+            const conj = {
+              'win1-claimBack-clicked': clickA.clicked === true,
+              'win1-editable': a2.readOnly === false && a2.mode === 'edit',
+              'win1-banner-hidden': a2b.shown === false,
+              'win1-toast-接管': a2.toasts.some((s) => String(s).includes('接管')),
+              'win2-readonly': b2.readOnly === true && b2.mode === 'read',
+              'win2-banner+claimBtn': b2b.shown === true && b2b.hasBtn === true && b2b.path === P4_A,
+              'win2-toast-接管': b2.toasts.some((s) => String(s).includes('接管')),
+              'lock-table-single-owner': a2.editCount === 1 && b2.editCount === 1,
+            };
+            return p4Fail(conj, 'clickA=' + p4J(clickA) + ' win1=' + p4J(a2) + ' win1Banner=' + p4J(a2b) +
+              ' win2=' + p4J(b2) + ' win2Banner=' + p4J(b2b));
+          });
+
+          // ---------- 3. mwConflictPrompt：L3 开关打开才提示；默认关不提示 ----------
+          // 三段证据：① 默认关 + 只读观察窗 → 保存后静默同步、无冲突横幅；
+          //           ② 开关打开 + 双窗口 claim → 两边都可编辑（不降级）→ 本窗口脏 + 对方保存 → DOM 冲突横幅；
+          //           ③ 双方仍在 edit 态下把开关关掉 → 同样场景**不提示**（证明"提示"确实由开关门控，
+          //              而不是"没有冲突场景"）。
+          await p4Case('mwConflictPrompt', async () => {
+            fs.writeFileSync(P4_B, 'conflict-v1\n', 'utf8');
+            const o1 = await p4Eval(win, `(async () => {
+              const ed = window.__app.editor;
+              ed.closeByPath(${p4J(P4_B)});
+              const t = await ed.openFile(${p4J(P4_B)});
+              await new Promise((r) => setTimeout(r, 300));
+              return { opened: !!(t && t.path), readOnly: !!(t && t.readOnly) };
+            })()`);
+            await p4Sleep(600);
+            const o2 = await p4Eval2(`(async () => {
+              const ed = window.__app.editor;
+              const t = await ed.openFile(${p4J(P4_B)});
+              await new Promise((r) => setTimeout(r, 800));
+              return { opened: !!(t && t.path), readOnly: !!(t && t.readOnly) };
+            })()`);
+            // ---- ① 默认关 ----
+            const l3off = await p4Eval(win, 'window.api.getConflictPrompt()');
+            await p4ClearToasts(win2);
+            await p4Effect(win, `(async () => {
+              const ed = window.__app.editor;
+              ed.activateByPath(${p4J(P4_B)});
+              const t = ed.findTabByPath(${p4J(P4_B)});
+              const v = ed.getView();
+              v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: 'win1-stage1' } });
+              clearTimeout(t.saveTimer);
+              await ed.saveNow(t);
+            })()`);
+            const s1 = await p4Wait(win2, `(() => ({
+              doc: ${p4DocOf(P4_B)},
+              readOnly: !!((${p4Tab(P4_B)}) || {}).readOnly,
+              conflict: (() => { const b = document.getElementById('conflict-banner'); return !!b && !b.classList.contains('hidden'); })(),
+              toasts: (window.__mhLockToasts || []).slice(),
+            }))()`, (v) => v.doc === 'win1-stage1');
+            // ---- ② 开关打开 + 双窗口编辑 ----
+            const on = await p4Eval(win, 'window.api.setConflictPrompt(true)');
+            await p4Sleep(200);
+            const clickOn = await p4ClickClaim(win2);
+            const both = await p4Wait(win, `(async () => {
+              const t = ${p4Tab(P4_B)};
+              const st = await window.api.docLockState(${p4J(P4_B)});
+              return { readOnly: !!(t && t.readOnly), editCount: st.editCount, multiEdit: st.multiEdit, conflictPrompt: st.conflictPrompt };
+            })()`, (v) => v.editCount === 2);
+            const both2 = await p4Eval2(`(async () => {
+              const t = ${p4Tab(P4_B)};
+              const st = await window.api.docLockState(${p4J(P4_B)});
+              const b = document.getElementById('lock-banner');
+              return {
+                readOnly: !!(t && t.readOnly),
+                editCount: st.editCount,
+                multiEdit: st.multiEdit,
+                bannerShown: !!b && !b.classList.contains('hidden'),
+                bannerText: b ? ((b.querySelector('.lock-text') || {}).textContent || '') : '',
+                claimBtnHidden: !!(b && b.querySelector('.lock-claim').classList.contains('hidden')),
+              };
+            })()`);
+            const dirty2 = await p4Eval2(`(async () => {
+              const ed = window.__app.editor;
+              ed.activateByPath(${p4J(P4_B)});
+              const t = ed.findTabByPath(${p4J(P4_B)});
+              const v = ed.getView();
+              v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: 'win2-local-dirty' } });
+              clearTimeout(t.saveTimer);
+              return { dirty: t.dirty === true, doc: v.state.doc.toString() };
+            })()`);
+            await p4Effect(win, `(async () => {
+              const ed = window.__app.editor;
+              ed.activateByPath(${p4J(P4_B)});
+              const t = ed.findTabByPath(${p4J(P4_B)});
+              const v = ed.getView();
+              v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: 'win1-stage2' } });
+              clearTimeout(t.saveTimer);
+              await ed.saveNow(t);
+            })()`);
+            const conf = await p4Wait(win2, `(() => {
+              const b = document.getElementById('conflict-banner');
+              const t = ${p4Tab(P4_B)};
+              return {
+                shown: !!b && !b.classList.contains('hidden'),
+                text: b ? ((b.querySelector('.conflict-text') || {}).textContent || '') : '',
+                path: b ? (b.dataset.path || '') : '',
+                doc: ${p4DocOf(P4_B)},
+                dirty: !!(t && t.dirty),
+              };
+            })()`, (v) => v.shown === true);
+            // ---- ③ 双方仍在 edit 态，把开关关掉 → 不提示 ----
+            const off = await p4Eval(win, 'window.api.setConflictPrompt(false)');
+            const keep = await p4Eval2(`(() => {
+              const b = document.getElementById('conflict-banner');
+              const btn = b ? b.querySelector('.conflict-keep') : null;
+              if (!btn) return { clicked: false, shown: !!(b && !b.classList.contains('hidden')) };
+              btn.click();
+              return { clicked: true, shown: !!(b && !b.classList.contains('hidden')) };
+            })()`);
+            const dirty3 = await p4Eval2(`(async () => {
+              const ed = window.__app.editor;
+              const t = ed.findTabByPath(${p4J(P4_B)});
+              const v = ed.getView();
+              v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: 'win2-local-dirty-2' } });
+              clearTimeout(t.saveTimer);
+              return { dirty: t.dirty === true, doc: v.state.doc.toString() };
+            })()`);
+            await p4Effect(win, `(async () => {
+              const ed = window.__app.editor;
+              const t = ed.findTabByPath(${p4J(P4_B)});
+              const v = ed.getView();
+              v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: 'win1-stage3' } });
+              clearTimeout(t.saveTimer);
+              await ed.saveNow(t);
+            })()`);
+            await p4Sleep(2600); // 越过 SELF_WRITE_GRACE_MS(2000) + 通知防抖(300)
+            const conf3 = await p4Eval2(`(() => {
+              const b = document.getElementById('conflict-banner');
+              const t = ${p4Tab(P4_B)};
+              return {
+                shown: !!b && !b.classList.contains('hidden'),
+                doc: ${p4DocOf(P4_B)},
+                dirty: !!(t && t.dirty),
+              };
+            })()`);
+            const st3 = await p4Eval(win, `window.api.docLockState(${p4J(P4_B)})`);
+            const conj = {
+              'default-off': l3off === false,
+              'stage1-sharedReadonly-silentSync': o1.readOnly === false && o2.readOnly === true && s1.doc === 'win1-stage1',
+              'stage1-no-conflict-banner': s1.conflict === false,
+              'stage1-no-conflict-toast': !s1.toasts.some((s) => String(s).includes('冲突')),
+              'l3-on': on === true,
+              'l3-claim-not-exclusive': clickOn.clicked === true && both.editCount === 2 && both.multiEdit === true && both.conflictPrompt === true,
+              'l3-both-editable': both.readOnly === false && both2.readOnly === false,
+              'l3-banner-sharedEdit-hint': both2.bannerShown === true && both2.claimBtnHidden === true && String(both2.bannerText).includes('另一窗口'),
+              'win2-dirty-before-conflict': dirty2.dirty === true && dirty2.doc === 'win2-local-dirty',
+              'conflict-banner-on': conf.shown === true && conf.path === P4_B && String(conf.text).includes('跨窗口') && String(conf.text).includes('未保存'),
+              'conflict-keeps-local': conf.doc === 'win2-local-dirty' && conf.dirty === true,
+              'l3-off-again': off === false,
+              'conflict-banner-dismissed': keep.clicked === true && keep.shown === false,
+              'stage3-still-multiEdit': st3.multiEdit === true && st3.editCount === 2,
+              'stage3-no-conflict-banner': conf3.shown === false,
+              'stage3-local-preserved': conf3.doc === 'win2-local-dirty-2' && conf3.dirty === true && dirty3.dirty === true,
+            };
+            return p4Fail(conj, 'o1=' + p4J(o1) + ' o2=' + p4J(o2) + ' l3off=' + l3off + ' s1=' + p4J(s1) +
+              ' both=' + p4J(both) + ' both2=' + p4J(both2) + ' dirty2=' + p4J(dirty2) + ' conf=' + p4J(conf) +
+              ' keep=' + p4J(keep) + ' conf3=' + p4J(conf3) + ' st3=' + p4J(st3));
+          });
+
+          // ---------- 4. mwNoPollBreak：一个窗口取消监听不影响另一个的轮询兜底（B3 修复） ----------
+          await p4Case('mwNoPollBreak', async () => {
+            try { fs.rmSync(P4_GHOST, { force: true }); } catch { /* 不存在则忽略 */ }
+            // 两个窗口各自登记监听（路径不存在 → fs.watch 抛 ENOENT → 两侧都进轮询兜底）；
+            // 同时装 file-changed 探针：事件**确实到达了哪个窗口**是渲染端事实，不靠内部 flag
+            const arm = `(async () => {
+              try { await window.api.unwatchFile(${p4J(P4_GHOST)}); } catch (e) { /* 未登记 */ }
+              window.__mhPollHits = [];
+              window.api.onFileChanged((d) => { if (d && d.path === ${p4J(P4_GHOST)}) window.__mhPollHits.push(d.path); });
+              await window.api.watchFile(${p4J(P4_GHOST)}, 0);
+              return true;
+            })()`;
+            await p4Eval(win, arm);
+            await p4Eval2(arm);
+            await p4Sleep(400);
+            const w0 = fwatch.__debugWatchers(P4_GHOST); // 主进程实况：两条登记 + 都进了轮询兜底
+            // win1 取消监听 —— B3 的触发点：修复前 `fs.unwatchFile(path)` 不带 listener 会把
+            // win2 的 StatWatcher 监听一起摘掉（entry.poller 已置 true → 永不重建 → 此后静默漏事件）
+            const origUnwatch = fs.unwatchFile;
+            const unwatchCalls = [];
+            fs.unwatchFile = function (p, listener) {
+              unwatchCalls.push({ path: p, hasListener: typeof listener === 'function' });
+              return origUnwatch.apply(this, arguments);
+            };
+            try {
+              await p4Eval(win, `window.api.unwatchFile(${p4J(P4_GHOST)})`);
+            } finally {
+              fs.unwatchFile = origUnwatch;
+            }
+            await p4Sleep(300);
+            const w1 = fwatch.__debugWatchers(P4_GHOST);
+            const call = unwatchCalls.find((c) => c.path === P4_GHOST) || null;
+            // 真·外部写：主进程 fs 直写（不经写盘 IPC → 不 markSelfWrite → 不会被自写回声吸收）
+            fs.writeFileSync(P4_GHOST, 'poll-alive-1', 'utf8');
+            const hit2v = await p4Wait(win2, '(window.__mhPollHits || []).length', (v) => Number(v) >= 1, 6000, 400);
+            const hit2 = Number(hit2v) >= 1;
+            const hit1 = Number(await p4Eval(win, '(window.__mhPollHits || []).length').catch(() => 0)) >= 1;
+            const w2 = fwatch.__debugWatchers(P4_GHOST);
+            const owners1 = w1.map((x) => x.winId);
+            const conj = {
+              'both-pollers-engaged': w0.length === 2 && w0.some((x) => x.winId === win.id) && w0.some((x) => x.winId === win2.id) &&
+                w0.every((x) => x.poller === true && x.hasPollFn === true && x.fsw === false),
+              'unwatch-passed-listener': !!(call && call.hasListener === true),
+              'win1-entry-removed': owners1.length === 1 && owners1[0] === win2.id && !owners1.includes(win.id),
+              'win2-poller-survived': !!(w1[0] && w1[0].poller === true && w1[0].hasPollFn === true),
+              'win2-got-file-changed': hit2 === true,
+              'win1-silent-after-unwatch': hit1 === false,
+            };
+            return p4Fail(conj, 'w0=' + p4J(w0) + ' unwatchCalls=' + p4J(unwatchCalls) + ' w1=' + p4J(w1) +
+              ' w2=' + p4J(w2) + ' hits2=' + Number(hit2v) + ' hits1=' + (hit1 ? 1 : 0));
+          });
+        } finally {
+          // 清场：关掉本段开的所有标签（脏标签会先落盘，随后夹具一起删）、复位会话与开关、销毁第二窗口
+          try { await p4Eval(win, `(async () => { window.__app.editor.closeAll(); return true; })()`); } catch { /* 忽略 */ }
+          try { await p4Eval2('window.__app.editor.closeAll()'); } catch { /* 忽略 */ }
+          try { await p4Eval(win, 'window.api.setConflictPrompt(false)'); } catch { /* 忽略 */ }
+          try { await p4Eval(win2, `(async () => { try { await window.api.unwatchFile(${p4J(P4_GHOST)}); } catch (e) {} return true; })()`); } catch { /* 忽略 */ }
+          if (p4PrevDelay !== null) {
+            try { await p4Eval(win, `window.api.setSettings({ autoSaveDelay: ${Number(p4PrevDelay) || 800} })`); } catch { /* 忽略 */ }
+          }
+          try { await p4Sleep(300); } catch { /* 忽略 */ }
+          try { await p4Eval(win, `(async () => { await window.api.setSettings({ lastSession: null }); window.__app.state.settings = await window.api.getSettings(); return true; })()`); } catch { /* 忽略 */ }
+          try { win2.destroy(); } catch { /* 已销毁 */ }
+          for (const f of [P4_A, P4_B, P4_GHOST]) {
+            try { fs.rmSync(f, { force: true }); } catch { /* 占用则忽略 */ }
+          }
+        }
+      }
+
+      // ============ v0.5.0 Phase 5a「体验 7 条」：7 项端到端回归 ============
+      // 位置：全部既有用例（含 Phase 4 的 mw* 段）之后、E2E_RESULTS 之前 —— 真·append。
+      // 断言口径：**渲染端可观测事实**（DOM 几何/类名/文本、CM 计算样式、设置回读、编辑器活动文档）
+      //   + **主进程事实**（worker 清单缓存命中标志）。逐合取项单独命名打印（本会话踩过的坑）。
+      // 夹具全部在 TEST_ROOT 下自建自清；结束时合栏 + closeAll + 复位面板/侧栏/字号。
+      {
+        const P5_OUTLINE = path.join(TEST_ROOT, 'p5-outline.md');
+        const P5_OUTLINE2 = path.join(TEST_ROOT, 'p5-outline2.md');
+        const P5_TXT = path.join(TEST_ROOT, 'p5-plain.txt');
+        const P5_QO = path.join(TEST_ROOT, 'p5-qo-alpha-target.md');
+        const P5_QO2 = path.join(TEST_ROOT, 'p5-qo-beta.md');
+        const P5_QO3 = path.join(TEST_ROOT, 'p5-qo-gamma.md');
+        const P5_TREE_DIR = path.join(TEST_ROOT, 'p5-tree');
+        const P5_TREE_FILES = [path.join(P5_TREE_DIR, 'tree-a.md'), path.join(P5_TREE_DIR, 'tree-b.md')];
+        // 标签溢出夹具：名字够长 + 数量够多（分栏后每栏 ~530px，单标签最小 ~60px → 必然溢出）
+        const P5_TABS = Array.from({ length: 14 }, (_, i) => path.join(TEST_ROOT, 'p5-tab-' + String(i + 1).padStart(2, '0') + '-长名字标签夹具.md'));
+        const P5_ALL_FILES = [P5_OUTLINE, P5_OUTLINE2, P5_TXT, P5_QO, P5_QO2, P5_QO3].concat(P5_TREE_FILES, P5_TABS);
+        // 大纲夹具：4 个 ATX 标题 + 1 个围栏代码块内的伪标题（必须被跳过）+ 1 个四空格缩进的伪标题
+        fs.writeFileSync(P5_OUTLINE, [
+          '# 一级标题',
+          '',
+          '正文一',
+          '',
+          '## 二级 A',
+          '',
+          '正文二',
+          '',
+          '### 三级 A1',
+          '',
+          '正文三',
+          '',
+          '```',
+          '# 不是标题（在代码块里）',
+          '```',
+          '',
+          '## 二级 B',
+          '',
+          '正文四',
+          '',
+        ].join('\n'), 'utf8');
+        fs.writeFileSync(P5_OUTLINE2, '# P2 标题\n\n## P2 二级\n\n内容\n', 'utf8');
+        fs.writeFileSync(P5_TXT, '# 这行在 txt 里不算标题\n普通文本\n', 'utf8');
+        for (const f of [P5_QO, P5_QO2, P5_QO3]) fs.writeFileSync(f, '# ' + path.basename(f) + '\n内容\n', 'utf8');
+        fs.mkdirSync(P5_TREE_DIR, { recursive: true });
+        for (const f of P5_TREE_FILES) fs.writeFileSync(f, '# ' + path.basename(f) + '\n', 'utf8');
+        for (const f of P5_TABS) fs.writeFileSync(f, '# ' + path.basename(f) + '\n内容\n', 'utf8');
+
+        const p5Eval = (code) => win.webContents.executeJavaScript(code);
+        const p5Effect = (expr) => win.webContents.executeJavaScript(`(async () => { await (${expr}); })()`);
+        const p5Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const p5J = (v) => JSON.stringify(v === undefined ? null : v);
+        const p5Case = async (name, fn) => {
+          let r;
+          try {
+            r = await fn();
+          } catch (err) {
+            r = { ok: false, detail: 'ERR: ' + (err && err.stack ? err.stack.split('\n').slice(0, 3).join(' // ') : String(err)), evidence: '' };
+          }
+          results.push([name, r && r.ok === true ? true : ((r && r.detail) || 'false'), (r && r.evidence) || '']);
+        };
+        const p5Fail = (conj, evidence) => ({
+          ok: Object.keys(conj).every((k) => conj[k] === true),
+          detail: Object.keys(conj).map((k) => k + '=' + conj[k]).join(','),
+          evidence: evidence || '',
+        });
+        /** 轮询等待条件成立（返回最后一次取值） */
+        const p5Wait = async (code, pred, ms = 10000, step = 200) => {
+          const t0 = Date.now();
+          let v = null;
+          for (;;) {
+            v = await p5Eval(code).catch(() => null);
+            if (v !== null && pred(v)) return v;
+            if (Date.now() - t0 > ms) return v;
+            await p5Sleep(step);
+          }
+        };
+        /** 真·DOM 键盘事件（走 app.js 的 document keydown → help.js 的键位表分派） */
+        const p5Key = (k, extra) => `(() => {
+          document.dispatchEvent(new KeyboardEvent('keydown', Object.assign({ key: ${p5J(k)}, code: ${p5J(k)}, bubbles: true, cancelable: true }, ${p5J(extra || {})})));
+          return true;
+        })()`;
+        /** 单栏收尾：先合栏再关标签（顺带清掉可能开着的浮层/菜单）。
+         *  另外**重申工作目录 = TEST_ROOT**（幂等）：rcDir* 段与多窗口用例都可能动过首实例的
+         *  侧栏根/活动目录，A1 的文件清单必须扫在夹具目录上，否则断言会莫名其妙地空。 */
+        const p5Reset = async () => {
+          await p5Effect(`window.__app.openDirFromPath(${p5J(TEST_ROOT)})`).catch(() => {});
+          await p5Sleep(120);
+          await p5Eval(`(() => {
+            const e = window.__app.editor;
+            if (window.__app.quickOpen) window.__app.quickOpen.close();
+            document.querySelectorAll('.tabs-menu').forEach((m) => m.classList.add('hidden'));
+            window.__app.editor.hideTabsHud();
+            if (e.getPaneCount() > 1) e.mergePanes();
+            e.closeAll();
+            return e.getPaneCount();
+          })()`).catch(() => -1);
+          await p5Sleep(200);
+        };
+        const P5_PANEL = `(() => { const s = window.__app.bottomPanel.getState(); return s; })()`;
+
+        try {
+          // ---------------- 1. quickOpenBasic：Ctrl+P 快速打开（文件清单 + 模糊匹配 + 缓存） ----------------
+          await p5Case('quickOpenBasic', async () => {
+            await p5Reset();
+            const beforePanel = await p5Eval(P5_PANEL);
+            // ① 真·Ctrl+P 键盘事件打开浮层
+            await p5Eval(p5Key('p', { ctrlKey: true }));
+            const opened = await p5Wait(`window.__app.quickOpen.getState()`, (v) => v && v.open === true, 3000, 100);
+            const inputFocusedV = await p5Wait(`(() => { const i = document.getElementById('qo-input'); return !!i && document.activeElement === i; })()`, (v) => v === true, 1500, 50);
+            const inputFocused = inputFocusedV === true;
+            // ② 等文件清单就绪（首扫流式；TEST_ROOT 里 build/ 已被 SKIP_DIRS 跳过）
+            const ready = await p5Wait(`window.__app.quickOpen.getState()`, (v) => v && v.ready === true && v.total > 0, 20000, 250);
+            const hasFixture = await p5Eval(`(() => { const s = window.__app.quickOpen.getState(); return { total: s.total, meta: s.meta }; })()`);
+            // ③ 精确子串：query=alpha-target 的第一行必须就是目标文件（前缀/子串档优先于子序列档）
+            const exact = await p5Eval(`(() => {
+              const i = document.getElementById('qo-input');
+              i.value = 'alpha-target';
+              i.dispatchEvent(new Event('input'));
+              const rows = Array.from(document.querySelectorAll('#qo-list .qo-row .qo-name')).map((n) => n.textContent);
+              return { rows: rows.slice(0, 3), state: window.__app.quickOpen.getState() };
+            })()`);
+            // ④ 模糊（子序列）：'qta' 应能命中 p5-qo-alpha-target.md
+            const fuzzy = await p5Eval(`(() => {
+              const i = document.getElementById('qo-input');
+              i.value = 'qta';
+              i.dispatchEvent(new Event('input'));
+              const rows = Array.from(document.querySelectorAll('#qo-list .qo-row .qo-name')).map((n) => n.textContent);
+              return { rows: rows, matched: window.__app.quickOpen.getState().matched };
+            })()`);
+            // ⑤ 上下键移动选中项
+            const nav = await p5Eval(`(() => {
+              const i = document.getElementById('qo-input');
+              i.value = 'p5-qo';
+              i.dispatchEvent(new Event('input'));
+              const s0 = window.__app.quickOpen.getState();
+              i.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+              const s1 = window.__app.quickOpen.getState();
+              i.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+              const s2 = window.__app.quickOpen.getState();
+              return { sel0: s0.selected, sel1: s1.selected, sel2: s2.selected, rows: s0.rendered };
+            })()`);
+            // ⑥ Enter 打开选中文件（真正落到编辑器）。
+            //    ⚠️ openFile 是异步的：派发 Enter 之后必须等一下再读活动标签，否则读到的是旧值。
+            const enterSel = await p5Eval(`(() => {
+              const i = document.getElementById('qo-input');
+              i.value = 'alpha-target';
+              i.dispatchEvent(new Event('input'));
+              const sel = window.__app.quickOpen.getState().selectedPath;
+              i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+              return { sel: sel, open: window.__app.quickOpen.getState().open };
+            })()`);
+            const enterPath = await p5Wait(`(() => { const t = window.__app.editor.getActiveTab(); return t ? t.path : null; })()`, (v) => v === P5_QO, 6000, 200);
+            const enter = { sel: enterSel.sel, open: enterSel.open, path: enterPath };
+            // ⑦ Esc 关浮层，且**不得**连带收起底部面板（app.js 对 .quick-open 内的按键不做全局分派）
+            //    先把面板显式展开，否则"两边都是折叠"会让这条断言退化成恒真
+            await p5Effect(`window.__app.bottomPanel.expand()`);
+            await p5Sleep(150);
+            await p5Eval(p5Key('p', { ctrlKey: true }));
+            await p5Wait(`window.__app.quickOpen.getState()`, (v) => v && v.open === true, 3000, 100);
+            const esc = await p5Eval(`(() => {
+              const i = document.getElementById('qo-input');
+              const before = window.__app.bottomPanel.getState().collapsed;
+              i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+              return { open: window.__app.quickOpen.getState().open, panelBefore: before, panelAfter: window.__app.bottomPanel.getState().collapsed };
+            })()`);
+            // ⑧ 复用 search-worker 清单：第二次请求同一目录必须命中 worker 缓存（cached=true）
+            const cache = await p5Eval(`window.api.searchFiles(${p5J(TEST_ROOT)}).then((r) => ({ total: r.total, cached: r.cached, hasFixture: r.files.indexOf(${p5J(P5_QO)}) >= 0 }))`).catch((e) => ({ err: String(e && e.message || e) }));
+            const conj = {
+              'ctrl-p-opens': !!(opened && opened.open === true),
+              'input-focused': inputFocused === true,
+              'list-ready': !!(ready && ready.ready === true && ready.total > 0),
+              'list-from-worker-has-fixture': !!(hasFixture && hasFixture.total > 0),
+              'exact-first-row': !!(exact && exact.rows[0] === 'p5-qo-alpha-target.md'),
+              'fuzzy-subsequence': !!(fuzzy && fuzzy.rows.indexOf('p5-qo-alpha-target.md') >= 0),
+              'arrow-moves-selection': !!(nav && nav.rows >= 3 && nav.sel1 === nav.sel0 + 1 && nav.sel2 === nav.sel0),
+              'enter-opens-file': !!(enter && enter.sel === P5_QO && enter.path === P5_QO && enter.open === false),
+              'esc-closes': !!(esc && esc.open === false),
+              'esc-panel-was-expanded': !!(esc && esc.panelBefore === false),
+              'esc-does-not-collapse-panel': !!(esc && esc.panelAfter === esc.panelBefore),
+              'worker-cache-hit': !!(cache && cache.cached === true && cache.total > 0 && cache.hasFixture === true),
+            };
+            return p5Fail(conj, 'opened=' + p5J(opened) + ' ready=' + p5J(hasFixture) + ' exact=' + p5J(exact && exact.rows) +
+              ' fuzzy=' + p5J(fuzzy && fuzzy.rows.slice(0, 4)) + ' nav=' + p5J(nav) + ' enter=' + p5J(enter) + ' esc=' + p5J(esc) +
+              ' cache=' + p5J(cache) + ' panelBeforeCase=' + p5J(beforePanel && beforePanel.collapsed));
+          });
+
+          // ---------------- 2. tabOverflowUI：标签栏溢出（滚轮横滚 / ▾ 下拉 / Ctrl+Tab 浮层，按 pane） ----------------
+          await p5Case('tabOverflowUI', async () => {
+            await p5Reset();
+            // p0 开 14 个长名标签；分栏；p1 只开 1 个 → 两栏溢出判据必须**各自**成立/不成立
+            await p5Effect(`(async () => { const e = window.__app.editor; for (const p of ${p5J(P5_TABS)}) { await e.openFile(p); } })()`);
+            await p5Sleep(600);
+            await p5Effect(`window.__app.editor.toggleSplit()`);
+            await p5Sleep(300);
+            await p5Effect(`window.__app.editor.openFile(${p5J(P5_QO2)})`);
+            await p5Sleep(500);
+            const ov = await p5Eval(`(() => ({ p0: window.__app.editor.tabsOverflowOf('p0'), p1: window.__app.editor.tabsOverflowOf('p1'), layout: window.__app.editor.getPaneLayout() }))()`);
+            // ① 滚轮横滚：真 wheel 事件（deltaY → scrollLeft），并确认事件被消费（defaultPrevented）
+            const wheel = await p5Eval(`(() => {
+              const el = window.__app.editor.getPaneEls(0).tabsEl;
+              const before = Math.round(el.scrollLeft);
+              const ev = new WheelEvent('wheel', { deltaY: 150, bubbles: true, cancelable: true });
+              el.dispatchEvent(ev);
+              return { before: before, after: Math.round(el.scrollLeft), prevented: ev.defaultPrevented };
+            })()`);
+            // ② 「▾ 全部标签」下拉：真点击 #tabs-more（p0 的按钮）→ 菜单只列**本栏**标签
+            const menu = await p5Eval(`(() => {
+              const btn = document.getElementById('tabs-more');
+              const visible = !!btn && btn.offsetParent !== null;
+              if (btn) btn.click();
+              const s = window.__app.editor.tabsOverflowOf('p0');
+              const p1names = Array.from(window.__app.editor.getPaneEls(1).tabsEl.querySelectorAll('.tab-name')).map((n) => n.textContent);
+              return { btnVisible: visible, open: s.menuOpen, items: s.menuItems, names: s.menuNames, current: s.menuCurrent, p1names: p1names };
+            })()`);
+            // ③ 点菜单项 → 该文档在 p0 变成活动项（且 p1 的活动项不受影响）
+            const clickItem = await p5Eval(`(() => {
+              const items = document.querySelectorAll('#tabs-menu .tabs-menu-item');
+              const target = items[3];
+              const wantName = target ? (target.querySelector('.tm-name') || {}).textContent : null;
+              if (target) target.click();
+              const e = window.__app.editor;
+              const a0 = e.paneActiveOf('p0');
+              const a1 = e.paneActiveOf('p1');
+              return { wantName: wantName, p0Active: a0 ? a0.name : null, p1Active: a1 ? a1.name : null, menuOpen: e.tabsOverflowOf('p0').menuOpen };
+            })()`);
+            await p5Sleep(200);
+            // ④ Ctrl+Tab 切换浮层：真键盘事件（焦点栏 = p0），浮层内容 = 该栏标签
+            await p5Effect(`window.__app.editor.focusPaneIndex(0)`);
+            await p5Sleep(150);
+            const hud = await p5Eval(`(() => {
+              const e = window.__app.editor;
+              const before = e.paneActiveOf('p0') ? e.paneActiveOf('p0').name : null;
+              ${'document.dispatchEvent(new KeyboardEvent(\'keydown\', { key: \'Tab\', ctrlKey: true, bubbles: true, cancelable: true }));'}
+              const s = e.tabsHudOf();
+              const after = e.paneActiveOf('p0') ? e.paneActiveOf('p0').name : null;
+              const p1names = Array.from(e.getPaneEls(1).tabsEl.querySelectorAll('.tab-name')).map((n) => n.textContent);
+              return { visible: s.visible, items: s.items.length, current: s.current, before: before, after: after, leaked: s.items.filter((x) => p1names.some((n) => x.indexOf(n) >= 0)).length };
+            })()`);
+            const hudHide = await p5Wait(`window.__app.editor.tabsHudOf().visible`, (v) => v === false, 4000, 200);
+            const conj = {
+              'p0-overflows': !!(ov && ov.p0 && ov.p0.overflow === true && ov.p0.tabCount === 14),
+              'p1-not-overflow': !!(ov && ov.p1 && ov.p1.overflow === false && ov.p1.tabCount === 1),
+              'p0-btn-visible': !!(ov && ov.p0 && ov.p0.btnVisible === true),
+              'p1-btn-hidden': !!(ov && ov.p1 && ov.p1.btnVisible === false),
+              'wheel-scrolls-horizontally': !!(wheel && wheel.after > wheel.before && wheel.prevented === true),
+              'menu-lists-own-pane-only': !!(menu && menu.btnVisible === true && menu.open === true && menu.items === 14 && menu.p1names.length === 1 && menu.names.indexOf(menu.p1names[0]) < 0),
+              'menu-click-switches-active': !!(clickItem && clickItem.wantName === clickItem.p0Active && clickItem.menuOpen === false),
+              'menu-click-keeps-other-pane': !!(clickItem && clickItem.p1Active === 'p5-qo-beta.md'),
+              'ctrl-tab-hud-own-pane': !!(hud && hud.visible === true && hud.items === 14 && hud.leaked === 0 && !!hud.current),
+              'ctrl-tab-switched': !!(hud && hud.before !== hud.after),
+              'hud-auto-hides': hudHide === false,
+            };
+            await p5Eval(`window.__app.editor.hideTabsHud()`);
+            return p5Fail(conj, 'ov=' + p5J(ov && { p0: ov.p0 && { o: ov.p0.overflow, n: ov.p0.tabCount, sw: ov.p0.scrollWidth, cw: ov.p0.clientWidth, btn: ov.p0.btnVisible }, p1: ov.p1 && { o: ov.p1.overflow, n: ov.p1.tabCount } }) +
+              ' wheel=' + p5J(wheel) + ' menu=' + p5J(menu && { items: menu.items, current: menu.current, first3: menu.names.slice(0, 3), p1: menu.p1names }) +
+              ' click=' + p5J(clickItem) + ' hud=' + p5J(hud && { visible: hud.visible, items: hud.items, current: hud.current, before: hud.before, after: hud.after, leaked: hud.leaked }));
+          });
+
+          // ---------------- 3. outlinePanel：大纲（markdown 标题树 / 点击跳转 / 随光标高亮 / 类型门控） ----------------
+          await p5Case('outlinePanel', async () => {
+            await p5Reset();
+            await p5Effect(`window.__app.editor.openFile(${p5J(P5_OUTLINE)})`);
+            await p5Sleep(500);
+            const md = await p5Eval(`(() => {
+              const s = window.__app.outline.getState();
+              const names = Array.from(document.querySelectorAll('#outline-list .outline-item .ol-text')).map((n) => n.textContent);
+              const lines = Array.from(document.querySelectorAll('#outline-list .outline-item')).map((n) => Number(n.dataset.line));
+              return { state: s, names: names, lines: lines, blockHidden: document.getElementById('outline-block').classList.contains('hidden') };
+            })()`);
+            // 点击「二级 B」→ 光标跳到第 17 行（真 DOM 点击）
+            const click = await p5Eval(`(() => {
+              const rows = Array.from(document.querySelectorAll('#outline-list .outline-item'));
+              const row = rows.find((r) => (r.querySelector('.ol-text') || {}).textContent === '二级 B');
+              if (row) row.click();
+              const v = window.__app.editor.getView();
+              return { clicked: !!row, line: v.state.doc.lineAt(v.state.selection.main.head).number, state: window.__app.outline.getState() };
+            })()`);
+            // 光标跟随：把选区移到第 6 行（属「二级 A」章节）→ current 必须变成「二级 A」
+            const follow = await p5Eval(`(() => {
+              const e = window.__app.editor;
+              const v = e.getView();
+              const pos = v.state.doc.line(6).from;
+              v.dispatch({ selection: { anchor: pos } });
+              return window.__app.outline.getState();
+            })()`);
+            const followB = await p5Eval(`(() => {
+              const v = window.__app.editor.getView();
+              v.dispatch({ selection: { anchor: v.state.doc.line(18).from } });
+              return window.__app.outline.getState();
+            })()`);
+            // 非 markdown：整体隐藏（连列表都要清空）
+            const txt = await p5Eval(`(async () => {
+              await window.__app.editor.openFile(${p5J(P5_TXT)});
+              return { state: window.__app.outline.getState(), hiddenClass: document.getElementById('outline-block').classList.contains('hidden'), rows: document.querySelectorAll('#outline-list .outline-item').length };
+            })()`);
+            // 类型门控（与 UI 同源的纯函数）：huge / viewer-lg / image / diff / 非 md 一律 false
+            const rules = await p5Eval(`(() => { const o = window.__app.outline; return {
+              md: o.supports('a.md', undefined), mdChunked: o.supports('a.md', 'chunked'),
+              mdHuge: o.supports('a.md', 'huge'), mdViewer: o.supports('a.md', 'viewer-lg'),
+              mdImage: o.supports('a.md', 'image'), mdDiff: o.supports('a.md', 'diff'), txt: o.supports('a.txt', undefined),
+              fence: o.parse('${'```'}\\n# 假标题\\n${'```'}\\n# 真标题\\n').map((h) => h.text),
+            }; })()`);
+            // 双栏跟随焦点栏：p0 开 outline.md、p1 开 outline2.md，切焦点栏 → 大纲跟着换
+            const twoPane = await p5Eval(`(async () => {
+              const e = window.__app.editor;
+              await e.openFile(${p5J(P5_OUTLINE)});
+              e.toggleSplit();
+              await e.openFile(${p5J(P5_OUTLINE2)});
+              await new Promise((r) => setTimeout(r, 300));
+              const a = window.__app.outline.getState();
+              e.focusPaneIndex(0);
+              await new Promise((r) => setTimeout(r, 200));
+              const b = window.__app.outline.getState();
+              e.focusPaneIndex(1);
+              await new Promise((r) => setTimeout(r, 200));
+              const c = window.__app.outline.getState();
+              return { inP1: { tab: a.tabName, first: a.current, title: a.title }, backP0: { tab: b.tabName, count: b.count }, againP1: { tab: c.tabName, count: c.count } };
+            })()`);
+            const conj = {
+              'md-visible': !!(md && md.state.hidden === false && md.blockHidden === false),
+              'four-headings': !!(md && md.state.rendered === 4 && md.names.length === 4),
+              'fence-and-indent-skipped': !!(md && md.names.indexOf('不是标题（在代码块里）') < 0 && rules && Array.isArray(rules.fence) && rules.fence.length === 1 && rules.fence[0] === '真标题'),
+              'line-numbers-correct': !!(md && md.lines.join(',') === '1,5,9,17'),
+              'click-jumps': !!(click && click.clicked === true && click.line === 17 && click.state.current === '二级 B'),
+              'cursor-follows': !!(follow && follow.current === '二级 A' && follow.currentLine === 5),
+              'cursor-follows-second': !!(followB && followB.current === '二级 B' && followB.currentLine === 17),
+              'txt-hidden': !!(txt && txt.state.hidden === true && txt.hiddenClass === true && txt.rows === 0),
+              'type-rules': !!(rules && rules.md === true && rules.mdChunked === true && rules.mdHuge === false && rules.mdViewer === false && rules.mdImage === false && rules.mdDiff === false && rules.txt === false),
+              'two-pane-follows-focus': !!(twoPane && twoPane.inP1.tab === 'p5-outline2.md' && twoPane.backP0.tab === 'p5-outline.md' && twoPane.againP1.tab === 'p5-outline2.md' && twoPane.backP0.count === 4),
+            };
+            return p5Fail(conj, 'md=' + p5J(md && { hidden: md.state.hidden, rendered: md.state.rendered, names: md.names, lines: md.lines }) +
+              ' click=' + p5J(click && { line: click.line, current: click.state.current }) +
+              ' follow=' + p5J({ a: follow && follow.current, b: followB && followB.current }) +
+              ' txt=' + p5J(txt && { hidden: txt.state.hidden, rows: txt.rows }) + ' rules=' + p5J(rules) + ' twoPane=' + p5J(twoPane));
+          });
+
+          // ---------------- 4. fontSizeSetting：字号/行高设置 + Ctrl+= / Ctrl+- / Ctrl+0 ----------------
+          await p5Case('fontSizeSetting', async () => {
+            await p5Reset();
+            await p5Effect(`window.__app.editor.openFile(${p5J(P5_OUTLINE)})`);
+            await p5Sleep(400);
+            /** 走**真实设置弹窗**改字号/行高/预览字号（顺带验证弹窗接线与白名单；
+             *  输入框顺序：number 型依次为 大文件上限 / 自动保存 / 滚动条 / 缩进 / 编辑器字号 / 行高 / 预览字号）。 */
+            const setViaDialog = (f, l, p) => `(async () => {
+              document.getElementById('btn-settings').click();
+              await new Promise((r) => setTimeout(r, 200));
+              const nums = document.querySelectorAll('#modal-body input[type="number"]');
+              const count = nums.length;
+              nums[4].value = ${p5J(String(f))};
+              nums[5].value = ${p5J(String(l))};
+              nums[6].value = ${p5J(String(p))};
+              document.querySelector('#modal-actions .tbtn.primary').click();
+              await new Promise((r) => setTimeout(r, 350));
+              const s = await window.api.getSettings();
+              const cs = getComputedStyle(document.documentElement);
+              return { count: count, saved: { f: s.editorFontSize, l: s.editorLineHeight, p: s.previewFontSize },
+                v: { f: cs.getPropertyValue('--mh-editor-font-size').trim(), l: cs.getPropertyValue('--mh-editor-line-height').trim(), p: cs.getPropertyValue('--mh-preview-font-size').trim() },
+                modalHidden: document.getElementById('modal-mask').classList.contains('hidden') };
+            })()`;
+            // ① 弹窗保存 18px / 行高 2 / 预览 20px → 白名单 + 落盘 + CSS 变量 + 计算样式
+            const set1 = await p5Eval(setViaDialog(18, 2, 20));
+            const computed = await p5Eval(`(() => {
+              const cm = document.querySelector('#editor-host .cm-editor');
+              const sc = document.querySelector('#editor-host .cm-scroller');
+              const pv = document.getElementById('preview-content');
+              return { cmFont: cm ? getComputedStyle(cm).fontSize : null, cmLine: sc ? getComputedStyle(sc).lineHeight : null, pvFont: pv ? getComputedStyle(pv).fontSize : null };
+            })()`);
+            const reread = await p5Eval(`window.api.getSettings().then((s) => ({ f: s.editorFontSize, l: s.editorLineHeight, p: s.previewFontSize }))`);
+            // ② 双栏：另一栏的 CM 必须同时跟随（CSS 变量挂在 :root ⇒ 所有栏/所有预览一起变）
+            const two = await p5Eval(`(async () => {
+              const e = window.__app.editor;
+              e.toggleSplit();
+              await e.openFile(${p5J(P5_OUTLINE2)});
+              await new Promise((r) => setTimeout(r, 300));
+              const cm0 = document.querySelector('#editor-host .cm-editor');
+              const cm1 = e.getPaneEls(1).root.querySelector('.cm-editor');
+              return { cm0: cm0 ? getComputedStyle(cm0).fontSize : null, cm1: cm1 ? getComputedStyle(cm1).fontSize : null,
+                varNow: getComputedStyle(document.documentElement).getPropertyValue('--mh-editor-font-size').trim() };
+            })()`);
+            // ③ Ctrl+= / Ctrl+- 真键盘事件（走 help.js 键表 → app.js 动作，当前值从主进程现读）
+            await p5Eval(p5Key('=', { ctrlKey: true }));
+            await p5Sleep(300);
+            const up = await p5Eval(`window.api.getSettings().then((s) => ({ v: s.editorFontSize, varNow: getComputedStyle(document.documentElement).getPropertyValue('--mh-editor-font-size').trim() }))`);
+            await p5Eval(p5Key('-', { ctrlKey: true }));
+            await p5Sleep(300);
+            const down = await p5Eval(`window.api.getSettings().then((s) => s.editorFontSize)`);
+            // ③b **真·输入事件**（webContents.sendInputEvent 走浏览器进程输入管线，会经过菜单快捷键）：
+            //     Electron 默认菜单带 View → Zoom In/Out/Reset（Ctrl+Plus / Ctrl+- / Ctrl+0），
+            //     若被菜单吃掉，渲染端根本收不到 keydown，而**整个界面会被缩放**（webContents.zoomLevel 变化）。
+            //     判据只认"菜单是否真的把界面缩放了"：zoomLevel 变化 = 键位被菜单截胡（真红）；
+            //     若窗口未获焦点（sendInputEvent 空转）则两者都不变，不冤判。用完把 zoomLevel 复位。
+            const realKey = await (async () => {
+              const zl0 = win.webContents.getZoomLevel();
+              const f0 = await p5Eval(`window.api.getSettings().then((s) => s.editorFontSize)`);
+              const attempt = async (keyCode) => {
+                try {
+                  win.webContents.sendInputEvent({ type: 'keyDown', keyCode: keyCode, modifiers: ['control'] });
+                  win.webContents.sendInputEvent({ type: 'keyUp', keyCode: keyCode, modifiers: ['control'] });
+                } catch { /* 非法 keyCode：忽略 */ }
+                await p5Sleep(350);
+                return { font: await p5Eval(`window.api.getSettings().then((s) => s.editorFontSize)`), zoom: win.webContents.getZoomLevel() };
+              };
+              const withEq = await attempt('=');
+              const withPlus = await attempt('Plus');
+              const zl1 = win.webContents.getZoomLevel();
+              if (zl1 !== zl0) { try { win.webContents.setZoomLevel(zl0); } catch { /* 忽略 */ } }
+              return { zl0: zl0, zl1: zl1, f0: f0, eq: withEq, plus: withPlus, zoomReset: win.webContents.getZoomLevel() };
+            })();
+            // ④ 上下限：弹窗输入 40 / 5 被夹到 32 / 10，再按方向键保持不动（命中"已是上限/下限"分支）。
+            //    setHi 顺带把行高设成 **1.65**（默认值同款两位小数）：专门守"两位小数被归整成 1.7"
+            //    这条**静默漂移**——首轮验收唯一那条红就是它（落盘 1.65、CSS 变量却成了 1.7）。
+            const setHi = await p5Eval(setViaDialog(40, 1.65, 20));
+            await p5Eval(p5Key('=', { ctrlKey: true }));
+            await p5Sleep(300);
+            const hiHold = await p5Eval(`window.api.getSettings().then((s) => s.editorFontSize)`);
+            const setLo = await p5Eval(setViaDialog(5, 2, 20));
+            await p5Eval(p5Key('-', { ctrlKey: true }));
+            await p5Sleep(300);
+            const loHold = await p5Eval(`window.api.getSettings().then((s) => s.editorFontSize)`);
+            // ⑤ Ctrl+0 语义：编辑器/预览字号 + 行高复位，且预览缩放回 100%（后者是 Ctrl+0 的原有行为）
+            //    ⚠️ preview 实例跟着**焦点栏**走：上面双栏步骤把焦点留在了 p1，这里必须先聚焦 p0，
+            //    否则 resetZoom 作用在 p1 的预览宿主上，而断言的 #preview-host 是 p0 的（恒不变）。
+            await p5Effect(`window.__app.editor.focusPaneIndex(0)`);
+            await p5Sleep(200);
+            const zero = await p5Eval(`(() => {
+              const host = document.querySelector('#preview-host');
+              host.style.zoom = '';
+              host.dispatchEvent(new WheelEvent('wheel', { ctrlKey: true, deltaY: -120, bubbles: true, cancelable: true }));
+              const zoomBefore = host.style.zoom;
+              const fontBefore = getComputedStyle(document.documentElement).getPropertyValue('--mh-editor-font-size').trim();
+              ${'document.dispatchEvent(new KeyboardEvent(\'keydown\', { key: \'0\', ctrlKey: true, bubbles: true }));'}
+              const cs = getComputedStyle(document.documentElement);
+              return { zoomBefore: zoomBefore, zoomAfter: host.style.zoom, fontBefore: fontBefore,
+                vf: cs.getPropertyValue('--mh-editor-font-size').trim(), vl: cs.getPropertyValue('--mh-editor-line-height').trim(), vp: cs.getPropertyValue('--mh-preview-font-size').trim() };
+            })()`);
+            await p5Sleep(350);
+            const zeroSaved = await p5Eval(`window.api.getSettings().then((s) => ({ f: s.editorFontSize, l: s.editorLineHeight, p: s.previewFontSize }))`);
+            const conj = {
+              'dialog-has-new-fields': !!(set1 && set1.count === 7 && set1.modalHidden === true),
+              'whitelist-accepts': !!(set1 && set1.saved.f === 18 && set1.saved.l === 2 && set1.saved.p === 20),
+              'persisted': !!(reread && reread.f === 18 && reread.l === 2 && reread.p === 20),
+              'css-vars-applied': !!(set1 && set1.v.f === '18px' && set1.v.l === '2' && set1.v.p === '20px'),
+              'cm-font-size': !!(computed && computed.cmFont === '18px'),
+              'cm-line-height': !!(computed && computed.cmLine === '36px'),
+              'preview-font-size': !!(computed && computed.pvFont === '20px'),
+              'both-panes-follow': !!(two && two.cm0 === '18px' && two.cm1 === '18px' && two.varNow === '18px'),
+              'ctrl-equals-increases': !!(up && up.v === 19 && up.varNow === '19px'),
+              'ctrl-minus-decreases': down === 18,
+              'real-key-not-eaten-by-menu': !!(realKey && realKey.zl1 === realKey.zl0),
+              'clamp-high-via-dialog': !!(setHi && setHi.saved.f === 32 && setHi.v.f === '32px'),
+              // 两位小数（0.05 步长域）必须原样落到 CSS 变量，不得被归整成 1.7
+              'fractional-line-height-preserved': !!(setHi && setHi.saved.l === 1.65 && setHi.v.l === '1.65'),
+              'ctrl-equals-holds-at-max': hiHold === 32,
+              'clamp-low-via-dialog': !!(setLo && setLo.saved.f === 10 && setLo.v.f === '10px'),
+              'ctrl-minus-holds-at-min': loHold === 10,
+              'ctrl-0-resets-fonts': !!(zero && zero.fontBefore === '10px' && zero.vf === '13.5px' && zero.vl === '1.65' && zero.vp === '14.5px'),
+              'ctrl-0-resets-preview-zoom': !!(zero && zero.zoomBefore === '1.1' && zero.zoomAfter === '1'),
+              'ctrl-0-persisted': !!(zeroSaved && zeroSaved.f === 13.5 && zeroSaved.l === 1.65 && zeroSaved.p === 14.5),
+            };
+            return p5Fail(conj, 'set1=' + p5J(set1) + ' computed=' + p5J(computed) + ' reread=' + p5J(reread) + ' two=' + p5J(two) +
+              ' up=' + p5J(up) + ' down=' + p5J(down) + ' realKey=' + p5J(realKey) +
+              ' setHi=' + p5J(setHi && { s: setHi.saved.f, l: setHi.saved.l, v: setHi.v.f, vl: setHi.v.l }) + ' hiHold=' + p5J(hiHold) +
+              ' setLo=' + p5J(setLo && { s: setLo.saved.f, v: setLo.v.f }) + ' loHold=' + p5J(loHold) + ' zero=' + p5J(zero) + ' zeroSaved=' + p5J(zeroSaved) +
+              // want/got 并排（首轮就是靠"落盘=1.65 而变量=1.7"这类对照才定位到夹取精度 bug 的）
+              ' ctrl0-want=13.5px/1.65/14.5px got=' + (zero ? zero.vf + '/' + zero.vl + '/' + zero.vp : '-') + '(before=' + (zero ? zero.fontBefore : '-') + ')');
+          });
+
+          // ---------------- 5. bottomPanelCollapse：底部面板默认折叠 + 按需展开 + 最大化/还原 ----------------
+          await p5Case('bottomPanelCollapse', async () => {
+            await p5Reset();
+            await p5Effect(`window.__app.editor.openFile(${p5J(P5_OUTLINE)})`);
+            await p5Sleep(300);
+            const boot = await p5Eval(`window.__app.bottomPanel.getState()`);
+            const DEF = await p5Eval(`window.__app.bottomPanel.DEFAULT_COLLAPSED`);
+            // ① 折叠态：面板体不可见（等价于旧用例读 DOM 文本时"看不到但还在"）
+            const collapsed = await p5Eval(`(() => {
+              window.__app.bottomPanel.collapse();
+              const panel = document.getElementById('bottom-panel');
+              const body = document.getElementById('panel-find');
+              return { cls: panel.classList.contains('collapsed'), h: Math.round(panel.getBoundingClientRect().height),
+                bodyH: body.offsetHeight, bodyDisplay: getComputedStyle(body).display,
+                pyInDom: !!document.getElementById('panel-python') };
+            })()`);
+            // ② 点击面板标题页签 → 按需展开
+            const expanded = await p5Eval(`(() => {
+              document.querySelector('.ptab[data-panel="find"]').click();
+              const panel = document.getElementById('bottom-panel');
+              const body = document.getElementById('panel-find');
+              return { cls: panel.classList.contains('collapsed'), h: Math.round(panel.getBoundingClientRect().height), bodyH: body.offsetHeight };
+            })()`);
+            // ③ 最大化 / 还原（点标题栏 ⛶）
+            const max = await p5Eval(`(() => {
+              const panel = document.getElementById('bottom-panel');
+              const before = Math.round(panel.getBoundingClientRect().height);
+              document.getElementById('btn-max-panel').click();
+              const maxed = { cls: panel.classList.contains('maximized'), h: Math.round(panel.getBoundingClientRect().height) };
+              document.getElementById('btn-max-panel').click();
+              const after = { cls: panel.classList.contains('maximized'), h: Math.round(panel.getBoundingClientRect().height) };
+              return { before: before, maxed: maxed, after: after };
+            })()`);
+            // ④ ✕ 收起 与 Esc 收起
+            const closeBtn = await p5Eval(`(() => {
+              document.getElementById('btn-close-panel').click();
+              return window.__app.bottomPanel.getState();
+            })()`);
+            await p5Eval(`window.__app.bottomPanel.expand()`);
+            await p5Sleep(120);
+            await p5Eval(p5Key('Escape', {}));
+            await p5Sleep(150);
+            const escState = await p5Eval(`window.__app.bottomPanel.getState()`);
+            // ⑤ **既有用例依赖什么**：折叠态下面板体的 DOM 与写值路径必须照样可用
+            //    （findAll 读 #find-results .find-result；pyUI 读 #py-output —— 折叠只是 CSS display:none）
+            const legacy = await p5Eval(`(async () => {
+              window.__app.bottomPanel.collapse();
+              const fi = document.getElementById('find-input');
+              fi.value = '正文';
+              fi.dispatchEvent(new Event('input'));
+              await new Promise((r) => setTimeout(r, 300));
+              const rows = document.querySelectorAll('#find-results .find-result').length;
+              const count = document.getElementById('find-count').textContent;
+              const pyOut = document.getElementById('py-output');
+              pyOut.textContent = 'PY_PROBE';
+              return { rows: rows, count: count, pyText: pyOut.textContent,
+                collapsed: document.getElementById('bottom-panel').classList.contains('collapsed'),
+                pyVisible: pyOut.offsetHeight > 0 };
+            })()`);
+            await p5Eval(`window.__app.find.clearSearch()`);
+            // ⑥ 恢复默认（折叠）交给后续用例
+            await p5Eval(`window.__app.bottomPanel.collapse()`);
+            const conj = {
+              'boot-default-collapsed': !!(boot && boot.bootCollapsed === true && boot.maximized === false && DEF === true),
+              'collapse-hides-body': !!(collapsed && collapsed.cls === true && collapsed.bodyH === 0 && collapsed.bodyDisplay === 'none'),
+              'collapsed-keeps-dom': !!(collapsed && collapsed.pyInDom === true),
+              'ptab-click-expands': !!(expanded && expanded.cls === false && expanded.bodyH > 100),
+              'maximize-grows': !!(max && max.maxed.cls === true && max.maxed.h > max.before + 100),
+              'restore-shrinks': !!(max && max.after.cls === false && Math.abs(max.after.h - max.before) <= 8),
+              'close-button-collapses': !!(closeBtn && closeBtn.collapsed === true),
+              'esc-collapses': !!(escState && escState.collapsed === true),
+              'legacy-find-rows-while-collapsed': !!(legacy && legacy.collapsed === true && legacy.rows > 0),
+              'legacy-py-output-while-collapsed': !!(legacy && legacy.pyText === 'PY_PROBE'),
+            };
+            return p5Fail(conj, 'boot=' + p5J(boot) + ' DEF=' + p5J(DEF) + ' collapsed=' + p5J(collapsed) + ' expanded=' + p5J(expanded) +
+              ' max=' + p5J(max) + ' closeBtn=' + p5J(closeBtn && { collapsed: closeBtn.collapsed }) + ' esc=' + p5J(escState && { collapsed: escState.collapsed }) +
+              ' legacy=' + p5J(legacy && { rows: legacy.rows, count: legacy.count, collapsed: legacy.collapsed }));
+          });
+
+          // ---------------- 6. sidebarCollapse：侧栏三分区折叠 + 记忆（不破坏树的展开态） ----------------
+          await p5Case('sidebarCollapse', async () => {
+            await p5Reset();
+            // 先让树里出现一个可展开的目录（p5-tree），并保证它是收起的
+            await p5Eval(`(async () => { await window.__app.tree.refreshNode(${p5J(TEST_ROOT)}, true); return true; })()`);
+            await p5Sleep(400);
+            const heads = await p5Eval(`(() => ({
+              fav: !!document.getElementById('fav-header'), tree: !!document.getElementById('tree-header'),
+              search: !!document.getElementById('search-header'), caretTree: (document.getElementById('tree-caret') || {}).textContent,
+            }))()`);
+            // 展开 p5-tree 目录（真点击树节点）→ 记下子行数。
+            // ⚠️ 树的行与它的子容器是**兄弟节点**（makeRow 返回 {row, children}，render/loadChildren
+            //    都把两者依次 append 到同一父容器），所以子行要经 row.nextElementSibling 取。
+            const expandDir = await p5Eval(`(async () => {
+              const norm = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+              const dir = ${p5J(P5_TREE_DIR)};
+              const all = () => Array.from(document.querySelectorAll('#file-tree .tree-node'));
+              const kidsOf = (row) => {
+                const box = row && row.nextElementSibling;
+                return box && box.classList && box.classList.contains('tree-children') ? box.querySelectorAll('.tree-node').length : -1;
+              };
+              let row = all().find((n) => norm(n.dataset.path) === norm(dir));
+              if (!row) { await window.__app.tree.refreshNode(${p5J(TEST_ROOT)}, true); await new Promise((r) => setTimeout(r, 400)); row = all().find((n) => norm(n.dataset.path) === norm(dir)); }
+              if (row) row.click();
+              await new Promise((r) => setTimeout(r, 600));
+              row = all().find((n) => norm(n.dataset.path) === norm(dir));
+              return { found: !!row, kids: kidsOf(row), icon: row ? (row.querySelector('.icon') || {}).textContent : null };
+            })()`);
+            // ① 折叠树分区 → 容器不可见 + 记忆进 settings
+            const treeOff = await p5Eval(`(() => {
+              document.getElementById('tree-header').click();
+              const t = document.getElementById('file-tree');
+              return { cls: t.classList.contains('collapsed'), h: t.offsetHeight, state: window.__app.sidebarSections.getState() };
+            })()`);
+            await p5Sleep(250);
+            const treeSaved = await p5Eval(`window.api.getSettings().then((s) => s.sidebarCollapsed)`);
+            // ② 再展开 → 树的展开态必须原样保留（J4 的展开态恢复未被破坏）
+            const treeOn = await p5Eval(`(() => {
+              document.getElementById('tree-header').click();
+              const t = document.getElementById('file-tree');
+              const norm = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+              const row = Array.from(document.querySelectorAll('#file-tree .tree-node')).find((n) => norm(n.dataset.path) === norm(${p5J(P5_TREE_DIR)}));
+              const box = row && row.nextElementSibling;
+              const kids = box && box.classList && box.classList.contains('tree-children') ? box.querySelectorAll('.tree-node').length : -1;
+              return { cls: t.classList.contains('collapsed'), h: t.offsetHeight, kids: kids,
+                icon: row ? (row.querySelector('.icon') || {}).textContent : null, state: window.__app.sidebarSections.getState() };
+            })()`);
+            // ③ 收藏分区折叠（走 favorites.js 的标题行 → 回调落盘）
+            const favOff = await p5Eval(`(() => {
+              document.getElementById('fav-header').click();
+              return { cls: document.getElementById('fav-block').classList.contains('collapsed'), listH: document.getElementById('fav-list').offsetHeight, state: window.__app.sidebarSections.getState() };
+            })()`);
+            await p5Sleep(250);
+            const favSaved = await p5Eval(`window.api.getSettings().then((s) => s.sidebarCollapsed)`);
+            // ④ 搜索分区折叠：标题行仍在，输入区与结果区隐藏。
+            //    **折叠前先取一次快照** —— "各分区互不影响"只能靠前后差集证明（此刻 fav 仍是
+            //    第③步折叠后的 true，早先写成"期望 fav=false"是把用例自身的步骤记错了）。
+            const searchOff = await p5Eval(`(() => {
+              const before = window.__app.sidebarSections.getState();
+              document.getElementById('search-header').click();
+              const s = document.getElementById('sidebar-search');
+              const bar = s.querySelector('.gs-bar');
+              return { before: before, cls: s.classList.contains('collapsed'), barH: bar.offsetHeight, headDisplay: getComputedStyle(document.getElementById('search-header')).display,
+                state: window.__app.sidebarSections.getState() };
+            })()`);
+            // ⑤ 三分区互不影响：折叠 search 只翻 search 一位，fav/tree 的**折叠态与其 DOM 类原样不动**
+            const indep = await p5Eval(`(() => {
+              const s = window.__app.sidebarSections.getState();
+              return { s: s,
+                treeCls: document.getElementById('file-tree').classList.contains('collapsed'),
+                favCls: document.getElementById('fav-block').classList.contains('collapsed'),
+                searchCls: document.getElementById('sidebar-search').classList.contains('collapsed') };
+            })()`);
+            // 收尾：三分区复位为全展开（settings 也复位）
+            await p5Eval(`window.__app.sidebarSections.set({ fav: false, tree: false, search: false })`);
+            await p5Sleep(250);
+            const reset = await p5Eval(`(async () => {
+              const s = await window.api.getSettings();
+              return { mem: s.sidebarCollapsed, treeCls: document.getElementById('file-tree').classList.contains('collapsed'), searchCls: document.getElementById('sidebar-search').classList.contains('collapsed'), favCls: document.getElementById('fav-block').classList.contains('collapsed') };
+            })()`);
+            const conj = {
+              'three-headers': !!(heads && heads.fav && heads.tree && heads.search),
+              'dir-expanded-fixture': !!(expandDir && expandDir.found === true && expandDir.kids === 2),
+              'tree-collapse-hides': !!(treeOff && treeOff.cls === true && treeOff.h === 0 && treeOff.state.tree === true),
+              'tree-collapse-persisted': !!(treeSaved && treeSaved.tree === true),
+              'tree-expand-restores': !!(treeOn && treeOn.cls === false && treeOn.h > 0 && treeOn.state.tree === false),
+              'tree-expand-state-kept': !!(treeOn && treeOn.kids === 2 && treeOn.icon === '📂'),
+              'fav-collapse': !!(favOff && favOff.cls === true && favOff.listH === 0 && favOff.state.fav === true),
+              'fav-collapse-persisted': !!(favSaved && favSaved.fav === true),
+              'search-collapse': !!(searchOff && searchOff.cls === true && searchOff.barH === 0 && searchOff.headDisplay !== 'none'),
+              // 独立性判据（差集口径）：折叠前后**只有 search 一位翻转**，
+              // fav（第③步已折叠）/tree（第②步已展开）的折叠态与 DOM 类都不变。
+              'sections-independent': !!(searchOff && searchOff.before && indep
+                && searchOff.before.search === false && searchOff.before.fav === true && searchOff.before.tree === false
+                && indep.s.search === true && indep.s.fav === searchOff.before.fav && indep.s.tree === searchOff.before.tree
+                && indep.favCls === true && indep.treeCls === false && indep.searchCls === true),
+              'reset-all-expanded': !!(reset && reset.mem && reset.mem.tree === false && reset.mem.fav === false && reset.mem.search === false && reset.treeCls === false && reset.searchCls === false && reset.favCls === false),
+            };
+            return p5Fail(conj, 'heads=' + p5J(heads) + ' expandDir=' + p5J(expandDir) + ' treeOff=' + p5J(treeOff && { cls: treeOff.cls, h: treeOff.h, st: treeOff.state }) +
+              ' treeSaved=' + p5J(treeSaved) + ' treeOn=' + p5J(treeOn && { cls: treeOn.cls, h: treeOn.h, kids: treeOn.kids, icon: treeOn.icon }) +
+              ' favOff=' + p5J(favOff && { cls: favOff.cls, listH: favOff.listH }) + ' favSaved=' + p5J(favSaved) +
+              ' searchOff=' + p5J(searchOff && { cls: searchOff.cls, barH: searchOff.barH, head: searchOff.headDisplay }) +
+              ' indep=' + p5J(indep) + ' reset=' + p5J(reset));
+          });
+
+          // ---------------- 7. helpPanel：F1 / Ctrl+/ 快捷键面板 + 键位单一数据源 ----------------
+          await p5Case('helpPanel', async () => {
+            await p5Reset();
+            // ① F1 打开（真键盘事件 → help.js 键表 → app.js 动作）
+            await p5Eval(p5Key('F1', {}));
+            await p5Sleep(400);
+            const f1 = await p5Eval(`(() => {
+              const s = window.__app.help.panel.getState();
+              return { open: s.open, modalOpen: s.modalOpen, title: s.title, rows: s.shownRows.length, groups: document.querySelectorAll('#help-groups .help-group').length,
+                tableRows: window.__app.help.rows.length, count: s.countText, unwired: window.__app.help.unwired };
+            })()`);
+            // ② 面板内容必须就是键位表本身（**同一集合**：逐 id 比 keys/label）——"单一数据源"的直接证据。
+            //    ⚠️ 不能按**下标**逐行对齐：面板是按 SHORTCUT_GROUPS 分组渲染的，组序 ≠ 表序
+            //    （表序按功能排，组序把"视图与布局"放在"搜索与查找"之后）→ 首跑就是这样误报的。
+            //    这里改成按 id 建索引比集合，并把**差集直接打进 detail**（表里有面板无 / 面板有表里无 / 字段不一致）。
+            const same = await p5Eval(`(() => {
+              const shown = window.__app.help.panel.getState().shownRows;
+              const table = window.__app.help.rows;
+              const byId = Object.create(null);
+              for (const r of shown) byId[r.id] = r;
+              const seen = Object.create(null);
+              for (const r of table) seen[r.id] = true;
+              const missing = table.filter((r) => !byId[r.id]).map((r) => r.id);
+              const extra = shown.filter((r) => !seen[r.id]).map((r) => r.id);
+              const mismatched = table.filter((r) => byId[r.id] && (byId[r.id].keys !== r.keys || String(byId[r.id].label).indexOf(r.label) !== 0))
+                .map((r) => r.id + '(keys:' + (byId[r.id] ? byId[r.id].keys : '-') + '≠' + r.keys + ')');
+              return { shownN: shown.length, tableN: table.length, missing: missing, extra: extra, mismatched: mismatched,
+                sameSet: missing.length === 0 && extra.length === 0 && mismatched.length === 0 };
+            })()`);
+            // ③ 新增 7 条体验项的键位都在表里（F1 面板必须能查到本阶段新增的键）
+            const covers = await p5Eval(`(() => {
+              const ids = window.__app.help.rows.map((r) => r.id);
+              return { quick: ids.indexOf('quick-open') >= 0, outline: ids.indexOf('outline-toggle') >= 0, fInc: ids.indexOf('font-inc') >= 0,
+                fDec: ids.indexOf('font-dec') >= 0, zero: ids.indexOf('zoom-reset') >= 0, esc: ids.indexOf('panel-collapse') >= 0, help: ids.indexOf('help') >= 0 };
+            })()`);
+            // ④ 筛选（真实 input 事件）
+            const filter = await p5Eval(`(() => { const n = window.__app.help.panel.typeFilter('ctrl+p'); const s = window.__app.help.panel.getState();
+              const back = window.__app.help.panel.typeFilter(''); return { n: n, first: s.shownRows[0] ? s.shownRows[0].id : null, count: s.countText, back: back }; })()`);
+            // ⑤ 键位分派（表 → 事件）：几个代表键位必须命中预期 id
+            const dispatch = await p5Eval(`(() => {
+              const m = (o) => window.__app.help.match(Object.assign({ key: '', code: '', ctrlKey: false, metaKey: false, shiftKey: false, altKey: false }, o));
+              return { p: m({ key: 'p', ctrlKey: true }), f1: m({ key: 'F1' }), slash: m({ key: '/', ctrlKey: true }),
+                eq: m({ key: '=', ctrlKey: true }), minus: m({ key: '-', ctrlKey: true }), zero: m({ key: '0', ctrlKey: true }),
+                split: m({ key: '\\\\', code: 'Backslash', ctrlKey: true }), shiftO: m({ key: 'O', ctrlKey: true, shiftKey: true }),
+                plainO: m({ key: 'o', ctrlKey: true }), none: m({ key: 'z', ctrlKey: true }) };
+            })()`);
+            // ⑥ 再按 F1 关闭；Ctrl+/ 也能打开，并用「关闭」按钮关掉
+            await p5Eval(p5Key('F1', {}));
+            await p5Sleep(300);
+            const closed = await p5Eval(`(() => ({ open: window.__app.help.panel.isOpen(), modalHidden: document.getElementById('modal-mask').classList.contains('hidden') }))()`);
+            await p5Eval(p5Key('/', { ctrlKey: true }));
+            await p5Sleep(350);
+            const slashOpen = await p5Eval(`(() => ({ open: window.__app.help.panel.isOpen(), title: document.getElementById('modal-title').textContent }))()`);
+            const btnClose = await p5Eval(`(() => {
+              const btns = document.querySelectorAll('#modal-actions .tbtn');
+              const b = btns[btns.length - 1];
+              if (b) b.click();
+              return { clicked: !!b, open: window.__app.help.panel.isOpen(), modalHidden: document.getElementById('modal-mask').classList.contains('hidden') };
+            })()`);
+            const conj = {
+              'f1-opens': !!(f1 && f1.open === true && f1.modalOpen === true && f1.title === '快捷键'),
+              'renders-all-rows': !!(f1 && f1.rows === f1.tableRows && f1.rows >= 18),
+              'grouped': !!(f1 && f1.groups >= 4),
+              'no-unwired': !!(f1 && Array.isArray(f1.unwired) && f1.unwired.length === 0),
+              'single-source': !!(same && same.sameSet === true && same.shownN === same.tableN && same.shownN >= 18),
+              'covers-new-keys': !!(covers && covers.quick && covers.outline && covers.fInc && covers.fDec && covers.zero && covers.esc && covers.help),
+              'filter-works': !!(filter && filter.n === 1 && filter.first === 'quick-open' && filter.back === f1.tableRows),
+              'dispatch-matches-table': !!(dispatch && dispatch.p === 'quick-open' && dispatch.f1 === 'help' && dispatch.slash === 'help' && dispatch.eq === 'font-inc' &&
+                dispatch.minus === 'font-dec' && dispatch.zero === 'zoom-reset' && dispatch.split === 'split-toggle' && dispatch.shiftO === 'outline-toggle' &&
+                dispatch.plainO === 'open-dir' && dispatch.none === null),
+              'f1-toggles-closed': !!(closed && closed.open === false && closed.modalHidden === true),
+              'ctrl-slash-opens': !!(slashOpen && slashOpen.open === true && slashOpen.title === '快捷键'),
+              'close-button-works': !!(btnClose && btnClose.clicked === true && btnClose.open === false && btnClose.modalHidden === true),
+            };
+            return p5Fail(conj, 'f1=' + p5J(f1) + ' same=' + p5J(same) + ' covers=' + p5J(covers) + ' filter=' + p5J(filter) +
+              ' dispatch=' + p5J(dispatch) + ' closed=' + p5J(closed) + ' slashOpen=' + p5J(slashOpen) + ' btnClose=' + p5J(btnClose));
+          });
+        } finally {
+          // 清场：关浮层/弹窗、合栏、关标签、复位面板与侧栏与字号、删夹具
+          try { await p5Eval(`(async () => {
+            try { window.__app.quickOpen.close(); } catch (e) {}
+            try { window.__app.editor.hideTabsHud(); } catch (e) {}
+            try { document.getElementById('modal-mask').classList.add('hidden'); } catch (e) {}
+            try { window.__app.bottomPanel.collapse(); } catch (e) {}
+            try { window.__app.sidebarSections.set({ fav: false, tree: false, search: false }); } catch (e) {}
+            try { await window.api.setSettings({ editorFontSize: 13.5, editorLineHeight: 1.65, previewFontSize: 14.5 }); } catch (e) {}
+            try { const e2 = window.__app.editor; if (e2.getPaneCount() > 1) e2.mergePanes(); e2.closeAll(); } catch (e) {}
+            return true;
+          })()`); } catch { /* 忽略 */ }
+          try { await p5Sleep(300); } catch { /* 忽略 */ }
+          for (const f of P5_ALL_FILES) {
+            try { fs.rmSync(f, { force: true }); } catch { /* 占用则忽略 */ }
+          }
+          try { fs.rmSync(P5_TREE_DIR, { recursive: true, force: true }); } catch { /* 占用则忽略 */ }
+        }
+      }
+
+      // ==========================================================================
+      // 0.5.0 Phase 5a 第 2 批（4 条）：A2 reopenClosedTab / F2 ctxMenuCommonItems /
+      //                                 G1 findCaseWordRegex / G2 findMatchLimit
+      // --------------------------------------------------------------------------
+      // 位置：Phase 5a 第 1 批的 7 条之后、E2E_RESULTS 之前 —— 真·append（未改动任何既有用例一行）。
+      // 断言口径：**渲染端可观测事实**（DOM/面板文本/编辑器 state/测试面快照）
+      //   + **主进程事实**（fs 真读磁盘内容、IPC 的审批拒绝返回值）。
+      // 每条用例的**每个合取项单独命名**打进 detail（本仓库踩过的坑④）；夹具自建自清；
+      // 大文件用例临时降阈值，finally 必恢复 1024。
+      // 注意（坑①）：所有 p6Eval 的模板串内部**只用单引号**，绝不出现裸反引号。
+      // ==========================================================================
+      {
+        const P6_REOPEN = path.join(TEST_ROOT, 'p6b-reopen-长文.md');
+        const P6_RO = path.join(TEST_ROOT, 'p6b-reopen-只读.md');       // 用只读属性逼出"保存失败"路径
+        const P6_STACK = Array.from({ length: 25 }, (_, i) => path.join(TEST_ROOT, 'p6b-stack-' + String(i + 1).padStart(2, '0') + '.md'));
+        const P6_PANE_A = path.join(TEST_ROOT, 'p6b-pane-a.md');
+        const P6_PANE_B = path.join(TEST_ROOT, 'p6b-pane-b.md');
+        const P6_FIND = path.join(TEST_ROOT, 'p6b-find.md');
+        const P6_FIND2 = path.join(TEST_ROOT, 'p6b-find-p1.md');
+        const P6_LIMIT = path.join(TEST_ROOT, 'p6b-limit.md');
+        const P6_HUGE = path.join(TEST_ROOT, 'p6b-huge-21mb.txt');
+        const P6_SMALLHUGE = path.join(TEST_ROOT, 'p6b-small-huge-2mb.txt');
+        const P6_CTX_DIR = path.join(TEST_ROOT, 'p6b-ctx-amp&caret^dir');
+        const P6_CTX_FILE = path.join(P6_CTX_DIR, 'p6b-ctx&file.md');
+        const P6_NOTAPPROVED = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
+        const P6_MISSING = path.join(TEST_ROOT, 'p6b-不存在的文件-用于断言存在性校验.md');
+        // 光标夹具：300 行，保证一定可滚动（滚动位置的断言需要真实可滚高度）
+        const P6_LINES = Array.from({ length: 300 }, (_, i) => 'p6 行 ' + (i + 1) + ' 内容内容内容');
+        const P6_REOPEN_LINE = 120;                       // 关闭前把光标放在第 120 行
+        const P6_REOPEN_HEAD = P6_LINES.slice(0, P6_REOPEN_LINE - 1).join('\n').length + 1; // 该行行首 offset
+        const P6_RO_ORIG = 'p6 只读夹具第一行\np6 第二行\np6 第三行';
+        // ⚠️ 编辑标记必须**只出现在编辑后的文本里**：首版把标记写进了原始内容，于是
+        // "磁盘未被写"的判据（indexOf(标记)）恒真 —— 用例自证不足（真窗口探针抓到的）。
+        const P6_RO_EDIT_MARK = 'MH-REOPEN-EDIT-ONLY-MARK';
+        const P6_RO_EDITED = 'p6 ' + P6_RO_EDIT_MARK + ' 用户新增的一行\n' + P6_RO_ORIG;
+        // G1 夹具：alpha 的大小写/整词/正则口径都能区分开
+        const P6_FIND_BODY = 'Alpha\nalpha\nALPHA\nalphax\n';
+        fs.writeFileSync(P6_REOPEN, P6_LINES.join('\n') + '\n', 'utf8');
+        fs.writeFileSync(P6_RO, P6_RO_ORIG, 'utf8');
+        fs.writeFileSync(P6_PANE_A, 'p6 pane A\nalpha\nAlpha\nALPHA\nalphax\n', 'utf8');
+        fs.writeFileSync(P6_PANE_B, 'p6 pane B\nalpha\n', 'utf8');
+        fs.writeFileSync(P6_FIND, P6_FIND_BODY, 'utf8');
+        fs.writeFileSync(P6_FIND2, 'p6 p1 alpha\n', 'utf8'); // 只 1 处 alpha（焦点栏判据用）
+        fs.writeFileSync(P6_LIMIT, Array.from({ length: 20000 }, (_, i) => 'needle 行 ' + (i + 1)).join('\n') + '\n', 'utf8');
+        for (const f of P6_STACK) fs.writeFileSync(f, '# ' + path.basename(f) + '\n', 'utf8');
+        fs.mkdirSync(P6_CTX_DIR, { recursive: true });
+        fs.writeFileSync(P6_CTX_FILE, '# p6 ctx\n', 'utf8');
+        // 大文件夹具：**必须 > 16MB（UTF-8 字节，overlay-ipc.js 的 minOpenBytes）** ——
+        // `hugeview.js:357` 调 `huge:doc-open` **不带 force**，低于 16MB 会抛 TOO_SMALL ⇒ editable 恒 false
+        // ⇒「编辑 → 关闭保存 → 重开」三连断言全部恒假（首版这里只生成 ≈6.7MB，已被复核抓出）。
+        // 单块实测 **53,890 字节** → 400 块 = **21,556,000 字节 ≈ 20.56 MiB**（> 16,777,216）。
+        // 下面用 fs.statSync 复核并把真实字节数写进断言/证据，防再次算错（`huge-fixture-big-enough`）。
+        {
+          const block = Array.from({ length: 1000 }, (_, i) => 'p6 huge line ' + i + ' 内容内容内容内容内容内容').join('\n') + '\n';
+          const parts = [];
+          for (let i = 0; i < 400; i++) parts.push(block); // = 21,556,000 B
+          fs.writeFileSync(P6_HUGE, parts.join(''), 'utf8');
+        }
+        // 小大文件夹具（G1 的「huge 视图内 Ctrl+F」用）：只需 > 用例内临时降到的分档阈值 1MB。
+        // 单块实测 **36,890 字节** → 60 块 = **2,213,400 字节 ≈ 2.11 MiB**（> 1,048,576；首版 14 块只有
+        // 516,460 B = 0.49MB ⇒ 该文件永远不会分档成 huge，两条守卫断言恒假）。
+        // **不**需要满足 overlay 的 16MB 下限（这条路径只读视口，不进编辑态）。
+        {
+          const block = Array.from({ length: 1000 }, (_, i) => 'p6 small line ' + i + ' 内容内容内容').join('\n') + '\n';
+          const parts = [];
+          for (let i = 0; i < 60; i++) parts.push(block); // = 2,213,400 B
+          fs.writeFileSync(P6_SMALLHUGE, parts.join(''), 'utf8');
+        }
+        const P6_HUGE_BYTES = fs.statSync(P6_HUGE).size;
+        const P6_SMALL_BYTES = fs.statSync(P6_SMALLHUGE).size;
+        const P6_OVERLAY_MIN_OPEN = 16 * 1024 * 1024; // overlay-ipc.js DEFAULT_OPTIONS.minOpenBytes
+
+        const p6Eval = (code) => win.webContents.executeJavaScript(code);
+        const p6Effect = (expr) => win.webContents.executeJavaScript(`(async () => { await (${expr}); })()`);
+        const p6Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const p6J = (v) => JSON.stringify(v === undefined ? null : v);
+        const p6Case = async (name, fn) => {
+          let r;
+          try {
+            r = await fn();
+          } catch (err) {
+            r = { ok: false, detail: 'ERR: ' + (err && err.stack ? err.stack.split('\n').slice(0, 3).join(' // ') : String(err)), evidence: '' };
+          }
+          results.push([name, r && r.ok === true ? true : ((r && r.detail) || 'false'), (r && r.evidence) || '']);
+        };
+        const p6Fail = (conj, evidence) => ({
+          ok: Object.keys(conj).every((k) => conj[k] === true),
+          detail: Object.keys(conj).map((k) => k + '=' + conj[k]).join(','),
+          evidence: evidence || '',
+        });
+        const p6Wait = async (code, pred, ms = 10000, step = 200) => {
+          const t0 = Date.now();
+          let v = null;
+          for (;;) {
+            v = await p6Eval(code).catch(() => null);
+            if (v !== null && pred(v)) return v;
+            if (Date.now() - t0 > ms) return v;
+            await p6Sleep(step);
+          }
+        };
+        const p6Key = (k, extra) => `(() => {
+          document.dispatchEvent(new KeyboardEvent('keydown', Object.assign({ key: ${p6J(k)}, code: ${p6J(k)}, bubbles: true, cancelable: true }, ${p6J(extra || {})})));
+          return true;
+        })()`;
+        /** 单栏收尾：合栏 + 关标签 + 关浮层 + 清空重开栈 + 重申工作目录 */
+        const p6Reset = async () => {
+          await p6Effect(`window.__app.openDirFromPath(${p6J(TEST_ROOT)})`).catch(() => {});
+          await p6Sleep(120);
+          await p6Eval(`(() => {
+            const e = window.__app.editor;
+            if (window.__app.quickOpen) window.__app.quickOpen.close();
+            document.querySelectorAll('.tabs-menu').forEach((m) => m.classList.add('hidden'));
+            const hm = document.getElementById('ctx-menu'); if (hm) hm.classList.add('hidden');
+            e.hideTabsHud();
+            if (e.getPaneCount() > 1) e.mergePanes();
+            e.closeAll();
+            e.clearClosedStack();
+            try { window.__app.find.setQuery(''); window.__app.find.setOptions({ caseSensitive: false, wholeWord: false, regex: false }); } catch (err) {}
+            return e.getPaneCount();
+          })()`).catch(() => -1);
+          await p6Sleep(200);
+        };
+        const P6_FIND_STATE = `JSON.stringify(window.__app.find.getState())`;
+        const p6ToastText = `Array.from(document.querySelectorAll('.toast')).map((n) => n.textContent).join(' | ')`;
+
+        try {
+          // ==================== 1. reopenClosedTab：Ctrl+Shift+T 重开关闭的标签 ====================
+          await p6Case('reopenClosedTab', async () => {
+            await p6Reset();
+            // ① 开普通标签 → 移动光标到第 120 行 + 滚动 → 关（真 Ctrl+W）→ 栈里必须有完整快照
+            await p6Effect(`window.__app.editor.openFile(${p6J(P6_REOPEN)})`);
+            await p6Sleep(500);
+            const before = await p6Eval(`(() => {
+              const e = window.__app.editor;
+              const t = e.getActiveTab();
+              const v = e.getView();
+              v.dispatch({ selection: { anchor: ${P6_REOPEN_HEAD} } });
+              t.state = v.state;
+              v.scrollDOM.scrollTop = 480;
+              t.scrollTop = 480;
+              return { path: t.path, head: v.state.selection.main.head, scrollTop: Math.round(v.scrollDOM.scrollTop), kind: t.kind || null };
+            })()`);
+            await p6Eval(p6Key('w', { ctrlKey: true })); // 真 Ctrl+W → app.js close-tab → editor.closeTab
+            await p6Sleep(400);
+            const stack = await p6Eval(`(() => { const s = window.__app.editor.closedTabs(); return { n: s.length, top: s[0] || null }; })()`);
+            // ② 真 Ctrl+Shift+T → 重开（回到原栏 = 唯一那栏）
+            await p6Eval(p6Key('T', { ctrlKey: true, shiftKey: true }));
+            const reopened = await p6Wait(`(() => { const e = window.__app.editor; const t = e.getActiveTab(); if (!t) return null; const v = e.getView();
+              return { path: t.path, kind: t.kind || null, head: v.state.selection.main.head, tabScrollTop: t.scrollTop, domScrollTop: Math.round(v.scrollDOM.scrollTop), info: t.reopenInfo || null, stackN: e.closedStackSize() }; })()`,
+            (v) => v && v.path === P6_REOPEN && !!v.info, 6000, 200);
+            await p6Sleep(400); // 等 restoreTabScroll 的多帧校正（6 帧 ≈ 100ms）+ reopenClosedTab 收尾
+            const after = await p6Eval(`(() => { const e = window.__app.editor; const t = e.getActiveTab(); const v = e.getView();
+              return { path: t.path, kind: t.kind || null, head: v.state.selection.main.head, tabScrollTop: t.scrollTop, domScrollTop: Math.round(v.scrollDOM.scrollTop) }; })()`);
+
+            // ③ 未保存内容：只读属性 → 关闭时的保存**必然失败** → 文本快照必须被写回
+            fs.chmodSync(P6_RO, 0o444);
+            let roState = null;
+            try {
+              await p6Effect(`window.__app.editor.openFile(${p6J(P6_RO)})`);
+              await p6Sleep(400);
+              const edited = await p6Eval(`(() => {
+                const e = window.__app.editor;
+                const t = e.getActiveTab();
+                const v = e.getView();
+                v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: ${p6J(P6_RO_EDITED)} } });
+                t.state = v.state;
+                return { dirty: t.dirty === true, len: v.state.doc.length };
+              })()`);
+              await p6Sleep(200);
+              await p6Eval(p6Key('w', { ctrlKey: true }));
+              await p6Sleep(900); // 等关闭时那次 saveNow 落定（失败也要落定，否则 savedOnClose 还是 null）
+              const roStack = await p6Eval(`(() => { const s = window.__app.editor.closedTabs(); const e = s[0] || null;
+                return { n: s.length, top: e, diskHasMark: null }; })()`);
+              // 真·外部事实：磁盘上**没有**编辑后的标记（= 关闭时那次保存确实失败了，未保存内容靠快照回写）
+              const disk = fs.readFileSync(P6_RO, 'utf8');
+              await p6Eval(p6Key('T', { ctrlKey: true, shiftKey: true }));
+              await p6Wait(`(() => { const e = window.__app.editor; const t = e.getActiveTab(); if (!t) return null;
+                const v = e.getView(); return { path: t.path, doc: v.state.doc.toString(), dirty: t.dirty === true, info: t.reopenInfo || null }; })()`,
+              (v) => v && v.path === P6_RO && !!v.info, 6000, 200);
+              await p6Sleep(400); // 等内容回写 / 光标恢复 / reopenInfo 收尾
+              const roBack = await p6Eval(`(() => { const e = window.__app.editor; const t = e.getActiveTab(); if (!t) return null;
+                const v = e.getView(); return { path: t.path, doc: v.state.doc.toString(), dirty: t.dirty === true, info: t.reopenInfo || null }; })()`);
+              roState = {
+                edited: edited, stack: roStack, back: roBack,
+                diskEqualsOrig: disk === P6_RO_ORIG,          // 磁盘原封不动（真·主进程事实）
+                diskHasEditMark: disk.indexOf(P6_RO_EDIT_MARK) >= 0,
+              };
+            } finally {
+              try { fs.chmodSync(P6_RO, 0o666); } catch { /* 忽略 */ }
+            }
+            await p6Reset();
+
+            // ④ 落栏语义（多视图一致性）。⭐ 两条前置事实（真窗口探针抓到的用例缺陷）：
+            //    ① closeTab 末尾的"撤空栏"循环会清掉**空的**栏：只要有一栏是空的，关任意标签就会
+            //       触发 `removeEmptyPane` → `mergePanes`（恒保留 p0）→ 栏结构被改写；
+            //    ② 因此"重开回原栏"这条**只有在 p0 与 p1 都非空**时才有意义。
+            //    本条布局：p0 = [P6_PANE_A]（锚点，不被关）；p1 = [P6_FIND（锚点）, P6_PANE_B（待关）]。
+            await p6Effect(`window.__app.editor.openFile(${p6J(P6_PANE_A)})`); // 先让 p0 非空
+            await p6Sleep(300);
+            await p6Effect(`window.__app.editor.toggleSplit()`);                // 焦点栏 = p1
+            await p6Sleep(300);
+            await p6Effect(`window.__app.editor.openFile(${p6J(P6_FIND)})`);    // p1 锚点（关闭后 p1 不被撤）
+            await p6Sleep(300);
+            await p6Effect(`window.__app.editor.openFile(${p6J(P6_PANE_B)})`);  // p1：待关闭的那一条
+            await p6Sleep(400);
+            const paneBefore = await p6Eval(`(() => { const e = window.__app.editor; const t = e.getActiveTab(); const els1 = e.getPaneEls(1); const els0 = e.getPaneEls(0);
+              return { path: t.path, pane: e.paneIdOf(t), focus: e.getFocusPaneId(), count: e.getPaneCount(),
+                p0tabs: els0 ? els0.tabsEl.querySelectorAll('.tab').length : -1,
+                p1tabs: els1 ? els1.tabsEl.querySelectorAll('.tab').length : -1 }; })()`);
+            await p6Eval(p6Key('w', { ctrlKey: true }));
+            await p6Sleep(500);
+            const paneSurvived = await p6Eval(`(() => { const e = window.__app.editor; const els1 = e.getPaneEls(1); const els0 = e.getPaneEls(0);
+              return { count: e.getPaneCount(), focus: e.getFocusPaneId(), hasB: !!e.findTabByPath(${p6J(P6_PANE_B)}),
+                p0tabs: els0 ? els0.tabsEl.querySelectorAll('.tab').length : -1,
+                p1tabs: els1 ? els1.tabsEl.querySelectorAll('.tab').length : -1 }; })()`);
+            await p6Effect(`window.__app.editor.focusPaneIndex(0)`); // 焦点切到 p0：重开若"跟焦点栏"就会落错栏
+            await p6Sleep(250);
+            await p6Eval(p6Key('T', { ctrlKey: true, shiftKey: true }));
+            const paneBack = await p6Wait(`(() => { const e = window.__app.editor; const t = e.findTabByPath(${p6J(P6_PANE_B)}); if (!t) return null;
+              const els0 = e.getPaneEls(0); const els1 = e.getPaneEls(1);
+              const cnt = (el) => el ? el.tabsEl.querySelectorAll('.tab[data-path=' + JSON.stringify(${p6J(P6_PANE_B)}) + ']').length : -1;
+              return { pane: e.paneIdOf(t), focus: e.getFocusPaneId(), inP0: cnt(els0), inP1: cnt(els1) }; })()`,
+            (v) => v && v.pane === 'p1', 8000, 200);
+
+            // ④b 文档化语义②：**原栏已不存在 → 落焦点栏**。把 p1 的两个标签都关掉 → p1 撤栏（保留 p0）
+            await p6Effect(`(() => { const e = window.__app.editor; for (const p of [${p6J(P6_PANE_B)}, ${p6J(P6_FIND)}]) { const t = e.findTabByPath(p); if (t) e.closeTab(t, { all: true }); } })()`);
+            await p6Sleep(800);
+            await p6Effect(`window.__app.editor.focusPaneIndex(0)`);
+            await p6Sleep(250);
+            const fallbackBefore = await p6Eval(`(() => { const e = window.__app.editor; return { count: e.getPaneCount(), focus: e.getFocusPaneId(), stack: e.closedTabs()[0] ? e.closedTabs()[0].path : null }; })()`);
+            await p6Eval(p6Key('T', { ctrlKey: true, shiftKey: true })); // 栈顶 = 最后关的 P6_FIND
+            const fallbackBack = await p6Wait(`(() => { const e = window.__app.editor; const t = e.getActiveTab(); if (!t || !t.path) return null;
+              return { path: t.path, pane: e.paneIdOf(t), focus: e.getFocusPaneId(), count: e.getPaneCount() }; })()`,
+            (v) => v && v.path === P6_FIND, 8000, 200);
+            await p6Reset();
+
+            // ⑤ 栈上限 20：连关 25 个 → 只留最近 20（最旧的 5 个必须已被挤出）
+            await p6Effect(`(async () => { const e = window.__app.editor; for (const p of ${p6J(P6_STACK)}) { await e.openFile(p); } })()`);
+            await p6Sleep(900);
+            await p6Effect(`(() => { const e = window.__app.editor; for (const p of ${p6J(P6_STACK)}) { const t = e.findTabByPath(p); if (t) e.closeTab(t, { all: true }); } })()`);
+            await p6Sleep(600);
+            const cap = await p6Eval(`(() => { const e = window.__app.editor; const s = e.closedTabs();
+              return { n: s.length, newest: s[0] ? s[0].path : null, oldest: s[s.length - 1] ? s[s.length - 1].path : null,
+                hasFirst: s.some((x) => x.path === ${p6J(P6_STACK[0])}), hasLast: s.some((x) => x.path === ${p6J(P6_STACK[24])}) }; })()`);
+            // 重开（栈顶 = 最后关闭的那个）
+            await p6Eval(p6Key('T', { ctrlKey: true, shiftKey: true }));
+            const capBack = await p6Wait(`(() => { const t = window.__app.editor.getActiveTab(); return t ? { path: t.path } : null; })()`,
+              (v) => v && v.path === P6_STACK[24], 6000, 200);
+            await p6Reset();
+
+            // ⑥ huge：真·overlay 脏内容关闭后重开 —— 内容必须在（**主进程 fs 真读**），且降级路径必须显式
+            let huge = null;
+            try {
+              await p6Eval(`window.__app.editor.setHugeThresholdMB(1)`);
+              await p6Effect(`window.__app.editor.openFile(${p6J(P6_HUGE)})`);
+              const hOpen = await p6Wait(`(() => { const e = window.__app.editor; const t = e.getActiveTab(); if (!t || t.kind !== 'huge' || !t.huge) return null;
+                return { path: t.path, kind: t.kind, sizeOk: null }; })()`, (v) => !!v, 30000, 250);
+              // 等行索引就绪（40 万行）→ 把视口滚到第 15000 行：这条用于验证**滚动位置也被恢复**
+              // （A2 第 6 条：huge 的滚动位置是"视口首行"，不是像素 scrollTop）
+              const hReady = await p6Wait(`(() => { const t = window.__app.editor.getActiveTab(); if (!t || !t.huge) return null;
+                const st = t.huge.getState(); return { indexed: st.indexed, lines: st.lines, renderedFrom: st.rendered ? st.rendered.from : null }; })()`,
+              (v) => v && v.indexed === true && v.lines > 20000, 60000, 250);
+              const hScroll = await p6Eval(`(async () => { const t = window.__app.editor.getActiveTab();
+                const n = await t.huge.gotoLine(15000);
+                await new Promise((r) => setTimeout(r, 400));
+                const st = t.huge.getState();
+                return { want: 15000, clamped: n, lines: st.lines, renderedFrom: st.rendered ? st.rendered.from : null }; })()`);
+              await p6Sleep(400);
+              const hEd = await p6Eval(`(async () => { const e = window.__app.editor; const t = e.getActiveTab();
+                if (!t || !t.huge) return { err: 'no huge view' };
+                const ok = await t.huge.setEditable(true);
+                const st = t.huge.getState();
+                return { ok: ok === true, editable: st.editable, docEditable: st.docEditable, reason: st.editableReason || null, lines: st.lines }; })()`);
+              const hEdit = await p6Eval(`(async () => { const e = window.__app.editor; const t = e.getActiveTab();
+                const r = await t.huge.applyEditForTest({ type: 'insert', line: 1, col: 0, text: 'MH-REOPEN-HUGE-MARK ' });
+                const st = t.huge.getState();
+                return { ok: !!r, dirty: st.dirty, dirtyCount: st.dirtyCount, tabDirty: t.dirty === true }; })()`);
+              await p6Sleep(200);
+              // 关闭前先记下磁盘快照（用于断言"关闭这条路径**没有**写源文件"）
+              const hugeSizeBefore = fs.statSync(P6_HUGE).size;
+              await p6Eval(p6Key('w', { ctrlKey: true })); // 关闭：huge 分支会先 saveNow（21.5MB 原子重写）
+              // 轮询等这次"保存"**落定**（savedOnClose 从 null 变成 true/false）——固定 sleep 会与写盘赛跑
+              const hStack = await p6Wait(`(() => { const s = window.__app.editor.closedTabs(); const e = s[0] || null;
+                return e ? { n: s.length, top: e } : null; })()`, (v) => v && v.top && v.top.savedOnClose !== null, 30000, 250);
+              await p6Sleep(600); // 再等会话释放（closeDoc 挂在保存 promise 之后）
+              // 真·主进程事实①：源文件没被写（字节数不变 + 前 512 字节里没有插入标记）。
+              // 这条断言同时是**回归守卫**：若将来有人把 closeTab 的 huge 路径改成"真的先保存再关"，
+              // 这里会立刻变红，并提示把下面几条降级断言改成"内容已随磁盘恢复"。详见 tabs.js 的 trackClosedSave 注释。
+              const hugeSizeAfter = fs.statSync(P6_HUGE).size;
+              let diskTop = '';
+              {
+                const fd = fs.openSync(P6_HUGE, 'r');
+                try {
+                  const buf = Buffer.alloc(512);
+                  const n = fs.readSync(fd, buf, 0, 512, 0);
+                  diskTop = buf.subarray(0, n).toString('utf8');
+                } finally { fs.closeSync(fd); }
+              }
+              // 真·主进程事实②：未保存的 overlay 分片**确实留在恢复区**（huge:doc-recover-list）——
+              // 这是"内容没丢、只是没能随标签恢复"的证据（不靠渲染端自述）。
+              const recov = await p6Eval(`window.api.hugeDocRecoverList({ limit: 100 })`).catch((e) => ({ err: String(e && e.message || e) }));
+              const recovMine = (recov && Array.isArray(recov.items) ? recov.items : []).filter((it) => String(it.file || '').toLowerCase().indexOf('p6b-huge-21mb.txt') >= 0);
+              await p6Eval(p6Key('T', { ctrlKey: true, shiftKey: true }));
+              await p6Wait(`(() => { const e = window.__app.editor; const t = e.getActiveTab(); if (!t) return null;
+                return { path: t.path, kind: t.kind || null, info: t.reopenInfo || null }; })()`,
+              (v) => v && v.path === P6_HUGE && !!v.info, 30000, 250);
+              // toast 在 reopenInfo 之后才创建 → 等一会儿再读，避免读到空串（首版就是在这里读空的）
+              await p6Sleep(700);
+              const hBack = await p6Eval(`(() => { const e = window.__app.editor; const t = e.getActiveTab(); if (!t) return null;
+                return { path: t.path, kind: t.kind || null, info: t.reopenInfo || null, toasts: ${p6ToastText} }; })()`);
+              const hBackScroll = await p6Eval(`(() => { const t = window.__app.editor.getActiveTab(); if (!t || !t.huge) return null;
+                const st = t.huge.getState(); return { renderedFrom: st.rendered ? st.rendered.from : null, lines: st.lines, info: t.reopenInfo || null }; })()`);
+              huge = {
+                sizeBytes: P6_HUGE_BYTES, minOpenBytes: P6_OVERLAY_MIN_OPEN, open: hOpen, ready: hReady, scroll: hScroll,
+                ed: hEd, edit: hEdit, stack: hStack,
+                savedBytesUnchanged: hugeSizeBefore === hugeSizeAfter, sizeBefore: hugeSizeBefore, sizeAfter: hugeSizeAfter,
+                diskTopHasMark: diskTop.indexOf('MH-REOPEN-HUGE-MARK') >= 0,
+                recoverItems: recovMine, recoverErr: recov && recov.err ? recov.err : null,
+                back: hBack, backScroll: hBackScroll,
+              };
+            } finally {
+              await p6Eval(`window.__app.editor.setHugeThresholdMB(null)`).catch(() => {});
+              await p6Reset();
+            }
+
+            const conj = {
+              'cursor-scroll-recorded': !!(before && before.head === P6_REOPEN_HEAD && before.scrollTop > 0),
+              'close-pushed-snapshot': !!(stack && stack.n === 1 && stack.top && stack.top.path === P6_REOPEN && stack.top.cursor && stack.top.cursor.head === P6_REOPEN_HEAD && stack.top.scrollTop > 0),
+              'ctrl-shift-t-reopens': !!(after && after.path === P6_REOPEN && after.kind === null),
+              'cursor-restored': !!(after && after.head === P6_REOPEN_HEAD),
+              'scroll-restored': !!(after && after.tabScrollTop === 480 && after.domScrollTop > 0),
+              'unsaved-dirty-snapshot': !!(roState && roState.edited && roState.edited.dirty === true && roState.stack && roState.stack.top && roState.stack.top.dirtyAtClose === true && roState.stack.top.hasText === true),
+              'unsaved-save-failed': !!(roState && roState.stack && roState.stack.top && roState.stack.top.savedOnClose === false && roState.diskEqualsOrig === true && roState.diskHasEditMark === false),
+              'unsaved-content-restored': !!(roState && roState.back && roState.back.doc === P6_RO_EDITED && roState.back.dirty === true && roState.back.info && roState.back.info.contentRestored === true),
+              'pane-of-close-recorded': !!(paneBefore && paneBefore.pane === 'p1' && paneBefore.focus === 'p1' && paneBefore.count === 2 && paneBefore.p0tabs === 1 && paneBefore.p1tabs === 2),
+              'pane-survives-close': !!(paneSurvived && paneSurvived.count === 2 && paneSurvived.hasB === false && paneSurvived.p0tabs === 1 && paneSurvived.p1tabs === 1),
+              'reopen-lands-in-original-pane': !!(paneBack && paneBack.pane === 'p1' && paneBack.inP1 === 1 && paneBack.inP0 === 0),
+              'pane-gone-falls-back-to-focus-pane': !!(fallbackBefore && fallbackBefore.count === 1 && fallbackBefore.stack === P6_FIND && fallbackBack && fallbackBack.pane === 'p0' && fallbackBack.count === 1 && fallbackBack.focus === 'p0'),
+              'stack-cap-20': !!(cap && cap.n === 20 && cap.hasFirst === false && cap.hasLast === true && cap.newest === P6_STACK[24]),
+              'stack-top-reopens': !!(capBack && capBack.path === P6_STACK[24]),
+              'huge-fixture-big-enough': !!(P6_HUGE_BYTES > P6_OVERLAY_MIN_OPEN && P6_SMALL_BYTES > 1024 * 1024),
+              'huge-opened-as-huge': !!(huge && huge.open && huge.open.kind === 'huge'),
+              'huge-editable-and-dirty': !!(huge && huge.ed && huge.ed.editable === true && huge.edit && huge.edit.dirty === true && huge.edit.tabDirty === true),
+              // 关闭这条路径**不写源文件**（0.4.0 既定语义；见 tabs.js 的 trackClosedSave 实测说明）
+              'huge-close-does-not-write-disk': !!(huge && huge.stack && huge.stack.top && huge.stack.top.dirtyAtClose === true && huge.stack.top.savedOnClose === false && huge.savedBytesUnchanged === true && huge.diskTopHasMark === false),
+              // 内容没丢：未保存的 overlay 分片在恢复区（主进程事实，不靠渲染端自述）
+              'huge-unsaved-kept-in-recovery': !!(huge && !huge.recoverErr && Array.isArray(huge.recoverItems) && huge.recoverItems.length >= 1 && huge.recoverItems.some((it) => it.dirtyBlocks >= 1)),
+              // A2 第 6 条：滚动位置（视口首行）也必须被采集并真的恢复 —— 采集了却丢掉就是静默降级
+              'huge-scroll-recorded': !!(huge && huge.scroll && huge.scroll.renderedFrom > 1000 && huge.stack && huge.stack.top && huge.stack.top.hugeTopLine > 1000),
+              'huge-scroll-restored': !!(huge && huge.backScroll && huge.backScroll.info && huge.backScroll.info.hugeScrollRestored === true && huge.backScroll.renderedFrom > 1000),
+              // 重开同类标签 + **显式降级**（内容未随标签恢复，说清原因与去处）
+              'huge-reopen-same-kind': !!(huge && huge.back && huge.back.kind === 'huge' && huge.back.info && huge.back.info.savedOnClose === false && huge.back.info.degraded === true && huge.back.info.reason === 'HUGE_OVERLAY_NOT_REATTACHED'),
+              'huge-degrade-explicit': !!(huge && huge.back && /恢复区/.test(huge.back.toasts || '')),
+            };
+            return p6Fail(conj, 'before=' + p6J(before) + ' stack=' + p6J(stack) + ' after=' + p6J(after) +
+              ' roStack=' + p6J(roState && roState.stack && roState.stack.top) + ' roBack=' + p6J(roState && roState.back && { path: roState.back.path, dirty: roState.back.dirty, info: roState.back.info, docHead: String(roState.back.doc || '').slice(0, 60) }) + ' diskEqualsOrig=' + p6J(roState && roState.diskEqualsOrig) + ' diskHasEditMark=' + p6J(roState && roState.diskHasEditMark) +
+              ' paneBefore=' + p6J(paneBefore) + ' paneSurvived=' + p6J(paneSurvived) + ' paneBack=' + p6J(paneBack) +
+              ' fallback=' + p6J(fallbackBefore) + '→' + p6J(fallbackBack) + ' cap=' + p6J(cap) + ' capBack=' + p6J(capBack) +
+              ' fixtureBytes=' + p6J({ huge: P6_HUGE_BYTES, small: P6_SMALL_BYTES }) +
+              ' huge=' + p6J(huge && { open: huge.open, ready: huge.ready, scroll: huge.scroll, ed: huge.ed, edit: huge.edit, stackTop: huge.stack && huge.stack.top, sizes: [huge.sizeBefore, huge.sizeAfter], diskTopHasMark: huge.diskTopHasMark, recovery: huge.recoverItems, recoverErr: huge.recoverErr, back: huge.back, backScroll: huge.backScroll }));
+          });
+
+          // ==================== 2. ctxMenuCommonItems：树/标签右键常用项 + 安全面 ====================
+          await p6Case('ctxMenuCommonItems', async () => {
+            await p6Reset();
+            const LABELS = ['📁 在资源管理器中显示', '📋 复制路径', '📋 复制文件名', '⌨ 在终端打开（此目录）', '🚀 用默认程序打开'];
+            // ① 树（根目录行）右键：五个常用项 + 既有项仍在
+            await p6Sleep(400);
+            const treeMenu = await p6Eval(`(() => {
+              const rows = document.querySelectorAll('#file-tree .tree-node');
+              const row = rows[0] || null;
+              if (!row) return { err: 'no tree row', rows: rows.length };
+              const r = row.getBoundingClientRect();
+              row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: Math.round(r.left) + 10, clientY: Math.round(r.top) + 5 }));
+              const items = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).map((n) => n.textContent);
+              return { rows: rows.length, items: items, visible: !document.getElementById('ctx-menu').classList.contains('hidden') };
+            })()`);
+            // ② 点「复制路径」→ 剪贴板真的是该路径（主进程读回）
+            const copyPath = await p6Eval(`(async () => {
+              const el = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).find((n) => n.textContent === '📋 复制路径');
+              if (el) el.click();
+              await new Promise((r) => setTimeout(r, 300));
+              return { clicked: !!el, clip: await window.api.readClipboardText() };
+            })()`);
+            // ③ 标签右键（文件）：五个常用项 + 点「复制文件名」
+            await p6Effect(`window.__app.editor.openFile(${p6J(P6_CTX_FILE)})`);
+            await p6Sleep(400);
+            const tabMenu = await p6Eval(`(async () => {
+              const tab = document.querySelector('#tabs .tab[data-path=' + JSON.stringify(${p6J(P6_CTX_FILE)}) + ']');
+              if (!tab) return { err: 'no tab' };
+              const r = tab.getBoundingClientRect();
+              tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: Math.round(r.left) + 5, clientY: Math.round(r.top) + 5 }));
+              const items = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).map((n) => n.textContent);
+              const el = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).find((n) => n.textContent === '📋 复制文件名');
+              if (el) el.click();
+              await new Promise((r2) => setTimeout(r2, 300));
+              return { items: items, clicked: !!el, clip: await window.api.readClipboardText() };
+            })()`);
+            // ④ 安全面：终端 dryRun —— 路径只作 cwd、argv 恒空、shell:false（含 & ^ 元字符的目录也一样）
+            const term = await p6Eval(`window.api.openTerminal(${p6J(P6_CTX_DIR)}, { dryRun: true })`).catch((e) => ({ err: String(e && e.message || e) }));
+            // ⑤ 未批准路径：终端 / 默认程序 / 写剪贴板三条通道必须一律拒绝
+            const termNo = await p6Eval(`window.api.openTerminal(${p6J(P6_NOTAPPROVED)}, { dryRun: true })`).catch((e) => ({ err: String(e && e.message || e) }));
+            const openNo = await p6Eval(`window.api.openPath(${p6J(P6_NOTAPPROVED)})`).catch((e) => ({ err: String(e && e.message || e) }));
+            const clipNo = await p6Eval(`window.api.copyText({ path: ${p6J(P6_NOTAPPROVED)}, kind: 'path' })`).catch((e) => ({ err: String(e && e.message || e) }));
+            // ⑤b 通道收窄（低危瑕疵修正后的口径）：剪贴板正文由**主进程自拼**，渲染端传 text 也不生效
+            const clipForge = await p6Eval(`(async () => { const r = await window.api.copyText({ path: ${p6J(P6_CTX_FILE)}, kind: 'path', text: 'MH-FORGED-CLIPBOARD-TEXT' });
+              await new Promise((r2) => setTimeout(r2, 200));
+              return { res: r, clip: await window.api.readClipboardText() }; })()`).catch((e) => ({ err: String(e && e.message || e) }));
+            // ⑥ 已批准但不存在 → 存在性校验拦下（证明审批与存在性两道闸都在，且不会误开系统程序）
+            const openMissing = await p6Eval(`window.api.openPath(${p6J(P6_MISSING)})`).catch((e) => ({ err: String(e && e.message || e) }));
+            const termFile = await p6Eval(`window.api.openTerminal(${p6J(P6_CTX_FILE)}, { dryRun: true })`).catch((e) => ({ err: String(e && e.message || e) }));
+            await p6Reset();
+            const hasAll = (arr) => Array.isArray(arr) && LABELS.every((l) => arr.indexOf(l) >= 0);
+            const conj = {
+              'tree-menu-has-5-items': !!(treeMenu && treeMenu.visible === true && hasAll(treeMenu.items)),
+              'tree-menu-keeps-existing': !!(treeMenu && treeMenu.items.indexOf('🔄 刷新') >= 0 && treeMenu.items.indexOf('📁 新建文件') >= 0),
+              'copy-path-writes-clipboard': !!(copyPath && copyPath.clicked === true && copyPath.clip === TEST_ROOT),
+              'tab-menu-has-5-items': !!(tabMenu && hasAll(tabMenu.items)),
+              'tab-menu-keeps-existing': !!(tabMenu && tabMenu.items.indexOf('✕ 关闭标签') >= 0 && tabMenu.items.indexOf('📌 固定标签') >= 0),
+              'copy-name-writes-clipboard': !!(tabMenu && tabMenu.clicked === true && tabMenu.clip === path.basename(P6_CTX_FILE)),
+              'terminal-cwd-only-no-argv': !!(term && term.ok === true && term.cwd === P6_CTX_DIR && Array.isArray(term.argv) && term.argv.length === 0 && term.shell === false && term.mode === 'cwd'),
+              'terminal-file-uses-its-dir': !!(termFile && termFile.ok === true && termFile.cwd === P6_CTX_DIR && termFile.argv.length === 0),
+              'terminal-unapproved-rejected': !!(termNo && termNo.ok === false && termNo.reason === 'NOT_APPROVED'),
+              'openpath-unapproved-rejected': !!(openNo && openNo.ok === false && openNo.reason === 'NOT_APPROVED'),
+              'clipboard-unapproved-rejected': !!(clipNo && clipNo.ok === false && clipNo.reason === 'NOT_APPROVED'),
+              'clipboard-text-built-by-main': !!(clipForge && clipForge.res && clipForge.res.ok === true && clipForge.res.kind === 'path'
+                && clipForge.res.text === P6_CTX_FILE && clipForge.clip === P6_CTX_FILE && clipForge.clip.indexOf('MH-FORGED') < 0),
+              'openpath-missing-rejected': !!(openMissing && openMissing.ok === false && openMissing.reason === 'ENOENT'),
+            };
+            return p6Fail(conj, 'tree=' + p6J(treeMenu && { rows: treeMenu.rows, items: treeMenu.items }) + ' copyPath=' + p6J(copyPath) +
+              ' tabMenu=' + p6J(tabMenu) + ' term=' + p6J(term) + ' termFile=' + p6J(termFile) + ' termNo=' + p6J(termNo) +
+              ' openNo=' + p6J(openNo) + ' clipNo=' + p6J(clipNo) + ' clipForge=' + p6J(clipForge) + ' openMissing=' + p6J(openMissing) + ' expectRoot=' + p6J(TEST_ROOT));
+          });
+
+          // ==================== 3. findCaseWordRegex：三开关 + huge 守卫 + ReDoS 防护 ====================
+          await p6Case('findCaseWordRegex', async () => {
+            await p6Reset();
+            await p6Effect(`window.__app.editor.openFile(${p6J(P6_FIND)})`);
+            await p6Sleep(400);
+            const S = `window.__app.find`;
+            // ① 默认（不区分大小写）：Alpha/alpha/ALPHA/alphax = 4 处
+            const def = await p6Eval(`(() => { ${S}.setOptions({ caseSensitive: false, wholeWord: false, regex: false }); ${S}.setQuery('alpha'); const s = ${S}.getState();
+              return { shown: s.shown, opts: s.options, count: s.countText, rows: s.rows }; })()`);
+            // ② Aa（区分大小写）：只剩 alpha / alphax 两处
+            const cs = await p6Eval(`(() => { ${S}.setOptions({ caseSensitive: true }); const s = ${S}.getState(); return { shown: s.shown, opts: s.options, count: s.countText }; })()`);
+            // ③ 整词（不区分大小写）：Alpha/alpha/ALPHA 三处（alphax 不算）
+            const ww = await p6Eval(`(() => { ${S}.setOptions({ caseSensitive: false, wholeWord: true }); const s = ${S}.getState(); return { shown: s.shown, opts: s.options }; })()`);
+            // ④ 正则 '^a.*a$'（i）：Alpha/alpha/ALPHA 三处；叠加 Aa 后只剩 alpha 一处
+            const re1 = await p6Eval(`(() => { ${S}.setOptions({ caseSensitive: false, wholeWord: false, regex: true }); ${S}.setQuery('^a.*a$'); const s = ${S}.getState();
+              return { shown: s.shown, error: s.patternError, lines: s.matchLines }; })()`);
+            const re2 = await p6Eval(`(() => { ${S}.setOptions({ caseSensitive: true }); const s = ${S}.getState(); return { shown: s.shown, error: s.patternError }; })()`);
+            // ⑤ 非法正则：显式报错（不静默 0 命中）
+            const bad = await p6Eval(`(() => { ${S}.setOptions({ caseSensitive: false }); ${S}.setQuery('('); const s = ${S}.getState();
+              return { err: s.patternError, count: s.countText, text: s.resultsText }; })()`);
+            // ⑥ 模式过长（>200）：拒绝
+            const tooLong = await p6Eval(`(() => { ${S}.setQuery('a'.repeat(250)); const s = ${S}.getState(); return { err: s.patternError, count: s.countText, max: s.limits.maxPattern }; })()`);
+            // ⑦ 嵌套量词（(a+)+）：静态拒绝
+            const nested = await p6Eval(`(() => { ${S}.setQuery('(a+)+b'); const s = ${S}.getState(); return { err: s.patternError, count: s.countText }; })()`);
+            // ⑧ 执行预算：**必须在大文档上测**（首版在 5 行夹具上把预算压到 1ms，实测单次扫描 0.38µs，
+            //    永远进不到预算分支 → 恒定假）。这里改用 20000 行的 P6_LIMIT：临时把预算压到 1ms，
+            //    扫描 2 万行必然超过 1ms（数量级差 ~10⁴），中止分支**非时序赌**而是确定性可达。
+            await p6Effect(`window.__app.editor.openFile(${p6J(P6_LIMIT)})`);
+            await p6Sleep(700);
+            const budget = await p6Eval(`(() => { ${S}.setOptions({ caseSensitive: false, wholeWord: false, regex: true }); ${S}.setLimitsForTest({ budgetMs: 1 });
+              ${S}.setQuery('zzz-无此匹配'); const s = ${S}.getState();
+              const r = { timedOut: s.timedOut, truncated: s.truncated, shown: s.shown, count: s.countText, more: s.moreText, budget: s.limits.budgetMs, docLines: window.__app.editor.getView().state.doc.lines };
+              ${S}.setLimitsForTest({ budgetMs: null }); return r; })()`);
+            // ⑨ 默认预算下**不误报**超时：同一条 2 万行文档上用**能命中每一行**的正则跑一次
+            //    （命中多到先撞 limit=500 截断，仍必须 timedOut=false；首版这里用了 '^.*a.*$'，
+            //     而该文档的行文本是 'needle 行 N' —— 一个 'a' 都没有，0 命中，断言恒假）
+            const noFalseBig = await p6Eval(`(() => { ${S}.setOptions({ regex: true }); ${S}.setQuery('^needle 行'); const s = ${S}.getState();
+              return { timedOut: s.timedOut, truncated: s.truncated, shown: s.shown, budget: s.limits.budgetMs, limit: s.limits.limit, docLines: window.__app.editor.getView().state.doc.lines }; })()`);
+            await p6Effect(`window.__app.editor.openFile(${p6J(P6_FIND)})`);
+            await p6Sleep(400);
+            const noFalse = await p6Eval(`(() => { ${S}.setOptions({ caseSensitive: false, wholeWord: false, regex: false }); ${S}.setQuery('alpha'); const s = ${S}.getState();
+              return { timedOut: s.timedOut, shown: s.shown, budget: s.limits.budgetMs, limit: s.limits.limit }; })()`);
+            // ⑩ huge 视图守卫：显式提示（不是静默 0 命中）—— Ctrl+F 一进面板就要看到
+            let hugeGuard = null;
+            try {
+              await p6Eval(`window.__app.editor.setHugeThresholdMB(1)`);
+              await p6Effect(`window.__app.editor.openFile(${p6J(P6_SMALLHUGE)})`);
+              const hOpen = await p6Wait(`(() => { const t = window.__app.editor.getActiveTab(); return t && t.kind ? { path: t.path, kind: t.kind } : null; })()`, (v) => !!v && v.kind === 'huge', 20000, 250);
+              const typed = await p6Eval(`(() => { ${S}.setQuery('p6'); const s = ${S}.getState();
+                return { kind: ${p6J('')} + (window.__app.editor.getActiveTab().kind || ''), unsupported: s.unsupported, count: s.countText, text: s.resultsText, shown: s.shown }; })()`);
+              // Ctrl+F 一进面板（未输入任何字）也必须已经给出提示
+              const onFocus = await p6Eval(`(() => { ${S}.setQuery(''); ${S}.focus(); const s = ${S}.getState();
+                return { unsupported: s.unsupported, count: s.countText, text: s.resultsText }; })()`);
+              hugeGuard = { open: hOpen, typed: typed, focus: onFocus };
+            } finally {
+              await p6Eval(`window.__app.editor.setHugeThresholdMB(null)`).catch(() => {});
+            }
+            await p6Reset();
+            // ⑪ 多视图一致性：查找跟随**焦点栏**。
+            //    布局：p1 = P6_FIND（4 处 alpha）、p0 = P6_FIND2（1 处 alpha）—— 断言必须与之一致
+            //    （首版把两个期望值写反、还把 p0.focus 与 p1.focus 比相等，两条恒假）。
+            await p6Effect(`window.__app.editor.toggleSplit()`);
+            await p6Sleep(300);
+            await p6Effect(`window.__app.editor.openFile(${p6J(P6_FIND)})`);  // 焦点栏 = p1（4 处 alpha）
+            await p6Sleep(300);
+            await p6Effect(`window.__app.editor.focusPaneIndex(0)`);
+            await p6Sleep(200);
+            await p6Effect(`window.__app.editor.openFile(${p6J(P6_FIND2)})`); // p0（1 处 alpha）
+            await p6Sleep(400);
+            const focusPane = await p6Eval(`(async () => {
+              const e = window.__app.editor;
+              e.focusPaneIndex(0);
+              await new Promise((r) => setTimeout(r, 200));
+              ${S}.setOptions({ caseSensitive: false, wholeWord: false, regex: false });
+              ${S}.setQuery('alpha');
+              const s0 = ${S}.getState();
+              const p0 = { focus: e.getFocusPaneId(), shown: s0.shown, file: e.getActiveTab().name, pane: e.paneIdOf(e.getActiveTab()) };
+              e.focusPaneIndex(1);
+              await new Promise((r) => setTimeout(r, 200));
+              ${S}.setQuery('alpha');
+              const s1 = ${S}.getState();
+              const p1 = { focus: e.getFocusPaneId(), shown: s1.shown, file: e.getActiveTab().name, pane: e.paneIdOf(e.getActiveTab()) };
+              return { p0: p0, p1: p1, findP1Name: ${p6J(path.basename(P6_FIND))}, findP0Name: ${p6J(path.basename(P6_FIND2))} };
+            })()`);
+            await p6Reset();
+            const conj = {
+              'default-case-insensitive-4': !!(def && def.shown === 4 && def.opts.caseSensitive === false),
+              'case-toggle-2': !!(cs && cs.shown === 2 && cs.opts.caseSensitive === true),
+              'whole-word-3': !!(ww && ww.shown === 3 && ww.opts.wholeWord === true),
+              'regex-3': !!(re1 && re1.shown === 3 && !re1.error),
+              'regex-plus-case-1': !!(re2 && re2.shown === 1),
+              'invalid-regex-explicit': !!(bad && /正则表达式无效/.test(bad.err || '') && /查找未执行/.test(bad.count || '') && /正则表达式无效/.test(bad.text || '')),
+              'pattern-too-long-rejected': !!(tooLong && tooLong.max === 200 && /正则模式过长/.test(tooLong.err || '') && /查找未执行/.test(tooLong.count || '')),
+              'nested-quantifier-rejected': !!(nested && /嵌套量词/.test(nested.err || '')),
+              'budget-timeout-explicit': !!(budget && budget.timedOut === true && budget.budget === 1 && budget.docLines >= 20000 && /执行预算/.test(budget.count || '') && /执行预算/.test(budget.more || '') && budget.shown === 0),
+              'budget-no-false-positive': !!(noFalse && noFalse.timedOut === false && noFalse.budget === 120 && noFalse.limit === 500 && noFalse.shown === 4
+                && noFalseBig && noFalseBig.timedOut === false && noFalseBig.truncated === true && noFalseBig.shown === 500 && noFalseBig.docLines >= 20000),
+              'huge-guard-explicit-on-type': !!(hugeGuard && hugeGuard.open && hugeGuard.open.kind === 'huge' && P6_SMALL_BYTES > 1024 * 1024 && hugeGuard.typed.unsupported === 'huge' && /当前视图不支持文件内查找/.test(hugeGuard.typed.count || '') && /当前视图不支持文件内查找/.test(hugeGuard.typed.text || '') && hugeGuard.typed.shown === 0),
+              'huge-guard-explicit-on-ctrl-f': !!(hugeGuard && hugeGuard.focus.unsupported === 'huge' && /当前视图不支持文件内查找/.test(hugeGuard.focus.count || '')),
+              // 布局：p1 = P6_FIND（4 处）、p0 = P6_FIND2（1 处）→ 期望值与栏一一对应
+              'find-follows-focus-pane': !!(focusPane && focusPane.p0.shown === 1 && focusPane.p1.shown === 4
+                && focusPane.p0.focus === 'p0' && focusPane.p1.focus === 'p1'
+                && focusPane.p0.pane === 'p0' && focusPane.p1.pane === 'p1'
+                && focusPane.p0.file === focusPane.findP0Name && focusPane.p1.file === focusPane.findP1Name),
+            };
+            return p6Fail(conj, 'def=' + p6J(def) + ' cs=' + p6J(cs) + ' ww=' + p6J(ww) + ' re1=' + p6J(re1) + ' re2=' + p6J(re2) +
+              ' bad=' + p6J(bad) + ' tooLong=' + p6J(tooLong) + ' nested=' + p6J(nested) + ' budget=' + p6J(budget) + ' noFalseBig=' + p6J(noFalseBig) + ' noFalse=' + p6J(noFalse) +
+              ' smallBytes=' + p6J(P6_SMALL_BYTES) + ' hugeGuard=' + p6J(hugeGuard) + ' focusPane=' + p6J(focusPane));
+          });
+
+          // ==================== 4. findMatchLimit：匹配上限 + 显式截断提示 + 输入防抖 ====================
+          await p6Case('findMatchLimit', async () => {
+            await p6Reset();
+            await p6Effect(`window.__app.editor.openFile(${p6J(P6_LIMIT)})`);   // 20000 行，每行一个 needle
+            await p6Sleep(900);
+            const S = `window.__app.find`;
+            // ① 上限截断：只展示前 500 处，且**计数行与结果区都要显式提示**
+            const lim = await p6Eval(`(() => {
+              ${S}.setOptions({ caseSensitive: false, wholeWord: false, regex: false });
+              const t0 = performance.now();
+              ${S}.setQuery('needle');
+              const ms = Math.round(performance.now() - t0);
+              const s = ${S}.getState();
+              const note = document.querySelector('#find-results .find-more');
+              return { shown: s.shown, rows: s.rows, truncated: s.truncated, limit: s.limits.limit, count: s.countText, more: s.moreText,
+                noteText: note ? note.textContent : null, noteIsNotResultRow: !!note && !note.classList.contains('find-result'), ms: ms };
+            })()`);
+            // ② 输入防抖：连发 6 次 input → 只跑一次搜索（searchRuns 只 +1）
+            const deb = await p6Eval(`(() => {
+              const i = document.getElementById('find-input');
+              const s0 = ${S}.getState();
+              for (let k = 0; k < 6; k++) { i.value = 'needle 行 ' + k; i.dispatchEvent(new Event('input')); }
+              const s1 = ${S}.getState();   // 同步读：防抖尚未到点
+              return { runs0: s0.searchRuns, runsSync: s1.searchRuns, pending: s1.pendingDebounce, value: i.value };
+            })()`);
+            // 有界轮询到防抖真正触发（替代固定 300ms 硬等待）：find.js 的输入防抖只有 80ms，
+            // 但窗口被遮挡时 Electron 默认的 backgroundThrottling 会把定时器节流到 ~1s 级 ——
+            // 固定 sleep 会得到"防抖未触发"的假红（2026-09-13 实证：debAfter.pending 仍为 true）。
+            // 上限 ~3000ms；超时也照常往下走，由下面的四元判定给出带 runs/pending/shown/truncated 的 detail。
+            for (let pollI = 0; pollI < 30; pollI++) {
+              const stNow = await p6Eval(`(() => { const s = ${S}.getState(); return { pending: s.pendingDebounce }; })()`);
+              if (!stNow || stNow.pending === false) break;
+              await p6Sleep(100);
+            }
+            const debAfter = await p6Eval(`(() => { const s = ${S}.getState(); const i = document.getElementById('find-input');
+              return { runs: s.searchRuns, pending: s.pendingDebounce, shown: s.shown, query: s.query, value: i.value, truncated: s.truncated }; })()`);
+            // ③ 程序化 setQuery 不受防抖影响（同步生效）
+            const immediate = await p6Eval(`(() => { const s0 = ${S}.getState(); ${S}.setQuery('needle'); const s1 = ${S}.getState();
+              return { before: s0.searchRuns, after: s1.searchRuns, shown: s1.shown }; })()`);
+            // ④ 上限只约束**展示**：「全部替换」必须换掉全部 20000 处（不能只换前 500）
+            const rep = await p6Eval(`(() => {
+              document.getElementById('replace-input').value = 'MH-X';
+              const n = ${S}.replaceAll();
+              const doc = window.__app.editor.getView().state.doc.toString();
+              return { n: n, leftNeedle: doc.indexOf('needle') >= 0, count: doc.split('MH-X').length - 1 };
+            })()`);
+            await p6Reset();
+            const conj = {
+              'limit-truncates-to-500': !!(lim && lim.shown === 500 && lim.limit === 500 && lim.truncated === true),
+              'limit-row-dom-capped': !!(lim && lim.rows === 500),
+              'limit-count-notice': !!(lim && /仅显示前 500 处/.test(lim.count || '')),
+              'limit-result-notice-row': !!(lim && /仅显示前 500 处/.test(lim.more || '') && /仅显示前 500 处/.test(lim.noteText || '') && lim.noteIsNotResultRow === true),
+              'limit-fast-under-1500ms': !!(lim && typeof lim.ms === 'number' && lim.ms < 1500),
+              'debounce-coalesces-input': !!(deb && deb.runsSync === deb.runs0 && deb.pending === true),
+              'debounce-runs-once-after': !!(debAfter && debAfter.runs === deb.runs0 + 1 && debAfter.pending === false && debAfter.shown === 500 && debAfter.truncated === true),
+              'setquery-not-debounced': !!(immediate && immediate.after === immediate.before + 1 && immediate.shown === 500),
+              'replace-all-not-limited-to-displayed': !!(rep && rep.n === 20000 && rep.leftNeedle === false && rep.count === 20000),
+            };
+            return p6Fail(conj, 'lim=' + p6J(lim) + ' deb=' + p6J(deb) + ' debAfter=' + p6J(debAfter) + ' immediate=' + p6J(immediate) + ' rep=' + p6J(rep));
+          });
+        } finally {
+          // 清场：关浮层/菜单/弹窗、合栏、关标签、清重开栈、恢复阈值与查找开关、删夹具
+          try { await p6Eval(`(async () => {
+            try { window.__app.quickOpen.close(); } catch (e) {}
+            try { window.__app.editor.hideTabsHud(); } catch (e) {}
+            try { const m = document.getElementById('ctx-menu'); if (m) m.classList.add('hidden'); } catch (e) {}
+            try { document.getElementById('modal-mask').classList.add('hidden'); } catch (e) {}
+            try { window.__app.editor.setHugeThresholdMB(null); } catch (e) {}
+            try { window.__app.find.setLimitsForTest({ budgetMs: null, limit: null }); } catch (e) {}
+            try { window.__app.find.setQuery(''); window.__app.find.setOptions({ caseSensitive: false, wholeWord: false, regex: false }); } catch (e) {}
+            try { const e2 = window.__app.editor; if (e2.getPaneCount() > 1) e2.mergePanes(); e2.closeAll(); e2.clearClosedStack(); } catch (e) {}
+            return true;
+          })()`); } catch { /* 忽略 */ }
+          try { await p6Sleep(400); } catch { /* 忽略 */ }
+          try { fs.chmodSync(P6_RO, 0o666); } catch { /* 忽略 */ }
+          for (const f of [P6_REOPEN, P6_RO, P6_PANE_A, P6_PANE_B, P6_FIND, P6_FIND2, P6_LIMIT, P6_HUGE, P6_SMALLHUGE].concat(P6_STACK)) {
+            try { fs.rmSync(f, { force: true }); } catch { /* 占用则忽略 */ }
+          }
+          try { fs.rmSync(P6_CTX_DIR, { recursive: true, force: true }); } catch { /* 占用则忽略 */ }
+        }
+      }
+
       console.log('E2E_RESULTS');
       for (const r of results) {
         console.log('  -', r.join(' | '));
@@ -3403,7 +7764,6 @@ async function runSmoke(win) {
     } catch (err) {
       console.error('E2E_ERROR', err && err.stack ? err.stack : String(err));
     } finally {
-      try { aiMockServer.close(); } catch { /* 未启动 */ }
       cleanTestRoot();
       setTimeout(() => {
         console.log('SMOKE_OK');

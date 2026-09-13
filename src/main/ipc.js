@@ -1,7 +1,8 @@
-const { app, ipcMain, dialog, BrowserWindow } = require('electron');
+const { app, ipcMain, dialog, BrowserWindow, shell, clipboard } = require('electron');
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
+const { spawn } = require('child_process');
 const { getSettings } = require('./settings');
 const { markSelfWrite } = require('./filewatch');
 const { isInside, setRoot, setRoots, getRoot, getRoots, approve, isApproved, requireApproved, realpath, dirHasApprovedFile, remapApproved, revokeUnder, samePath, isUnderDir } = require('./security');
@@ -39,6 +40,33 @@ function decodeText(buf, encoding = detectEncoding(buf)) {
   if (encoding === 'utf-8') return new TextDecoder('utf-8', { fatal: true }).decode(buf);
   if (encoding === 'gbk') return new TextDecoder('gbk').decode(buf);
   return buf.toString('latin1');
+}
+
+// P7（v0.4.0）：按 range 读取大文件的可复用实现 —— fs:read-file-range 与行索引批量取数（huge:lines）共用。
+// 统一在这里处理「单次读取长度限流 + 读满为止 + 成功读取即 approve（与 fs:read-file 一致）」，
+// 避免大文件取数出现第二套读盘口径（调用方只关心 Buffer，不跨进程拷贝）。
+const MAX_RANGE_BYTES = 64 * 1024 * 1024;
+async function readRangeBytes(filePath, start, length, maxBytes = MAX_RANGE_BYTES) {
+  const st = await fsp.stat(filePath);
+  if (!st.isFile()) throw new Error('目标不是文件');
+  const s = Math.max(0, Math.floor(Number(start) || 0));
+  const lim = Math.min(maxBytes, Math.max(0, Math.floor(Number(length) || 0)), Math.max(0, st.size - s));
+  const buf = Buffer.alloc(lim);
+  let read = 0;
+  let fh = null;
+  try {
+    fh = await fsp.open(filePath, 'r');
+    // 常规文件也可能部分读：读满为止，返回值按实际读取量（调用方以 end 作下一段起点，可自愈续读）
+    while (read < lim) {
+      const { bytesRead } = await fh.read(buf, read, lim - read, s + read);
+      if (!bytesRead) break;
+      read += bytesRead;
+    }
+  } finally {
+    if (fh) await fh.close().catch(() => {});
+  }
+  approve(filePath); // P7：记录已成功读取的路径（与 fs:read-file 一致 —— 外部大文件打开后保存/运行仍可用）
+  return { buf: buf.subarray(0, read), start: s, end: s + read, size: st.size, mtime: st.mtimeMs };
 }
 
 function registerFileIpc(_getWindow) {
@@ -151,39 +179,13 @@ function registerFileIpc(_getWindow) {
   // 返回原始字节（ArrayBuffer，结构化克隆）+ 文件元信息；编码检测与流式解码在渲染端完成
   // （TextDecoder stream:true 可正确处理分块边界截断的多字节字符，如 GBK/UTF-8 尾字节）。
   ipcMain.handle('fs:read-file-range', async (_e, filePath, start, length) => {
-    const st = await fsp.stat(filePath);
-    if (!st.isFile()) throw new Error('目标不是文件');
-    const maxMB = getSettings().maxFileSizeMB || 50;
-    const maxBytes = maxMB * 1024 * 1024;
-    if (st.size > maxBytes) {
-      const err = new Error(
-        `文件大小 ${(st.size / 1024 / 1024).toFixed(1)} MB 超过上限 ${maxMB} MB，已拒绝打开（可在设置中调整上限）`
-      );
-      err.code = 'TOO_LARGE';
-      err.size = st.size;
-      err.maxBytes = maxBytes;
-      throw err;
-    }
-    const s = Math.max(0, Math.floor(Number(start) || 0));
-    const len = Math.max(0, Math.min(Math.floor(Number(length) || 0), st.size - s));
-    const buf = Buffer.alloc(len);
-    let read = 0;
-    let fh = null;
-    try {
-      fh = await fsp.open(filePath, 'r');
-      // 常规文件也可能部分读：读满为止，返回值按实际读取量（渲染端以 end 作下一段起点，可自愈续读）
-      while (read < len) {
-        const { bytesRead } = await fh.read(buf, read, len - read, s + read);
-        if (!bytesRead) break;
-        read += bytesRead;
-      }
-    } finally {
-      if (fh) await fh.close().catch(() => {});
-    }
+    // v0.4.0：分段读**不再受"文件总大小上限"约束** —— GB 级查看器/行索引都是按 8MB 窗口 seek，
+    // 内存有界，"打开上限"只在渲染端 openFile 统一把关（见 tabs.js）。
+    // 限流（单次 64MB）与 approve 语义都在 readRangeBytes 内（行索引的 huge:lines 复用同一实现）。
+    const r = await readRangeBytes(filePath, start, length);
     // Buffer 底层 ArrayBuffer 视图（精确截取，避免把整个大缓冲传过去）
-    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + read);
-    approve(filePath); // P7：记录已成功读取的路径（与 fs:read-file 一致 —— 外部大文件打开后保存/运行仍可用）
-    return { bytes: ab, start: s, end: s + read, size: st.size, mtime: st.mtimeMs };
+    const ab = r.buf.buffer.slice(r.buf.byteOffset, r.buf.byteOffset + r.buf.length);
+    return { bytes: ab, start: r.start, end: r.end, size: r.size, mtime: r.mtime };
   });
 
   // 写二进制文件（粘贴图片用；必须先通过路径校验）
@@ -446,6 +448,105 @@ function registerFileIpc(_getWindow) {
       rs.on('error', reject);
     });
   });
+
+  // ==========================================================================
+  // 0.5.0 Phase 5a 第 2 批 F2：树/标签右键「常用项」的三条通道
+  // --------------------------------------------------------------------------
+  // 安全面（任务书硬要求，逐条落地）：
+  //   ① **三条通道全部先过 `security.requireApproved`**（路径白名单：任一侧栏根内，或曾成功读取过的
+  //      路径）—— 渲染进程无法借这些入口去碰白名单之外的任何路径；拒绝时返回 {ok:false,reason:'NOT_APPROVED'}
+  //      而不是抛异常（渲染端据此给明确 toast，不静默失败）；
+  //   ② **「在终端打开」= 本地命令执行**：必须由用户显式动作（右键菜单项点击）触发，且**路径只经
+  //      `cwd` 传给子进程** —— 命令行参数恒为空数组、`shell:false`，路径里的 `& | ^ % " ` 等 cmd
+  //      元字符**根本没有机会进入命令行**（不做任何字符串拼接，不存在转义遗漏面）；
+  //   ③ **「用默认程序打开」只调 `shell.openPath`**（绝不用 `shell.openExternal`，避免把任意 URL/协议
+  //      交给系统），且仅对「已批准 + 真实存在」的路径生效；不存在/未批准一律拒绝。
+  //  另外 `clipboard:write-text` 也要求带来源路径并过白名单 —— 复制路径/文件名同样不接受任意字符串。
+  // ==========================================================================
+
+  /** F2 公共守卫：路径非空 + **已批准** + **存在**。返回 {ok:true,path,stat} 或 {ok:false,reason,message} */
+  function guardApprovedExisting(target) {
+    const p = String(target || '');
+    if (!p) return { ok: false, reason: 'EMPTY', message: '缺少路径参数' };
+    try {
+      requireApproved(p, '路径不在已打开目录内，操作已拒绝');
+    } catch (err) {
+      return { ok: false, reason: 'NOT_APPROVED', message: String((err && err.message) || err) };
+    }
+    let stat = null;
+    try {
+      stat = fs.statSync(p);
+    } catch {
+      return { ok: false, reason: 'ENOENT', message: `路径不存在或不可访问：${p}` };
+    }
+    return { ok: true, path: p, stat };
+  }
+
+  // 「用默认程序打开」（文件或目录）：只走 shell.openPath，绝不 openExternal
+  ipcMain.handle('shell:open-path', async (_e, target) => {
+    const g = guardApprovedExisting(target);
+    if (!g.ok) return g;
+    try {
+      const errMsg = await shell.openPath(g.path); // 成功返回空串；失败返回错误描述
+      if (errMsg) return { ok: false, reason: 'OPEN_FAILED', message: errMsg, path: g.path };
+      return { ok: true, path: g.path, mode: g.stat.isDirectory() ? 'dir' : 'file' };
+    } catch (err) {
+      return { ok: false, reason: 'OPEN_FAILED', message: String((err && err.message) || err), path: g.path };
+    }
+  });
+
+  // 「在终端打开」：路径**只作为 cwd**（不进 argv、不过 shell）；文件取其所在目录。
+  // opts.dryRun=true 时只回执"将要怎么做"（冒烟用：既能断言安全口径，又不在真实桌面弹出控制台窗口）。
+  ipcMain.handle('shell:open-terminal', async (_e, target, opts) => {
+    const g = guardApprovedExisting(target);
+    if (!g.ok) return g;
+    const cwd = g.stat.isDirectory() ? g.path : path.dirname(g.path);
+    let st = null;
+    try {
+      st = fs.statSync(cwd);
+    } catch {
+      st = null;
+    }
+    if (!st || !st.isDirectory()) {
+      return { ok: false, reason: 'NOT_A_DIR', message: `目标目录不存在：${cwd}`, path: g.path };
+    }
+    const isWin = process.platform === 'win32';
+    const cmd = isWin ? (process.env.COMSPEC || 'cmd.exe') : 'x-terminal-emulator';
+    // 非 Windows 的终端接受 --working-directory=…（仍是 argv，不是 shell 串）；Windows 直接空 argv + cwd
+    const argv = isWin ? [] : ['--working-directory=' + cwd];
+    if (opts && opts.dryRun === true) {
+      return { ok: true, dryRun: true, cwd, cmd: path.basename(cmd), argv: argv.slice(), shell: false, mode: 'cwd', from: g.path };
+    }
+    try {
+      const child = spawn(cmd, argv, {
+        cwd,                 // ★ 路径的唯一传递通道（绝不拼进命令行）
+        detached: true,      // 独立控制台：应用退出不影响已打开的终端
+        stdio: 'ignore',     // 不捕获输出（也不占用父进程 stdio）
+        windowsHide: false,
+        shell: false,        // ★ 显式关掉 shell 解析
+      });
+      if (child && typeof child.unref === 'function') child.unref();
+      return { ok: true, cwd, cmd: path.basename(cmd), argv: argv.slice(), shell: false, mode: 'cwd', pid: child ? child.pid : null };
+    } catch (err) {
+      return { ok: false, reason: 'SPAWN_FAILED', message: String((err && err.message) || err), cwd };
+    }
+  });
+
+  // 「复制路径 / 复制文件名」：写入系统剪贴板。
+  // **文本由主进程自拼**（渲染端只给 { path, kind }）—— 三条约束合起来才是完整的通道口径：
+  //   ① 路径必须过 requireApproved 且真实存在（白名单）；
+  //   ② 渲染进程**无法**借这条通道往剪贴板写任意内容（没有 text 入参；正文 = 已批准路径本身或其文件名）；
+  //   ③ 复制内容与"用户右键的那一行/那一个标签"恒一致，不存在"显示 A、复制 B"的错配面。
+  ipcMain.handle('clipboard:write-text', (_e, payload) => {
+    const arg = payload && typeof payload === 'object' ? payload : {};
+    const g = guardApprovedExisting(arg.path);
+    if (!g.ok) return g;
+    const kind = arg.kind === 'name' ? 'name' : 'path';
+    const base = path.basename(g.path);
+    const text = kind === 'name' ? (base || g.path) : g.path;
+    clipboard.writeText(text);
+    return { ok: true, path: g.path, kind, text, length: text.length };
+  });
 }
 
-module.exports = { registerFileIpc, isInside };
+module.exports = { registerFileIpc, isInside, readRangeBytes };

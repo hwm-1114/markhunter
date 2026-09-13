@@ -1,5 +1,117 @@
 # 更新说明（Changelog）
 
+## v0.5.0（2026-09-13）
+
+> **本版合并了未发布的 0.4.0 大文件线**（计划与实测见 `docs/开发计划-大文件秒开与秒搜-0.4.0.md`）与 0.5.0 的多视图 / 跨窗口「接管编辑」/ 体验项两批 / 崩溃恢复 UI；`package.json` 版本 `0.4.0 → 0.5.0`（0.4.0 从未单独发布）。验收：`npm run smoke` **225 项全绿**（带"运行期间关键文件零改动"哈希守卫，原文与两列哈希见本文档「0.5.0 验收记录」一节）。
+
+主题：**大文件「秒开 + 连续滚动 + 秒搜」**（计划与实测明细见 `docs/开发计划-大文件秒开与秒搜-0.4.0.md`）。分档不变：≤256MB 走原路径；0.3.0 顺延的多视图分屏与体验项已随本版交付（见 `docs/开发计划-多视图与体验流畅度-0.5.0.md`）。
+
+### 新功能：大文件行索引（基础设施）
+- **`src/main/lineindex.js`**：稀疏行首偏移表（默认每 1000 行一条）+ **侧车磁盘缓存** `userData/lineidx/<sha1(path|size|mtimeMs)>.idx`（文件被外部修改自动失效）+ **内存缓存**（命中即回、按需 GC）+ **binary 标志**（含 NUL 判定），流式扫描用原生 `Buffer.indexOf` 数换行、增量解码只为定编码。
+- 新增 IPC `huge:index`（`opts.force` 跳过缓存强制重扫）、`huge:line-offset`、`huge:offset-line`、`huge:lines`（一次取整个视口）、`huge:index-drop`，以及进度事件 `huge:index-progress`（订阅返回退订函数，查看器销毁时必须调用，否则监听器随标签累积泄漏）；preload 已全部暴露。
+- 实测：**15MB 冷索引 16ms、缓存命中 0ms**；**600 万行冷 262ms / 内存命中 0ms**；行↔字节偏移在稀疏边界与首尾行均精确、往返一致。
+
+### 新功能：虚拟滚动查看器（>1GB）
+- 新增 **`src/renderer/hugeview.js`**：只渲染视口行（按需 seek + 解码），滚动条可连续拖到任意位置 —— 2GB 文件不再需要一页页翻。
+- **比例映射绕开 Chromium 33.5M px 元素高度上限**：超长文档按比例换算滚动位置，而非按行高堆真实高度。
+- **CodeMirror 真让位**：huge 标签激活时 `.cm-editor` 置 `display:none`，切回普通文件自动恢复（冒烟 `hugeScrollAnywhere` 同时断言两者）。
+- **`Ctrl+G` 行号跳转**；全局搜索命中直达该行（行号→字节偏移走行索引，失败回退旧实现）。
+- 实测：**1.13GB 打开 13ms**、**任意位置跳转 170–215ms**、视口 78 行。
+- 安全前置：`tabs.js` `doSaveNow` 对 `kind==='huge'` 曾**直接拒绝整篇写盘**（避免 GB 文件被截成 0 字节）；Phase D 第三步起该分支改走 `huge:doc-save`（原子全量重写），整篇写盘分支对 huge 永久不可达。
+
+### 新功能：大文件编辑接线（Phase D 第三步：渲染端 + 保存/关闭/监听）
+- **`hugeview.js` 视口内编辑**：新增对外方法 `setEditable(on)`（进入时打开 overlay 编辑会话，**能否编辑取 `huge:doc-open` 返回的 `editable`**，GBK/二进制/超大单块返回 false 时保持只读并在状态栏显示 `reason`）、`isDirty()`、`save()`、`closeDoc(discard)`、`reloadExternal()`；**编辑/撤销/保存全部走既有 `huge:doc-*` 通道**（insert/delete/undo/redo/save），渲染端不建文档状态机，只维护「光标 + 最近一次主进程回执」。编辑 UI = 行内光标 + 键盘：可打印字符 / Backspace / Delete / Enter（含行首退格并上一行）/ Ctrl+Z / Ctrl+Y / 方向键 / Home / End，点击行内落光标；打开编辑会话后视口取数从 `huge:lines` 切到 `huge:doc-lines`（否则看不见未保存修改、行数也不会变）。超长行（>40000 字符，已截断显示）拒绝编辑。
+- **保存**：`huge:doc-save` 期间订阅 `huge:doc-save-progress` 显示百分比并在 `finally` **退订**；主进程 `huge:doc-saved` 到达后重取行索引（保留退订句柄，`destroy()` 一并摘除）→ 刷新行数与滚动高度。
+- **`tabs.js` 三处接线**：① `doSaveNow` 的 huge 分支 → `hugeview.save()`（`tab.state` 是空文档，绝不能再落到整篇写盘）；② `closeTab` 对 huge 在 `destroy` 前调 `hugeDocClose({discard:false})`（有未保存改动时主进程保留 overlay 块表供 `huge:doc-recover-list` 恢复，**任何情况都不写源文件**，`closeByPath(..., {save:false})` 的「删除不复活」语义不变）；③ huge 标签也 `watchFile` 并纳入 `file-changed` 过滤（外部修改 → 有未保存编辑先确认，确认后丢弃会话 + 丢行索引缓存重载，语义对齐 viewer-lg），并加**保存自写回声守卫**（`rename` 到 `markSelfWrite` 之间的事件可能抢跑，3s 窗口内忽略）。
+- `app.js`：设置里大文件上限 hint 补第三档（>1GB 虚拟滚动查看器 + 底部「✎ 启用编辑」+ `Ctrl+G` 跳行号 + `Ctrl+S` 保存）；`Ctrl+S` 经 `doSaveNow` 自动走新保存路径。
+- 测试面：`tabs.js` 的虚拟滚动阈值改为模块级可变值（默认仍是 1024MB，无调用方时行为完全一致），仅经 `window.__app.editor.setHugeThresholdMB()` 暴露给冒烟临时降档。
+
+### 新功能：大文件搜索原生字节快路径
+- `search-worker.js` 大文件扫描改**原生 `Buffer.indexOf`**：纯 ASCII 查询直接用原始字节匹配（**UTF-8 与 GBK 共用**，ASCII 字节一致），大小写不敏感用小写/大写两个 needle 归并；**跨 8MB 块**命中用「上一块尾部 needle-1 字节」拼接处理；行号由块内换行位置二分得到，行文本按命中区间解码（GBK 亦正确）；非 ASCII 查询自动回退原增量解码逐行路径。
+- **结果上限 3000 → 1 万**（`search-worker.js` 兜底默认 10000），密集查询按 `maxResults` 截断收集，避免全量收集 + 排序。
+- 实测：**大文件搜索 89ms**（含 worker 启动 + 目录遍历 + IPC），命中行号与 `matchIndex` 正确。
+
+### 修复：右键「用 MarkHunter 打开」的冷启动时序、坏路径静默与「幽灵目标目录」
+- **冷启动 `--dir <目标>` 不再"先恢复上次目录/会话、再把目标当事后事件追加"**：过去目标目录只有 `did-finish-load` 的 `open-dir` 事件这一条通路，而渲染端 boot 早于它跑完 `takeOpenDir()`（只要用户有上次目录/侧栏根/会话就必然踩中）——实测侧栏同时出现上次的根与目标（`roots=[上次根, 目标]`），上次会话照常恢复。现在主进程把本次启动目标经 `webPreferences.additionalArguments`（`--mh-open-dir=<encodeURIComponent(路径)>`，非 ASCII 路径必须编码）同步交给 preload，preload 在任何页面脚本之前即可取到并作为 `pendingOpenDir` 初值 → boot 必然走「指定目录启动」分支；`did-finish-load` 事件保留为第二通路（重复投递幂等）。
+- **坏路径不再静默失败**：`--dir` 指向不存在路径或一个文件时，现在会提示「无法打开指定目录：<路径>」并保留可用窗口（此前该路径下**没有任何提示**，用户只看到目标没被打开）。
+- **修掉一个"幽灵目标目录"**：`args.js` 的兜底分支会把 `process.argv[0]`（开发期的 `electron.exe`、安装后的 `MarkHunter.exe` 绝对路径）当成目标目录 → `npm start`、`electron . --smoke`、打包版双击启动都带一个假目标（表现为 `ENOTDIR` 读树失败 + 静默跳过上次会话恢复）。现在只有显式带 `--dir` 时才接受「看起来像路径但不存在」的参数，并额外排除可执行文件自身；安装包的右键菜单与盘符项固定传 `--dir "%V"`，收紧无副作用。
+
+### 新功能：资源管理器「盘符」右键菜单（安装包）与真机实测
+- 安装包右键菜单补上**盘符项**（「此电脑」里的 C: / D: … 右键 →「用 MarkHunter 打开」）：`HKCU\Software\Classes\Drive\shell\MarkHunter` → `"<安装目录>\MarkHunter.exe" --dir "%1"`；原有的「目录空白处右键」（`Directory\Background`，`--dir "%V"`）与「目录本身右键」（`Directory`，`--dir "%1"`）保持不变。
+- **真机实测（0.4.0 安装包静默安装覆盖到 `F:\MarkHunter`）**：三条注册表项的 label / Icon / 命令逐条核对通过；按注册表命令启动已安装版本 → `settings.json` 的 `lastDirectory` 与 `sidebarRoots` **恰为目标目录 1 项**（无旧根残留）；`--dir "F:\"` → `sidebarRoots` 恰为 `F:\` 1 项；应用运行中再次右键另一个目录 → 第二个进程被单实例锁接管并自行退出，运行中的窗口打开新目录。测试以 `MH_USERDATA` 指向临时 profile，**未改动真实用户配置**（前后 sha 一致）。
+
+### 测试
+- 冒烟新增 4 项：`hugeIndexCold`（断言冷索引并回报耗时，实测 cold=13ms）/`hugeIndexCache`（断言 `cached===true`，实测 hot=0ms）/`hugeScrollAnywhere`（huge 渲染 + CM `display:none` 让位 + 切回普通文件恢复）/`hugeSearchFast`（断言命中行 > 100000，实测 94ms）；`boundaryViewer` 的 huge 分支由 rows=0 → true。
+- Phase D 第三步再新增 3 项（用 `bd-280mb.bin` 的**同 rootDir 副本**做编辑，末尾断言夹具本体 size+mtime 未变；每例 `setHugeThresholdMB(200)` → 打开/断言 → `finally` 恢复 1024）：
+  - `hugeEditChunkCoW`：中部插入 3 行 → 行数 +3（渲染端 `getState` 与主进程 `huge:doc-state` 双口径）、`isDirty` 为真、`undoDepth≥1`、中部行内容正确、**磁盘字节未变**（内存 vs 磁盘对照），再用真实 `Ctrl+Z` 键盘事件复原（行数/内容/`redoDepth` 一致）。
+  - `hugeEditSaveAtomic`：编辑后保存 → 磁盘字节数 = 原大小 + 插入串长度、按行索引定位读回标记内容（同时证明保存后索引重建可用、跳转仍准）、目标目录无 `.mh-ovl-*.tmp` 残留、进度事件序列 `copy→verify→rename→done`、保存后行数与索引一致。
+  - `hugeEditUndo`：真实鼠标点击落光标 + 逐键输入/Home/Enter（每步等 `undoDepth` 增长，不靠固定 sleep）→ 全部 `Ctrl+Z` 回原文（行数/内容/脏标记/`canRedo`）、全部 `Ctrl+Y` 前进到编辑后状态（`undoDepth`/`canUndo`/`canRedo` 同步），末尾再撤回干净。
+- 用例总数 **219 项**（公式 `162+11+2+3+8+6+7+2+7+4+7=219`：`scripts/smoke.js` 里 `await step(` **164** 处（其中 1 处不产生 result → 有效 **163**）+ `runCase` 6 + `splitCase` 7 + `mvCase` 7 + `p5Case` 7；前段直推 11 项 + `menuClipboardSnippet` 运行 2 次 + `rcDirArgParse`/`previewImgClip`/`bundleSplit` 各 1 + 多窗口 8 项 + 右键 `--dir`/测试 profile 隔离 6 项 + **Phase 2 分屏 7 项** + **大文件挂账 2 项** + **Phase 3 多视图与布局 7 项** + **Phase 4 跨窗口接管 4 项** + **Phase 5a 体验第 1 批 7 项**（`quickOpenBasic`/`tabOverflowUI`/`outlinePanel`/`fontSizeSetting`/`bottomPanelCollapse`/`sidebarCollapse`/`helpPanel`）；`mwError` 仅异常时追加）。**本版已整套重跑 `npm run smoke`（父 agent 亲跑、带"运行期间 14 个关键文件零改动"哈希守卫，225 秒）：219 项、`| false` 0 个、`| ERR:` 0 个、无 detail 串失败、末尾 `SMOKE_OK`**（信息型真值串 5 项：`findAll`/`pyUI`/`hugeIndexCold`/`hugeIndexCache`/`hugeSearchFast`）。
+
+### 新功能：跨窗口「接管编辑」（0.5.0 Phase 4）
+- **主进程锁表**长在 `filewatch.js` 既有的 `watchers: Map<path, Map<winId, entry>>` 上，`entry` 新增 `mode: 'edit' | 'read'`：首个打开者 `edit`，后来的窗口 `read` **且照旧收 `file-shared-open`（D2 只读语义一字未改）**；`doc:claim-edit` 接管时把其余 `edit` 降为 `read` 并逐窗口广播，`doc:release-edit` 交回但**不自动**让观察窗变为可编辑；窗口 `closed` 时释放全部登记。
+- **渲染端**：标签上方出现「🔒 正由另一窗口编辑 —— 本窗口只读」横幅 + 显性「✏️ 接管编辑」按钮（**不藏在标签右键**，且仅当 `readOnly===true` 时出现），接管成功后原窗口**转只读 + toast，不关窗、不弹原生对话框**。
+- **L3 冲突提示默认关**：开关打开后不降级并显示冲突横幅（DOM 横幅而非原生 `confirmDialog`——后者会挂住自动化）；关掉时**静默保留本窗口内容**，不丢未保存修改。
+- **顺带修掉 B3**（`docs/缺陷清单-0.2.5-审计.md` 的老账）：`fallbackToPoll` 把轮询回调存进 `entry.pollFn`，`stopWatch`/`stopAllWatches` 改为 `fs.unwatchFile(path, entry.pollFn)` —— **不带 listener 会摘掉该路径全部监听**，导致被"顺手"打断的那个窗口再也不会重建轮询兜底（`mwNoPollBreak` 覆盖）。
+### 新功能：体验项第一批（0.5.0 Phase 5a · 7 条）
+- **A1 `Ctrl+P` 快速打开**：新建 `src/renderer/quickopen.js`；文件名模糊匹配走 `search-worker` 的**只读清单任务**（200/批流式下发 + LRU8 缓存 + 独立记账，可与搜索并行），↑↓ 选择 / Enter 打开 / Esc 关闭；打开即**同步聚焦输入框**（`setTimeout` 只作兜底）。新 IPC：`search:files`/`search:files-cancel`/`search:files-progress`。
+- **A3 标签栏溢出**：每栏各自判溢出（按该栏 `.tabs` 的 `scrollWidth/clientWidth`）→ 滚轮横滚、右侧「▾ 全部标签」下拉（**只列本栏**）、`Ctrl+Tab` 浮层（**本栏内循环**）；重算点 = 渲染后 / 分栏 / 拖分隔条 / resize / ResizeObserver。`#tabs`/`.pane-tabs`/`.tab` 结构与 ID 未改。
+- **B1 大纲 / TOC**：新建 `src/renderer/outline.js`；markdown 标题树、点击跳转、**随光标高亮**（`tabs.js` 的 CM `updateListener` 新增 `onCursorMove`，归属沿用 `registry.docOfView`）；**类型门控**：非 markdown、`huge`、`viewer-lg` 视图不显示；数据源 = 焦点栏活动文档。
+- **B8 字号 / 行高设置**：新增 3 个设置键（字号 / 行高 / 预览字号，默认 `13.5`/`1.65`/`14.5`，与改造前硬编码逐字相同，已进 `settings.js` 白名单）；根元素 CSS 变量 ⇒ **所有栏的 CM 与预览同时生效**；`Ctrl+=` / `Ctrl+-` 步进、`Ctrl+0` 复位（**语义已定义 = 视图缩放复位**：字号+行高+预览字号回默认 **且** 预览缩放回 100%，后者是原有行为）；设置弹窗三项可调。
+- **E1 底部面板默认折叠**：启动即折叠（只加 `.collapsed`，面板体 DOM 与写值路径一字未动），点面板页签 / `Ctrl+F` / `Ctrl+H` / ▶运行 / 全局搜索跳转都会先展开；新增 ⛶ 最大化/还原；Esc 收起并**同时退出最大化**（修掉"折叠却保留 maximized、下次展开直接 72vh"的隐性 bug）。已核对：**无既有用例依赖面板可见**。
+- **E2 侧栏分区折叠**：树 / 收藏 / 搜索三个分区可各自折叠并记忆（`sidebarCollapsed` 落盘）；**`tree.js` 零改动**，J4 修好的展开态恢复逻辑未被破坏（用例 `tree-expand-state-kept` 覆盖）。
+- **F1 快捷键帮助面板**：新建 `src/renderer/help.js`；`F1` / `Ctrl+/` 打开，分组过滤；**键位表 = 面板显示与键位分派同一张表**（`SHORTCUTS` + `SHORTCUT_ACTIONS`，键位分派改表驱动，96 组 `key×ctrl×shift` 差分与旧 if/else 链逐条等价）。
+- **顺带修掉的真缺陷**：① `clampFont` **按 1 位小数归整**导致 `1.65` 被写成 `1.7`、`1.05`→`1.1` ⇒ **settings 与界面静默漂移**（凡走 `applyFonts` 的路径：启动/弹窗保存/Ctrl+=、Ctrl+-/Ctrl+0/跨窗口同步都会显示错值）；改成 2 位小数并加回归守卫 `fractional-line-height-preserved`。② `Ctrl+Shift+O` 被 `Ctrl+O` 吃掉（键位差分探针发现）。③ `openTabsMenu` 在未溢出时会立刻关掉自己刚打开的菜单。④ `sidebarCollapsed` 的 TDZ（声明晚于 `createFavorites` → 启动即崩）。⑤ 底部面板 Esc/Esc 与最大化的状态残留。
+
+### 新功能：体验项第二批（0.5.0 Phase 5a · 4 条：A2 / F2 / G1 / G2）
+- **A2 `Ctrl+Shift+T` 重开刚关闭的标签**（`tabs.js` + `help.js:60` + `app.js:1467`）：新增最近关闭栈（**新→旧、上限 20**），快照含 路径 / 栏位 / 固定 / 只读 / 光标 / 滚动 / `dirtyAtClose` / `savedOnClose` / ≤2M 字符文本。**落栏语义**：原栏还在 → 回原栏；原栏已撤空 → 落焦点栏；文件已被重新打开 → 只激活、不动内容与光标。**未保存内容的四条路径都以"是否真的写盘"（`savedOnClose`）为准**；**huge 标签走显式降级**：`reopenInfo.degraded=true` + `reason='HUGE_OVERLAY_NOT_REATTACHED'` + toast 说明「改动只在恢复区」，并如实登记 `hugeScrollRestored`（行索引未就绪时不静默）。
+- **F2 树 / 标签右键常用项**（在资源管理器中显示 / 复制路径 / 复制文件名 / 在终端打开 / 用默认程序打开）：新增 3 条 IPC —— `shell:open-path`（`src/main/ipc.js:486`）、`shell:open-terminal`（`:500`）、`clipboard:write-text`（`:540`），**全部先过 `guardApprovedExisting`**（`:468`：`security.requireApproved` + `statSync` 存在性校验），拒绝时返回 `{ok:false, reason:'NOT_APPROVED'|'ENOENT'}` 而非抛异常。**「在终端打开」路径只经 `cwd` 传给子进程**（`argv` 对 Windows 恒 `[]`、`shell:false`、`detached:true`、`stdio:'ignore'`，渲染端不做命令拼接 ⇒ `& | ^ %` 进不了命令行），并支持 `opts.dryRun` 只回执口径（冒烟据此断言，不真弹控制台）。**剪贴板正文由主进程按已批准路径自拼**（渲染端只传 `{path,kind}`，传了 `text` 也不生效）。树与标签菜单是**同源副本**（`tree.js:87-90` / `tabs.js:2527-2528`），改动必须两处同步。
+- **G1 文件内查找三开关（Aa / 整词 / 正则）**（`find.js`）：匹配与高亮统一改走 RegExp `exec`（修掉变长小写映射 `İ` 的下标错位，高亮与替换位置天然一致；默认口径结果与旧实现逐位相同）。正则开启后**三层防 ReDoS**：模式长度上限 **200 字符**（`find.js:35`）、嵌套量词（形如 `(a+)+`）静态拒绝（`:47`）、**120ms 执行预算**（`:36`，先在前 200 行做 30ms 预检）。**huge / 查看器 / 图片 / 对比视图内 `Ctrl+F` 给出显式提示**（`UNSUPPORTED_MSG`，`:49`；计数行与结果区同时显示），不再静默 0 命中。
+- **G2 匹配上限 + 输入防抖**（`find.js`）：展示上限 **500 处**（`:39`），计数行与结果区尾部行**双处显式提示**「仅显示前 500 处（已截断）」（截断提示行走 `.find-more`，不占结果行计数）；输入防抖 **80ms**（`:40`，只挂 `input` 事件，`setQuery` 与文档变化路径仍同步）；**「全部替换」不受展示上限约束**（重新全量扫描，上限 5 万处 + 2s 预算，绝不"只换前 500 处"）。
+
+### 新功能：崩溃恢复 UI（0.5.0 挂账项：渲染端消费 `huge:doc-recover-list`）
+- 新增 `src/renderer/recover.js`（`createRecover`，`:98`）：启动扫描 `<userData>/overlay` 的恢复区 → 状态栏 chip（`index.html:159`，`app.js` 接线）→ DOM 弹窗逐条目「恢复 / 丢弃」；应用级提示走 `ui.js` 的 `note()`（`:207`，类名 `mh-note`）。**恢复前先把整个计划读齐**（块表 / 分片 / 身份），读失败时一个字节都没动、恢复区原封不动可重试。
+- **两道身份闸（硬要求：绝不用过期块表覆盖用户文件）**：闸① 当前源文件 `stat` 的 `size` 与 `floor(mtime)` 必须等于块表 `meta`（`recover.js:329` 一带）；闸② `huge:doc-open` 返回的 `key` 必须等于条目 key（拦 realpath 漂移，以及"闸①过了、打开前文件又变了"的竞态）。任一不符 → **拒绝 + 红字可断言文案**（`.recover-error`，`styles.css:1159`），且**不写源文件**。
+- **回放**：按 run **倒序**调 `huge:doc-edit`（目标行号在干净文档上一次算完，从后往前应用不会被前面的行数增删污染）；恢复只进 overlay 会话与内存，**不写源文件**。
+- **丢弃**：**`others > 0` 一律拒绝、零 probe**（`recover.js:515-518`：可行动文案在 `:516`「另一个窗口正在打开该文件：请先关闭那个窗口里的该文件标签，再回到这里丢弃」）—— 两条理由：① probe 的收尾 `hugeDocClose({discard:false})` 在 overlay 侧是**无条件** `persistMeta()`，当 `doc.key !== item.key` 时会把用户**更新的**未保存内容覆盖成 `dirtyBlocks=0`（数据丢失）；② 即使身份相符，probe 也要走一次 `huge:doc-open` → `lineindex.getIndex()`，GB 级文件冷启动是**整文件冷扫** —— 不能让"清理过期条目"这种动作付这个代价。逐条否决记录见 `recover.js:498-509`。`others === 0` 才走直删 ⇒ **不再经主进程 `dropKey`**（`getIndex` 调用 1→0），删 `<key>.json` + `<key>.tmp`（`recover.js:528-529`）后**做删后残留复核**（`:534`，用例 `recCleanup`）。**代价**：别的窗口只打开该文件时不能丢弃（有可行动文案）⇒ 顺延 0.5.1（给 `huge:doc-close` 加 `persist:false` 即可放宽到"身份相符才 probe"）。
+
+### 顺带修掉的真缺陷（0.5.0 Phase 5a 第 2 批）
+- **huge 视图里按 `Ctrl+F` 不给提示（挂账的"静默 0 命中"）**：`runSearch` 里"空 query 提前返回"排在"无文档视图判定"**之前** ⇒ 现在把无文档视图分支提到最前（`find.js:305-327`；分支前的显式注释在 `:307`），`focus()/focusReplace()` 一进面板即可看到「当前视图不支持文件内查找（大文件视图）」；覆盖 `huge` / `viewer-lg` / `image` / `diff` 四类。
+- **关闭脏 huge 标签"没写盘却报保存成功"（0.4.0 遗留）**：`closeTab` 把 `saveNow(tab)` 排进写队列（**微任务**才跑），而同步段已经 `tab.huge = null` + `destroy()` → `doSaveNow` 命中 `if (!hv)` 并**返回 `true`**。现在该分支返回 **`false`**（`tabs.js:3067`，约定：**本次没有发生写盘**，不等于"写失败"，调用方不得据此认为已落盘），`trackClosedSave` 对 huge 与普通标签改为**同一条"按返回值推导 `savedOnClose`"**的路径（`:2208`），重开的降级口径与磁盘事实一致；用例 `huge-close-does-not-write-disk` 兼作回归守卫（将来若真改成"先保存再关"，它会立刻变红）。
+
+### 测试（0.5.0 Phase 5a 第 2 批 + 崩溃恢复 UI）
+- 用例总数 **225 项**（公式 **`219 + 4 + 2 = 225`**，其中 219 见上一条公式；**差分口径实测**：`await step(` 调用点 **164 → 166**（+2 = 恢复 UI 两条）、`p6Case` **0 → 4**（Phase 5a 第 2 批四条），`runCase` 6 / `splitCase` 7 / `mvCase` 7 / `p5Case` 7 与直推项**一字未变**。**冒烟脚本随本版更新（225 项）**；**脚本指纹不写死在文档里**（脚本还会随修复微调），最终指纹见 `docs/开发计划-多视图与体验流畅度-0.5.0.md` §12.6 所引的**带守卫运行 before/after 两列**。223 本身 = 219 + Phase 5a 第 2 批 4 条）。
+- 新增 6 条用例：`reopenClosedTab`（23 合取项）/ `ctxMenuCommonItems`（13）/ `findCaseWordRegex`（13）/ `findMatchLimit`（9）/ `hugeRecoverPrompt`（11）/ `hugeRecoverReject`（18）—— **逐合取项命名进失败串**；`hugeRecoverPrompt` 的 `cleanOk` 断言"丢弃后 `stat` 无残留 + chip 收起 + 列表无该条目"。
+- 计数口径提醒：**223 只对 11:14:44 那次产物成立**，且那次修订版同时含本节的恢复 UI WIP ⇒ **批次隔离性未达成**（验证局限，详见 `docs/开发计划-多视图与体验流畅度-0.5.0.md` §12）。
+- **本版已整套重跑 `npm run smoke`**（父 agent 亲跑，12:27:28→12:31:28，日志 `%TEMP%\mh-smoke-225-v3-122728.log`；**带哈希守卫：`before`/`after` 两列 changed = 0 ⇒ GUARD PASS**）：`node scripts/smoke-verify.js <日志> --expect 225 --require reopenClosedTab,ctxMenuCommonItems,findCaseWordRegex,findMatchLimit,hugeRecoverPrompt,hugeRecoverReject` → **结果行 225 · `| false` 0 · `| ERR:` 0 · 非 true 非信息型 0 · `SMOKE_OK` 1 ⇒ `SMOKE_VERIFY OK`（true 220 项 + 信息型 5 项）**。
+- **同批另两次运行不作数**（如实登记）：`…-120625` 因运行期间 `scripts/smoke.js` 被写 ⇒ **哈希守卫 FAIL、判废**（另有 4 条会话/布局类用例在运行期机器负载下转红，整轮 10 分钟 vs 基线 4 分钟）；`…-121726`（v2，**守卫 PASS**）有 5 条**焦点依赖**用例因窗口失焦转红（`disk.keys=null` + `hasFocus=false`）。**运行期间本文档的写入 = 零**（详见 0.5.0 计划 §12.6）。
+- **两条恢复用例此前从未在任何运行中跑绿**（11:39 那次卡在夹具被打开上限拦下；`120625` 那次只差 `clean` 与 `1.changed` 两点），**本次 v3 是它们首次全绿** —— 因此 0.5.0 的恢复 UI 端到端覆盖以这次运行结论为准。
+
+### 新功能：同一文件多视图 + 布局持久化（0.5.0 Phase 3）
+- **同一文件可在两栏各开一个视图**：每视图独立 `EditorState`（光标/滚动/撤销栈各自独立），内容变更按**文档**串行广播 —— `tabs.js` 的 `updateListener` 分出「本地 vs 远端」两条路：本地把 `u.transactions.slice()` 入队，队列回调对同一文档的**其它视图**按顺序逐个 `dispatch({changes: tr.changes, annotations:[remoteAnnotation.of(true)]})`；远端分支只推进基线、**不回播**（防环的唯一凭据）。程序化变更（分段预读/外部重载）的 `addToHistory:false` 一并透传，避免接收侧被重新标脏。
+- **引用计数与关闭语义**：`docmodel.js` 新增 `viewsOf/viewCount/hasViews/panesOf/ensurePaneOf/dropPaneOf`；`bindView` 换绑**先摘旧登记**（否则 `viewsOf` 归不了零 → 关最后一个视图不弹确认框 = 静默丢数据）。`closeTab` 分**视图级 / 文档级**两个粒度（`opts.all`）：关一个视图**不落盘、不清脏、文档仍在**，关最后一个才走文档级保存；`closeAll`/`closeByPath` 传 `all:true`。
+- **标签右键「⧉ 在另一栏打开」**（`openInOtherPane`）；`Ctrl+Tab` 仍是栏内循环；同一文件已在另一栏时 `openFile` 仍只聚焦并 toast，**第二视图只在显式要求时创建**。
+- **布局持久化**：会话快照从 `{paths,active,pinned}` 扩展为 **四键（+`layout`：`orientation`/`sizes`/`focus`/`panes[].{docs,active,pinned}`）**，三键一个都没删；`persistSession(force,{final})` 的**焦点守卫语义不变**（仅关窗前用 `final`），新增 `beforeunload`；旧会话（无 `layout`）走「映射成单栏」分支逐位兼容，恢复上限总视图 ≤240 / 每栏 ≤200。修复一个恢复期口径缺口：**`restoreSession` 过去只"建栏"从不"合栏"** → 单栏快照在已是双栏的窗口里恢复完仍是双栏；现在先反向归一（`plan.panes.length<=1 && 当前栏数>1 → mergePanes()`），保证**恢复结果 = 快照**。
+- **限制**：禁止 huge / viewer-lg 同一文件多视图（overlay 路径单例）；两栏硬上限仍为 2；`tab.scrollTop` 目前仍是文档级单值（同文件两栏的滚动记忆会互相覆盖，未做逐视图记忆，留待后续）。
+
+## v0.3.0（2026-08-30）
+
+### 移除
+- **AI 助手整块移除**（明确不需要，投入产出比低）：删除渲染端 AI 侧栏（`ai-panel.js` 与全部 DOM/样式）、主进程 `ai.js`（OpenAI 兼容对话 / SSE 流式 / function calling / 模型列表）与 6 个 IPC 通道（`ai:chat`、`ai:abort`、`ai:tool-result`、`ai:list-models`、`ai:tool-call`、`ai:chunk`）；设置弹窗去掉 AI 区块；`settings.js` 不再持有与加解密 API Key，并在加载时**一次性清理旧版本遗留的 `ai*` 配置键**（含 DPAPI 加密的 Key）。主 bundle 0.91 MB → 0.89 MB。
+
+### 修复（Phase 0：静默数据丢失与功能失效，均经真实窗口复现 → 修复 → 回归）
+- **分段大文件撤销截断**：分段预读 / 程序化重载（外部修改重载、查看器换窗）不再进入撤销历史；`chunked` 未加载完整时拒绝写盘（补读失败宁可报错也不截断文件）。修复前 Ctrl+Z 一次即撤掉 2MB 段，800ms 后自动保存把 5.39MB 文件写成 2.10MB。
+- **CRLF 保真**：记住原文件行尾风格，保存（含 >64MB 流式写）按原样还原 —— 不再因为一次保存就把整个文件的行尾改成 LF。
+- **大文件查看器真只读**：`viewer-lg` 在「启用区域编辑」之前 `state.readOnly === true`（此前可直接输入，且未启用编辑时的保存会"假装成功"，输入内容随翻页丢失）。
+- **删除不再复活**：删除 / 移走导致的关标签走 `save:false`，并清理挂起的自动保存定时器（此前 dirty 标签的保存会把刚删除的文件写回磁盘）。
+- **Python**：① 单批 >3000 行不再整批丢失（`removeChild(null)` 抛 TypeError）；② 输出改 `StringDecoder` 流式解码，中文不再出现 `�`；③ 连续运行后「■ 终止」仍有效（旧进程 close 回调不再清空新进程引用），面板状态不再被旧进程退出事件覆盖。
+- **文档对比**：超大块新增不再抛 `RangeError`（`push(...15万行)` 改逐行 push，V8 参数上限 ≈12.5 万），计算异常给出可读提示而不是空白。
+- **右键「用 MarkHunter 打开」**：① 有历史状态（上次目录 / 侧栏多根 / 上次会话）时 `--dir` 不再被 boot 的目录恢复分支吞掉（preload 缓冲 + 启动收尾补判）；② `second-instance` 会重排 argv（`--dir` 与值被拆开）导致取到 Chromium 开关 —— 解析逻辑抽到 `src/main/args.js` 并加固（三种取值 + 存在性校验）；③ 坏路径给出「无法打开指定目录」提示；④ `--dir` 启动为干净窗口（不恢复上次会话）；⑤ 目标目录与已打开根存在包含关系时不再直接拒绝：目标在某根内 → 激活该根并定位，目标是若干根的祖先 → 用目标替换这些子根。
+- **测试隔离**：`--smoke/--exttest/--mmtest` 改用独立 userData profile，不再改写真实用户配置（本次审计实测被改：主题、上次会话、上次目录、侧栏根、大文件上限、AI 模型）。
+
+### 测试
+- 冒烟 **179 项全通过**：移除 AI 相关 10 项，新增 Phase 0 回归 11 项（`chunkUndoNoTruncate`、`crlfPreserve`、`deleteNoResurrect`、`pyOutputBigBatch`、`pyOutputUtf8`、`pyKillAfterRestart`、`diffHugeInsert`、`rcNestedReplace`、`viewerReadOnly`、`rcDirArgParse`、`noAiSettings`）。
+
 ## v0.2.5（2026-08-29）
 
 ### AI 助手通用化 + 体验升级

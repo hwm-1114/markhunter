@@ -18,6 +18,79 @@ function normalizeKey(p) {
   return String(p).replace(/\\/g, '/').toLowerCase();
 }
 
+// ============================================================================
+// 0.5.0 Phase 5a F2：树/标签右键的「常用项」（在资源管理器中显示 / 复制路径 / 复制文件名 /
+// 在终端打开 / 用默认程序打开）
+// ----------------------------------------------------------------------------
+// **安全面**：五个入口只有「在资源管理器中显示」是既有通道（shell:show-in-folder），另外四个走本轮
+// 新增的三条 IPC（shell:open-path / shell:open-terminal / clipboard:write-text），主进程侧一律先过
+// `security.requireApproved`（路径白名单）；「在终端打开」由主进程把路径**只当 cwd** 传给子进程
+// （argv 恒空 + shell:false），渲染端不做任何命令字符串拼接。
+// 本函数在 tree.js 与 tabs.js 各有一份**同源副本**（两文件互相不 import，避免引入循环依赖）；
+// 改动时两处必须同步（施工文档 §11 已登记）。
+// ============================================================================
+/** 复制路径 / 文件名。**渲染端只传 { path, kind }**：剪贴板正文由主进程按已批准路径自拼
+ *  （渲染进程无法经这条通道往剪贴板写任意内容；见 ipc.js 的 clipboard:write-text 注释）。 */
+export async function copyPathOrName(p, kind) {
+  const name = String(p).split(/[\\/]/).pop() || String(p);
+  try {
+    const r = await window.api.copyText({ path: p, kind: kind === 'name' ? 'name' : 'path' });
+    if (!r || r.ok !== true) {
+      toast(`复制失败：${(r && r.message) || (r && r.reason) || '未知错误'}`);
+      return false;
+    }
+    toast(kind === 'name' ? `已复制文件名：${name}` : '已复制路径');
+    return true;
+  } catch (err) {
+    toast('复制失败：' + (err && err.message ? err.message : err));
+    return false;
+  }
+}
+
+/** 在终端打开：把路径交给主进程（路径只作 cwd，不进命令行）；opts 仅测试面用（dryRun） */
+export async function openInTerminal(p, opts) {
+  try {
+    const r = await window.api.openTerminal(p, opts);
+    if (!r || r.ok !== true) {
+      toast(`在终端打开失败：${(r && r.message) || (r && r.reason) || '未知错误'}`);
+      return r || { ok: false, reason: 'UNKNOWN' };
+    }
+    if (!r.dryRun) toast(`已在终端打开：${r.cwd}`);
+    return r;
+  } catch (err) {
+    toast('在终端打开失败：' + (err && err.message ? err.message : err));
+    return { ok: false, reason: 'ERR', message: String(err && err.message ? err.message : err) };
+  }
+}
+
+/** 用默认程序打开（shell.openPath；未批准/不存在由主进程拒绝） */
+export async function openWithDefault(p) {
+  try {
+    const r = await window.api.openPath(p);
+    if (!r || r.ok !== true) {
+      toast(`打开失败：${(r && r.message) || (r && r.reason) || '未知错误'}`);
+      return r || { ok: false, reason: 'UNKNOWN' };
+    }
+    return r;
+  } catch (err) {
+    toast('打开失败：' + (err && err.message ? err.message : err));
+    return { ok: false, reason: 'ERR', message: String(err && err.message ? err.message : err) };
+  }
+}
+
+/** F2 的五个常用项（树与标签共用同一份定义；返回数组便于拼进各自的菜单） */
+export function commonCtxItems(p) {
+  if (!p) return [];
+  return [
+    { sep: true },
+    { label: '📁 在资源管理器中显示', onClick: () => window.api.showInFolder(p) },
+    { label: '📋 复制路径', onClick: () => { void copyPathOrName(p, 'path'); } },
+    { label: '📋 复制文件名', onClick: () => { void copyPathOrName(p, 'name'); } },
+    { label: '⌨ 在终端打开（此目录）', onClick: () => { void openInTerminal(p); } },
+    { label: '🚀 用默认程序打开', onClick: () => { void openWithDefault(p); } },
+  ];
+}
+
 // ---------- 外部文件区（需求1：跨目录树定位） ----------
 // 「外部文件」虚拟根行 key：含 \u0000 绝不可能是真实路径，与真实树无交集
 const EXT_ROOT_KEY = '\u0000ext\u0000';
@@ -609,6 +682,9 @@ export function createTree() {
       items.push({ label: '✏️ 重命名', onClick: () => renameEntry(node.path, node.name) });
       items.push({ label: '🗑 删除文件', danger: true, onClick: () => removeEntry(node.path, false) });
     }
+    // F2：常用项（在资源管理器中显示 / 复制路径 / 复制文件名 / 在终端打开 / 用默认程序打开）
+    // 目录行与文件行都给（终端打开时主进程会取目录本身；文件取其所在目录）
+    items.push(...commonCtxItems(node.path));
     renderCtxMenu(x, y, items);
   }
 
@@ -635,6 +711,8 @@ export function createTree() {
       toast(`已创建 ${val}`);
       await refreshNode(parentDir, true);
       select(p);
+      // 新建文件后直接打开（与工具栏「新建文件」一致；目录不打开）
+      if (type === 'file' && onOpenFile) onOpenFile(p);
     });
   }
 

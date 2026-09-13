@@ -1,8 +1,8 @@
-const { app, ipcMain, safeStorage } = require('electron');
+const { app, ipcMain } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
-// S6：settings:set 白名单（未知键一律丢弃；aiApiKeyClear 为一次性命令键，不落盘）
+// S6：settings:set 白名单（未知键一律丢弃）
 const ALLOWED_KEYS = new Set([
   'pythonPath',
   'maxFileSizeMB',
@@ -12,18 +12,18 @@ const ALLOWED_KEYS = new Set([
   'indentSize',
   'theme',
   'lastDirectory',
-  'aiBaseUrl',
-  'aiModel',
-  'aiModelType',
-  'aiAskBeforeApply',
-  'aiApiKey',
-  'aiApiKeyClear',
   'favoriteDirs',
   'lastSession',
   'sidebarRoots',
+  // 0.5.0 Phase 5a B8：编辑器 / 预览字号与行高（渲染端以 CSS 变量落地）
+  'editorFontSize',
+  'editorLineHeight',
+  'previewFontSize',
+  // 0.5.0 Phase 5a E2：侧栏分区折叠态（{ fav, tree, search } 三个布尔）
+  'sidebarCollapsed',
 ]);
 
-// 主题引擎：36 个合法主题名（daisyUI 5.7.18 内置 35 + 自研经典 markhunter-classic；实证 theme/*.css = 35）
+// 主题引擎：56 个合法主题名（daisyUI 内置 35 + 自研经典 markhunter-classic + 特效皮肤 20）
 // 清单与 docs/开发计划-多主题皮肤.md §3.3.2 分组表一致；非法主题名在 settings:set 静默丢弃（延续 S6 风格）
 const THEME_NAMES = [
   'markhunter-classic', // 自研经典（应用默认，与 0.1.42 浅色视觉一致）
@@ -57,20 +57,19 @@ const DEFAULTS = {
   wordWrap: true,        // 自动换行
   scrollbarWidth: 10,    // 滚动条滑块宽度（px）
   indentSize: 4,         // Tab 键插入的空格数（1~8，Shift+Tab 反向缩进）
-  theme: 'markhunter-classic', // 主题（36 款皮肤，见 THEME_NAMES；默认经典，老用户观感零变化）
+  theme: 'markhunter-classic', // 主题（56 款皮肤，见 THEME_NAMES；默认经典，老用户观感零变化）
   lastDirectory: '',     // 上次打开的工作目录
   lastSession: null,     // 上次会话快照（打开过的标签路径 + 活动标签下标；跨重启恢复）
   favoriteDirs: [],      // 收藏的本地目录（最多 50 个，保持添加顺序）
   sidebarRoots: [],      // v0.2.3 侧栏多目录根列表（最多 12 个；活动目录由 lastDirectory 记录）
-  // AI 大模型配置（OpenAI 兼容接口，DeepSeek 预置）
-  aiApiKey: '',          // API Key（S5：存盘前经 safeStorage/DPAPI 加密，形如 enc:v1:<base64>）
-  aiBaseUrl: 'https://api.deepseek.com', // 服务地址
-  aiModel: 'deepseek-chat',              // 模型名（可自定义具体版本，如 deepseek-v4）
-  aiModelType: 'latest', // 模型类型：latest(最新版)/reasoner(推理版)/custom(自定义)
-  aiAskBeforeApply: true, // 修改文档前是否询问用户
+  // 0.5.0 Phase 5a B8：字号 / 行高（默认值 = 改造前的硬编码值，老用户观感零变化）。
+  // 范围夹取在渲染端做（settings.js 只负责白名单与默认值，保持"脏数据不落库"的既有风格）。
+  editorFontSize: 13.5,  // 编辑器字号（px，10~32）
+  editorLineHeight: 1.65, // 编辑器行高（倍数，1~2.6）
+  previewFontSize: 14.5, // 预览字号（px，10~32）
+  // 0.5.0 Phase 5a E2：侧栏三分区折叠态 { fav, tree, search }（缺省 = 全展开，老用户观感零变化）
+  sidebarCollapsed: {},
 };
-
-const AI_KEY_PREFIX = 'enc:v1:';
 
 /** v0.2.3 sidebarRoots 规范化：仅保留字符串项、去重（Windows 大小写不敏感）、上限 12 */
 function normalizeSidebarRoots(list) {
@@ -97,36 +96,10 @@ function settingsFile() {
 function persist(s) {
   try {
     fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
-    const out = { ...s };
-    delete out._aiKeyPlain; // 内部解密缓存不落盘
-    fs.writeFileSync(settingsFile(), JSON.stringify(out, null, 2), 'utf8');
+    fs.writeFileSync(settingsFile(), JSON.stringify({ ...s }, null, 2), 'utf8');
   } catch (err) {
     console.error('保存设置失败:', err);
   }
-}
-
-/** 加密 API Key；safeStorage 不可用时回退明文并告警 */
-function encryptKey(plain) {
-  if (!plain) return '';
-  if (safeStorage.isEncryptionAvailable()) {
-    return AI_KEY_PREFIX + safeStorage.encryptString(String(plain)).toString('base64');
-  }
-  console.warn('[settings] safeStorage 不可用，API Key 将以明文保存在 settings.json');
-  return String(plain);
-}
-
-/** 解密 API Key（仅供主进程内部使用，永不返回给渲染进程） */
-function decryptKey(stored) {
-  if (!stored) return '';
-  if (stored.startsWith(AI_KEY_PREFIX)) {
-    try {
-      return safeStorage.decryptString(Buffer.from(stored.slice(AI_KEY_PREFIX.length), 'base64'));
-    } catch (err) {
-      console.error('[settings] 解密 API Key 失败：', err && err.message);
-      return '';
-    }
-  }
-  return stored; // 旧明文（迁移场景）
 }
 
 function loadSettings() {
@@ -142,19 +115,12 @@ function loadSettings() {
   if (!THEME_NAMES.includes(cache.theme)) cache.theme = DEFAULTS.theme;
   // sidebarRoots 规范化（旧版无此键 → 默认 []；脏数据防御）
   cache.sidebarRoots = normalizeSidebarRoots(cache.sidebarRoots);
-  // API Key 处理：解密供主进程内部使用；检测到旧明文自动迁移为加密并重写文件
-  if (cache.aiApiKey) {
-    if (cache.aiApiKey.startsWith(AI_KEY_PREFIX)) {
-      cache._aiKeyPlain = decryptKey(cache.aiApiKey);
-    } else {
-      const plain = cache.aiApiKey;
-      cache.aiApiKey = encryptKey(plain);
-      cache._aiKeyPlain = plain;
-      persist(cache); // 迁移后立即重写为加密存储
-    }
-  } else {
-    cache.aiApiKey = '';
-    cache._aiKeyPlain = '';
+  // v0.3.0：AI 功能整体移除 —— 清掉旧版本遗留的 AI 配置键（含经 DPAPI 加密的 API Key），
+  // 避免无用字段（尤其密钥）长期留在 settings.json；一次性迁移，写回后不再出现。
+  const staleAiKeys = Object.keys(cache).filter((k) => /^ai[A-Z]/.test(k) || k === '_aiKeyPlain');
+  if (staleAiKeys.length) {
+    for (const k of staleAiKeys) delete cache[k];
+    persist(cache);
   }
   return cache;
 }
@@ -174,7 +140,6 @@ function saveSettings(patch) {
   const clean = sanitizePatch(patch);
   Object.assign(s, clean);
   s.sidebarRoots = normalizeSidebarRoots(s.sidebarRoots); // v0.2.3：多目录列表落盘前规范化
-  if (patch && '_aiKeyPlain' in patch) s._aiKeyPlain = patch._aiKeyPlain; // 内部解密缓存（不落盘）
   cache = s;
   persist(s);
   return s;
@@ -184,40 +149,19 @@ function getSettings() {
   return loadSettings();
 }
 
-/** 渲染进程安全视图：aiApiKey 一律返回 ''，仅暴露 aiApiKeySet 布尔 */
+/** 渲染进程视图：浅拷贝（不再有需要屏蔽的密钥字段） */
 function toRendererSettings(s) {
-  const out = { ...s };
-  delete out._aiKeyPlain;
-  out.aiApiKey = '';
-  out.aiApiKeySet = !!s.aiApiKey;
-  return out;
+  return { ...s };
 }
 
 function registerSettingsIpc() {
   ipcMain.handle('settings:get', () => toRendererSettings(loadSettings()));
   ipcMain.handle('settings:set', (e, patch) => {
     const p = sanitizePatch(patch);
-    if (p.aiApiKeyClear === true) {
-      // 清除密钥
-      p.aiApiKey = '';
-      p._aiKeyPlain = '';
-      delete p.aiApiKeyClear;
-    } else if ('aiApiKey' in p) {
-      if (p.aiApiKey) {
-        // 非空 → 加密存储
-        const plain = String(p.aiApiKey);
-        p.aiApiKey = encryptKey(plain);
-        p._aiKeyPlain = plain;
-      } else {
-        // 空字符串且已配置 → 保持不变（不清除）
-        delete p.aiApiKey;
-      }
-    }
     // S6 延续：theme 值须在合法主题名内（非字符串/非法名一律静默丢弃，回退默认）
     if ('theme' in p && (typeof p.theme !== 'string' || !THEME_NAMES.includes(p.theme))) {
       delete p.theme;
     }
-    delete p.aiApiKeyClear; // 保险：命令键不落盘
     const result = toRendererSettings(saveSettings(p));
     // v0.1.51 多窗口：设置/主题变更广播到其它窗口（排除发起窗口），各窗口即时换肤/更新缓存
     try {

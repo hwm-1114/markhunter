@@ -39,8 +39,10 @@ function normalizeList(list) {
  * @param {(dir: string) => Promise<boolean>} opts.onOpenDir  打开目录（app.js 传入 openDirFromPath，成功返回 true）
  * @param {() => string|null} opts.getRootDir                 当前工作目录
  * @param {() => void} [opts.onStateChange]                   收藏列表变化后的可选回调
+ * @param {boolean} [opts.initialCollapsed]                   初始折叠态（0.5.0 Phase 5a E2：由 settings 记忆）
+ * @param {(collapsed: boolean) => void} [opts.onCollapseChange] 折叠态变化回调（app.js 落盘 + 同步 caret）
  */
-export function createFavorites({ onOpenDir, getRootDir, onStateChange }) {
+export function createFavorites({ onOpenDir, getRootDir, onStateChange, initialCollapsed, onCollapseChange }) {
   const block = $('#fav-block');
   const header = $('#fav-header');
   const caret = $('#fav-caret');
@@ -48,7 +50,10 @@ export function createFavorites({ onOpenDir, getRootDir, onStateChange }) {
   const btn = $('#btn-toggle-fav');
 
   let list = [];
-  let collapsed = false;
+  // E2：折叠态来源唯一 —— 初始化取 settings，此后只在本文件的点击处理里翻转并把新值回调出去
+  let collapsed = !!initialCollapsed;
+  if (block) block.classList.toggle('collapsed', collapsed);
+  if (caret) caret.textContent = collapsed ? '▶' : '▼';
 
   function render() {
     listEl.innerHTML = '';
@@ -154,12 +159,13 @@ export function createFavorites({ onOpenDir, getRootDir, onStateChange }) {
     syncState();
   }
 
-  // 标题行可折叠
+  // 标题行可折叠（E2：折叠态经 onCollapseChange 落盘 settings.sidebarCollapsed）
   header.addEventListener('click', () => {
     collapsed = !collapsed;
     block.classList.toggle('collapsed', collapsed);
     caret.textContent = collapsed ? '▶' : '▼';
+    if (onCollapseChange) onCollapseChange(collapsed);
   });
 
-  return { load, toggle, syncState, isFavorite, getList: () => list.slice() };
+  return { load, toggle, syncState, isFavorite, getList: () => list.slice(), isCollapsed: () => collapsed };
 }

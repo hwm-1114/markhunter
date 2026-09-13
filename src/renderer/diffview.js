@@ -45,8 +45,15 @@ export function computeDiffModel(left, right) {
     blocks.push(rows.length);
     const dels = [];
     const adds = [];
-    while (i < parts.length && parts[i].removed) dels.push(...splitLines(parts[i++].value));
-    while (i < parts.length && parts[i].added) adds.push(...splitLines(parts[i++].value));
+    // v0.3.0：不能用 push(...spread) —— 单块超过 ~12.5 万行时 V8 参数上限触发
+    // RangeError: Maximum call stack size exceeded（实测「空 ↔ 15 万行」直接抛错、
+    // 对比区一片空白且标签栏不刷新）。逐行 push 无上限问题。
+    while (i < parts.length && parts[i].removed) {
+      for (const l of splitLines(parts[i++].value)) dels.push(l);
+    }
+    while (i < parts.length && parts[i].added) {
+      for (const l of splitLines(parts[i++].value)) adds.push(l);
+    }
     const pairs = Math.min(dels.length, adds.length);
     for (let k = 0; k < pairs; k++) {
       ln++; rn++;
@@ -122,6 +129,15 @@ function rowEl(row) {
   return el;
 }
 
+/** 对比计算失败兜底：显示可读错误而不是留一片空白 */
+function renderDiffError(host, err) {
+  const div = document.createElement('div');
+  div.className = 'diff-truncated diff-error';
+  div.textContent = '对比失败：' + (err && err.message ? err.message : String(err));
+  host.appendChild(div);
+  console.error('[diff] 计算失败:', err);
+}
+
 /** 把 diff 标签渲染进 host：工具栏（标签/统计/导航/交换/导出）+ 双栏滚动区。
  *  tab: { kind:'diff', leftLabel, rightLabel, leftContent, rightContent, scrollTop } */
 export function renderDiffTab(tab, host, callbacks = {}) {
@@ -147,11 +163,22 @@ export function renderDiffTab(tab, host, callbacks = {}) {
     host.appendChild(banner);
   }
   if (tab.three) {
-    renderThreeDiff(tab, host, callbacks);
+    try {
+      renderThreeDiff(tab, host, callbacks);
+    } catch (err) {
+      renderDiffError(host, err);
+    }
     return;
   }
 
-  const model = computeDiffModel(lc, rc);
+  let model;
+  try {
+    model = computeDiffModel(lc, rc);
+  } catch (err) {
+    // 计算失败（超大块、内存不足等）：给出可读提示，避免对比区空白 + switchTab 后续流程被异常打断
+    renderDiffError(host, err);
+    return;
+  }
   tab._model = model; // 冒烟断言用
 
   // —— 工具栏 ——
