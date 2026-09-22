@@ -1627,15 +1627,28 @@ const RENDERER_TEST = `
     return writeOk && runOk ? true : 'write=' + writeOk + ',run=' + runOk;
   });
 
-  await step('extCreateRejected', async () => {
-    // 外部目录从未被 approve → 新建被拒（S1 保持）
-    let rejected = false;
-    try {
-      await api.create(extRoot, 'x.md', 'file');
-    } catch (e) {
-      rejected = String(e.message).indexOf('不在当前工作目录内') >= 0;
-    }
-    return rejected;
+  await step('extCreateAllowed', async () => {
+    // v0.5.1：新建全部放开 —— 外部（未批准）目录创建成功，且「创建即批准」使随后的内容写入/读取可用
+    const p = await api.create(extRoot, 'x.md', 'file');
+    await api.writeFile(p, '外部创建内容');
+    const rb = await api.readFile(p);
+    const st = await api.stat(p);
+    const cleanup = await api.remove(p, false).then(() => true).catch(() => false);
+    return !!p && rb.content === '外部创建内容' && st.isFile && cleanup
+      ? true
+      : 'p=' + p + ',content=' + rb.content + ',cleanup=' + cleanup;
+  });
+
+  await step('createAnywhereDeep', async () => {
+    // 任意位置深层创建：父链不存在 → recursive 重建；目录创建同样放开；随后的写入不被拒
+    const deep = await api.create(extRoot + '/anywhere/deep', 'newdir', 'dir');
+    const f = await api.create(extRoot + '/anywhere/deep', 'a.txt', 'file');
+    await api.writeFile(f, 'deep create ok');
+    const rb = await api.readFile(f);
+    const cleanup = await api.remove(extRoot + '/anywhere', true).then(() => true).catch(() => false);
+    return !!deep && rb.content === 'deep create ok' && cleanup
+      ? true
+      : 'deep=' + deep + ',content=' + rb.content + ',cleanup=' + cleanup;
   });
 
   await step('extSwitchRoot', async () => {
@@ -7546,7 +7559,7 @@ async function runSmoke(win) {
             const hasAll = (arr) => Array.isArray(arr) && LABELS.every((l) => arr.indexOf(l) >= 0);
             const conj = {
               'tree-menu-has-5-items': !!(treeMenu && treeMenu.visible === true && hasAll(treeMenu.items)),
-              'tree-menu-keeps-existing': !!(treeMenu && treeMenu.items.indexOf('🔄 刷新') >= 0 && treeMenu.items.indexOf('📁 新建文件') >= 0),
+              'tree-menu-keeps-existing': !!(treeMenu && treeMenu.items.indexOf('🔄 刷新') >= 0 && treeMenu.items.indexOf('📝 新建文件') >= 0),
               'copy-path-writes-clipboard': !!(copyPath && copyPath.clicked === true && copyPath.clip === TEST_ROOT),
               'tab-menu-has-5-items': !!(tabMenu && hasAll(tabMenu.items)),
               'tab-menu-keeps-existing': !!(tabMenu && tabMenu.items.indexOf('✕ 关闭标签') >= 0 && tabMenu.items.indexOf('📌 固定标签') >= 0),

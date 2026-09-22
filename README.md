@@ -10,7 +10,7 @@ A Windows desktop Markdown / text editor built for large files, multi-window edi
 [![Build & Release](https://github.com/hwm-1114/markhunter/actions/workflows/release.yml/badge.svg)](https://github.com/hwm-1114/markhunter/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/%E8%AE%B8%E5%8F%AF%E8%AF%81-MIT-green.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%2010%2F11%20x64-lightgrey)
-![E2E](https://img.shields.io/badge/%E5%86%92%E7%83%9F%E6%B5%8B%E8%AF%95-225%20%E9%A1%B9%E9%80%9A%E8%BF%87-brightgreen)
+![E2E](https://img.shields.io/badge/%E5%86%92%E7%83%9F%E6%B5%8B%E8%AF%95-226%20%E9%A1%B9%E9%80%9A%E8%BF%87-brightgreen)
 
 [📥 下载安装包](#-安装与下载) · [✨ 功能特性](#-功能特性) · [⌨️ 快捷键](#️-快捷键) · [🛠 参与开发](#-开发运行) · [🔒 隐私与安全](#-隐私与安全) · [📖 更新日志](CHANGELOG.md)
 
@@ -129,7 +129,7 @@ cd markhunter
 npm install       # 安装依赖（Electron 走 npmmirror 镜像）
 npm start         # 启动应用
 npm run build     # esbuild 打包渲染进程（改渲染端源码后必须执行）
-npm run smoke     # 端到端冒烟测试（225 项，真实窗口自动化验证；判定用 node scripts/smoke-verify.js）
+npm run smoke     # 端到端冒烟测试（226 项，真实窗口自动化验证；判定用 node scripts/smoke-verify.js）
 npm run release   # 本地打包 NSIS 安装包
 ```
 

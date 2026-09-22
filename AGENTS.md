@@ -1,6 +1,6 @@
 # AGENTS.md — MarkHunter 工作区指引
 
-MarkHunter（马克猎手）是 Windows 桌面 Markdown/文本编辑器，Electron 43 + CodeMirror 6 + markdown-it + mermaid + Tailwind v4/daisyUI 5 主题引擎。中文注释与文档，无独立 lint/typecheck，靠 `npm run smoke`（真实窗口端到端，**225 项**：2026-09-13 起；沿革 **192 → 201 → 208 → 212 → 219 → 223 → 225**，明细见 `CHANGELOG.md`）回归；**判定一律用 `node scripts/smoke-verify.js`**，口径见「历史缺陷归档」首条告警。
+MarkHunter（马克猎手）是 Windows 桌面 Markdown/文本编辑器，Electron 43 + CodeMirror 6 + markdown-it + mermaid + Tailwind v4/daisyUI 5 主题引擎。中文注释与文档，无独立 lint/typecheck，靠 `npm run smoke`（真实窗口端到端，**226 项**：2026-09-22 起；沿革 **192 → 201 → 208 → 212 → 219 → 223 → 225 → 226**，明细见 `CHANGELOG.md`）回归；**判定一律用 `node scripts/smoke-verify.js`**，口径见「历史缺陷归档」首条告警。
 
 ## 常用命令
 
@@ -11,7 +11,7 @@ npm run build        # esbuild 打包渲染进程 + mermaid chunk + tailwind.css
 npm run dev:css      # tailwind watch（调主题样式时用）
 npm run smoke        # 冒烟测试（--smoke 模式，仅开发环境；window.__app 测试接口 dev 独有）
                      # ⚠️ **必须前台跑**，且桌面前台不得被全屏游戏/独占全屏程序占住（否则 rapidSaveEcho 会卡死数分钟到永久）
-node scripts/smoke-verify.js %TEMP%\mh-smoke.log --expect 225 --require reopenClosedTab,ctxMenuCommonItems,findCaseWordRegex,findMatchLimit,hugeRecoverPrompt,hugeRecoverReject
+node scripts/smoke-verify.js %TEMP%\mh-smoke.log --expect 226 --require reopenClosedTab,ctxMenuCommonItems,findCaseWordRegex,findMatchLimit,hugeRecoverPrompt,hugeRecoverReject
                      # 冒烟日志**唯一判定依据**（容忍 UTF-16 与 ANSI）：结果行数 = --expect N、`| false` 0、`| ERR:` 0、非白名单非-true 值 0
                      # ⚠️ 不要用 `SMOKE_OK` 判定（finally 里无条件打印）；detail 串（无 ERR: 前缀）同样是失败
 node scripts/overlay-test.js        # 大文件 overlay 模型探针（纯 node，期望 OVERLAY_PROBE 14/14 failed=0）
@@ -31,7 +31,7 @@ npm run release      # 本地打 NSIS 安装包（scripts/release.ps1）；加 -
 
 ## 架构约定与红线
 
-- **安全模型**（v0.1.39 加固，改动前读 docs/MarkHunter三维度评审报告.md）：渲染进程 sandbox + contextIsolation；主进程文件写/删/改名经 `security.js` 的 `requireApproved`（rootDir 内 or 曾成功 read 过的 approvedSet 路径）；`settings:set` 键白名单 + theme 名单校验；CSP `script-src 'self'`（新增脚本只能同源注入，参考 preview.js 动态加载 mermaid chunk 的做法）；`fs:write-external` 仅 dev。
+- **安全模型**（v0.1.39 加固，改动前读 docs/MarkHunter三维度评审报告.md）：渲染进程 sandbox + contextIsolation；主进程文件写/删/改名经 `security.js` 的 `requireApproved`（rootDir 内 or 曾成功 read 过的 approvedSet 路径；**v0.5.1 例外：`fs:create` 新建文件/目录全部放开、不再校验，且「创建即批准」—— 新建的文件/目录与递归新建的祖先自动进批准面，随后的写入/删除/改名可用；其余写路径口径不变**）；`settings:set` 键白名单 + theme 名单校验；CSP `script-src 'self'`（新增脚本只能同源注入，参考 preview.js 动态加载 mermaid chunk 的做法）；`fs:write-external` 仅 dev。
 - **IPC 契约**：主→渲染事件（`file-changed`（含 `multiEdit` 字段）、`python:*`、`search:progress`、`settings:changed`、`file-shared-open`、`open-dir`、`huge:index-progress`、`huge:doc-save-progress`、`huge:doc-saved`、**`file-lock-changed`**）与 invoke 通道名都在 preload.js 集中声明；search:global 返回 `[{file,line,text,matchIndex}]` 上限 1 万；v0.4.0 大文件线新增 `huge:index`/`huge:line-offset`/`huge:offset-line`/`huge:lines`/`huge:index-drop`（`huge:index-progress` 订阅须退订）；**v0.5.0 Phase 4 跨窗口锁新增 `doc:claim-edit`/`doc:release-edit`/`doc:lock-state`/`doc:set-conflict-prompt`/`doc:get-conflict-prompt`**（锁表长在 `filewatch.js` 的 `watchers` 上，`entry.mode='edit'|'read'`；`file-shared-open` 的只读语义**未变**，接管走独立通道；大文件仍归 `overlay-ipc.js` 的 `WINDOW_NOT_OWNER`，两套规则并行）；**v0.5.0 Phase 5a 系统集成新增 3 条 `shell:open-path` / `shell:open-terminal` / `clipboard:write-text`**（都在 `ipc.js` 的 `registerFileIpc()` 内注册，统一先过 `guardApprovedExisting` = `security.requireApproved` + `statSync` 存在性校验；「在终端打开」的路径**只作 `cwd`**、`argv` 恒 `[]`、`shell:false`、`detached:true`、`stdio:'ignore'`，支持 `opts.dryRun` 只回执「将要怎么做」；剪贴板正文由**主进程按已批准路径自拼**，渲染端只传 `{path,kind}`，传 `text` 不生效）；**崩溃恢复 UI（v0.5.0 挂账项）未新增任何通道**，完全复用既有 `huge:doc-recover-list` + `huge:doc-open`/`edit`/`close` + `fs:*`。
 - **跨窗口「接管编辑」（v0.5.0 Phase 4）**：只读横幅 + 「✏️ 接管编辑」按钮**只在 `tab.readOnly===true` 时出现**（手动只读不会冒按钮）；接管成功 → 原窗口转只读 + toast，**不关窗、不弹原生对话框**；L3 冲突提示**默认关**（打开才不降级并显示 DOM 横幅；关掉时静默保留本窗口内容）。**B3 已修**：`fs.unwatchFile(path, entry.pollFn)` 只摘本窗口的 StatWatcher（不带 listener 会摘掉该路径全部监听 → 被打断的窗口永不重建轮询兜底）。
 - **大文件编辑通道（v0.4.0 Phase D，实现在 `src/main/overlay-ipc.js`；其 `CHANNELS`/`EVENTS` 与 preload 的 `hugeDoc*`/`onHugeDoc*` 一一对应）**：16 个 invoke —— `huge:doc-open`/`close`/`state`/`lines`/`line`/`line-offset`/`offset-line`/`edit`/`insert`/`delete`/`splice`/`undo`/`redo`/`save`/`save-cancel`/`recover-list`；2 个事件 —— `huge:doc-save-progress`（进度 + 终态 `done`/`failed`，失败也必须发，否则进度条永久转圈）与 `huge:doc-saved`（保存成功后通知渲染端重建索引/重挂监听）。约定：**统一单对象入参**、行号 1 基、写通道必须带 `docId`（`huge:doc-open` 返回，同 realpath 复用、跨窗口拒绝），能否编辑取 `huge:doc-open` 的 `editable`/`reason`（GBK/二进制/超大单块 → 只读）。**两个事件订阅都返回退订函数，`hugeview.js` 的 `destroy()` 必须调用**（否则监听器随标签累积泄漏；保存进度订阅在 `save()` 的 finally 退订）；`huge:doc-save` 全程持该 doc 的串行锁，`save-cancel` 是唯一不取锁的通道。渲染端只经这些通道编辑/撤销/保存，**不在渲染端建文档状态机**。

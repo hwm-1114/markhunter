@@ -637,8 +637,8 @@ export function createTree() {
   function showCtx(x, y, node) {
     const items = [];
     if (node.isDir) {
-      items.push({ label: '📁 新建文件', onClick: () => createEntry(node.path, 'file') });
-      items.push({ label: '📂 新建目录', onClick: () => createEntry(node.path, 'dir') });
+      items.push({ label: '📝 新建文件', onClick: () => createEntry(node.path, 'file') });
+      items.push({ label: '📁 新建目录', onClick: () => createEntry(node.path, 'dir') });
       items.push({ sep: true });
       items.push({ label: '🔄 刷新', onClick: () => refreshNode(node.path) });
       if (node.root) {
@@ -708,7 +708,7 @@ export function createTree() {
     const label = type === 'dir' ? '目录名称' : '文件名称（含扩展名）';
     showPrompt(type === 'dir' ? '新建目录' : '新建文件', label, '', async (val) => {
       const p = await window.api.create(parentDir, val, type);
-      toast(`已创建 ${val}`);
+      toast((type === 'dir' ? '📁 已创建目录 ' : '📝 已创建文件 ') + val);
       await refreshNode(parentDir, true);
       select(p);
       // 新建文件后直接打开（与工具栏「新建文件」一致；目录不打开）

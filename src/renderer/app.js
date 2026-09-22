@@ -836,7 +836,7 @@ async function boot() {
     const label = type === 'dir' ? '目录名称' : '文件名称（含扩展名）';
     showPrompt(type === 'dir' ? '新建目录' : '新建文件', label, '', async (val) => {
       const p = await window.api.create(parent, val, type);
-      toast(`已创建 ${val}`);
+      toast((type === 'dir' ? '📁 已创建目录 ' : '📝 已创建文件 ') + val);
       tree.refreshNode(parent, true);
       if (type === 'file') editor.openFile(p);
     });

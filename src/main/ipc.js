@@ -1,4 +1,4 @@
-const { app, ipcMain, dialog, BrowserWindow, shell, clipboard } = require('electron');
+const { app, ipcMain, dialog, BrowserWindow, shell, clipboard, webContents } = require('electron');
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
@@ -76,9 +76,31 @@ function registerFileIpc(_getWindow) {
     return true;
   });
 
-  // v0.2.3 多目录：整表同步侧栏根集合 + 活动目录（写操作在任一根内放行，见 security.setRoots）
-  ipcMain.handle('fs:set-roots', (_e, dirs, active) => {
-    setRoots(Array.isArray(dirs) ? dirs : [], typeof active === 'string' ? active : null);
+  // v0.2.3 多目录：整表同步侧栏根集合 + 活动目录（写操作在任一根内放行，见 security.setRoots）。
+  // v0.5.1 多窗口修复：security.roots 是进程级单例，而每个窗口都会整表同步自己的目录 ——
+  // 后同步的窗口会把先开目录窗口的根集合整个覆盖掉（「写文件有时没权限」的根因）。
+  // 改为按调用窗口记账并取**并集**同步；已销毁窗口的记账随时清理；活动目录以调用方为准（缺席时回退任一窗口的）。
+  const rootsBySender = new Map(); // webContents.id -> { dirs: string[], active: string | null }
+  ipcMain.handle('fs:set-roots', (e, dirs, active) => {
+    const list = Array.isArray(dirs) ? dirs.filter((d) => typeof d === 'string' && d) : [];
+    rootsBySender.set(e.sender.id, { dirs: list, active: typeof active === 'string' ? active : null });
+    for (const sid of [...rootsBySender.keys()]) {
+      const wc = webContents.fromId(sid);
+      if (!wc || wc.isDestroyed()) rootsBySender.delete(sid);
+    }
+    const union = [];
+    const seen = new Set();
+    let fallbackActive = null;
+    for (const rec of rootsBySender.values()) {
+      for (const d of rec.dirs) {
+        const k = String(d).toLowerCase();
+        if (seen.has(k)) continue;
+        seen.add(k);
+        union.push(d);
+      }
+      if (!fallbackActive && rec.active) fallbackActive = rec.active;
+    }
+    setRoots(union, typeof active === 'string' && active ? active : fallbackActive);
     return true;
   });
 
@@ -210,21 +232,34 @@ function registerFileIpc(_getWindow) {
     return { size: st.size, isFile: st.isFile(), isDir: st.isDirectory(), mtime: st.mtimeMs };
   });
 
-  // 新建文件/目录（父目录必须已批准）
+  // 新建文件/目录（v0.5.1 全部放开：不再限制在已打开目录内 —— 无论活动目录是哪个，任意位置创建都能成功，
+  // 父目录缺失时 recursive 重建父链。创建成功即批准该路径：新建文件随后的内容写入/保存不再被拒；
+  // 写入已有文件/删除/改名仍维持原白名单口径不变）
   ipcMain.handle('fs:create', async (_e, parentDir, name, type) => {
     const safe = String(name).replace(/[\\/:*?"<>|]/g, '_').trim();
     if (!safe) throw new Error('名称不合法');
+    if (!parentDir || typeof parentDir !== 'string') throw new Error('缺少创建位置（请先打开一个目录）');
     const target = path.join(parentDir, safe);
-    requireApproved(target, '路径不在当前工作目录内，操作已拒绝');
     if (fs.existsSync(target)) throw new Error(`已存在同名项：${safe}`);
     // 父目录可能已失效（树缓存陈旧：目录被外部移动/删除后行仍在树上）→
-    // recursive 重建父链，避免 ENOENT 裸错误让「新建」表现为无声失败
+    // recursive 重建父链，避免 ENOENT 裸错误让「新建」表现为无声失败。
+    // 记录本次新造的祖先目录（创建即批准用）：删除/改名刚创建的整条链不再被拒
+    const madeParents = [];
+    let anc = path.dirname(target);
+    while (!fs.existsSync(anc)) {
+      madeParents.push(anc);
+      const up = path.dirname(anc);
+      if (up === anc) break;
+      anc = up;
+    }
     if (type === 'dir') {
       await fsp.mkdir(target, { recursive: true });
     } else {
       await fsp.mkdir(path.dirname(target), { recursive: true });
       await fsp.writeFile(target, '', 'utf8');
     }
+    for (const m of madeParents) approve(m);
+    approve(target); // 创建即批准（v0.5.1）：新建文件/目录本身及其后续内容写入均可用
     return target;
   });
 
