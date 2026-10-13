@@ -68,6 +68,11 @@ contextBridge.exposeInMainWorld('api', {
   openTerminal: (p, opts) => ipcRenderer.invoke('shell:open-terminal', p, opts),
   copyText: (payload) => ipcRenderer.invoke('clipboard:write-text', payload),
   readClipboardText: () => ipcRenderer.invoke('clipboard:read-text'),
+  // v0.6.0：文件树与系统剪贴板互通（复制 = CF_HDROP 写入，Explorer 可直接 Ctrl+V；
+  // 粘贴 = 读回 CF_HDROP 复制进目标目录；readFiles 为只读探测面）
+  clipboardCopyFiles: (paths) => ipcRenderer.invoke('clipboard:copy-files', paths),
+  clipboardReadFiles: () => ipcRenderer.invoke('clipboard:read-files'),
+  pasteFiles: (destDir, opts) => ipcRenderer.invoke('fs:paste-files', destDir, opts),
   watchFile: (p, mtime) => ipcRenderer.invoke('fs:watch-file', p, mtime),
   unwatchFile: (p) => ipcRenderer.invoke('fs:unwatch-file', p),
   onFileChanged: (cb) => ipcRenderer.on('file-changed', (_e, d) => cb(d)),

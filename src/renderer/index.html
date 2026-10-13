@@ -5,6 +5,9 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file:; script-src 'self'; object-src 'self' file: data:; base-uri 'none'" />
   <title>MarkHunter</title>
   <link rel="stylesheet" href="dist/tailwind.css" />
+  <!-- v0.6.0：KaTeX 数学公式样式（构建时从 node_modules/katex 拷贝到 dist/katex.css，
+       其引用的字体在 dist/fonts/ 下，与 CSP 的 default-src 'self' 同源兼容） -->
+  <link rel="stylesheet" href="dist/katex.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -30,7 +33,7 @@
     <div class="toolbar-group">
       <button id="btn-preview-mode" class="tbtn" title="切换预览模式">👁 预览</button>
       <button id="btn-diff" class="tbtn" title="对比：当前文档 ↔ 其它标签 / 剪贴板 / 磁盘版本">🔀 对比</button>
-      <button id="btn-run-py" class="tbtn accent" title="运行当前 Python 文件">▶ 运行</button>
+      <button id="btn-run-py" class="tbtn accent" title="运行当前脚本（.py / .bat / .cmd）">▶ 运行</button>
       <button id="btn-settings" class="tbtn" title="设置">⚙ 设置</button>
     </div>
   </header>
@@ -110,7 +113,7 @@
   <footer id="bottom-panel">
     <div class="panel-tabs">
       <button class="ptab" data-panel="find">文件内搜索</button>
-      <button class="ptab" data-panel="python">Python 运行</button>
+      <button class="ptab" data-panel="python">运行（Python / 批处理）</button>
       <div class="panel-actions">
         <span id="save-status" class="save-status"></span>
         <button id="btn-max-panel" class="tbtn small" title="最大化 / 还原面板">⛶</button>

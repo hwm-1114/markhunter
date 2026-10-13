@@ -7,7 +7,8 @@ import { $, escapeHtml, dirName, baseName, confirmDialog, toast } from './ui.js'
 
 const RENDER_BATCH = 200; // 每批渲染的结果行数（P6：分批注入 DOM）
 
-export function createGlobalSearch(getRootDir, onOpenFileAt) {
+/** v0.6.0：全局搜索第三参 —— 名字命中结果（文件名/目录名）点击时的树定位回调 */
+export function createGlobalSearch(getRootDir, onOpenFileAt, onReveal) {
   const input = $('#gs-input');
   const replaceInput = $('#gs-replace-input');
   const count = $('#gs-count');
@@ -117,10 +118,10 @@ export function createGlobalSearch(getRootDir, onOpenFileAt) {
 
   function buildHeader(g) {
     const header = document.createElement('div');
-    header.className = 'gs-file';
+    header.className = 'gs-file' + (g.rows[0] && g.rows[0].kind === 'dir' ? ' gs-dir' : '');
     header.title = g.file;
     const name = document.createElement('span');
-    name.textContent = baseName(g.file);
+    name.textContent = (g.rows[0] && g.rows[0].kind === 'dir' ? '📁 ' : '') + baseName(g.file);
     const dir = document.createElement('span');
     dir.style.cssText = 'color:var(--mh-text-2);font-weight:400;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
     dir.textContent = dirName(g.file);
@@ -128,11 +129,52 @@ export function createGlobalSearch(getRootDir, onOpenFileAt) {
     badge.className = 'gs-count-badge';
     badge.textContent = `${g.rows.length}`;
     header.append(name, dir, badge);
-    header.addEventListener('click', () => onOpenFileAt(g.file, null, currentQuery()));
+    // v0.6.0：纯目录组（目录名命中）点击 = 树定位（目录没有可打开的内容行）
+    const isDirGroup = g.rows.length === 1 && g.rows[0].kind === 'dir';
+    header.addEventListener('click', () => {
+      if (isDirGroup) { if (onReveal) onReveal(g.file); }
+      else onOpenFileAt(g.file, null, currentQuery());
+    });
     return header;
   }
 
+  /** 路径 → 相对活动目录的显示形式（root 外原样显示绝对路径） */
+  function relPath(p) {
+    const root = getRootDir();
+    if (!root) return String(p);
+    const s = String(p);
+    const pref = String(root).replace(/[\\/]+$/, '');
+    if (s.length > pref.length && s.slice(0, pref.length).toLowerCase() === pref.toLowerCase()) {
+      const rest = s.slice(pref.length);
+      if (rest[0] === '\\' || rest[0] === '/') return rest.slice(1);
+    }
+    return s;
+  }
+
   function buildRow(g, r) {
+    // v0.6.0：名字命中行（文件名/目录名）—— 显示图标 + 高亮文件名 + 相对路径；
+    // 点击 = 左侧文件树定位（不打开文件：找位置的意图优先；打开请点文件头行）
+    if (r.kind === 'dir' || r.kind === 'name') {
+      const row = document.createElement('div');
+      row.className = 'find-result gs-name-row' + (r.kind === 'dir' ? ' gs-dir-row' : '');
+      const tag = document.createElement('span');
+      tag.className = 'r-line';
+      tag.textContent = r.kind === 'dir' ? '📁' : '📄';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'r-text';
+      const rel = relPath(r.file);
+      const bn = baseName(r.file);
+      const relDir = rel === bn ? '' : rel.slice(0, rel.length - bn.length).replace(/[\\/]$/, '');
+      nameEl.innerHTML =
+        '<b>' + highlight(bn, currentQuery()) + '</b>' +
+        '<span style="color:var(--mh-text-2);font-size:11.5px;">' +
+        (relDir ? '　' + escapeHtml(relDir) : '') +
+        (r.kind === 'dir' ? '　<em style="font-style:normal;opacity:.75;">（目录）</em>' : '') +
+        '</span>';
+      row.append(tag, nameEl);
+      row.addEventListener('click', () => { if (onReveal) onReveal(r.file); });
+      return row;
+    }
     const row = document.createElement('div');
     row.className = 'find-result';
     const lineNo = document.createElement('span');
@@ -183,6 +225,8 @@ export function createGlobalSearch(getRootDir, onOpenFileAt) {
     const rep = replaceInput.value;
     const files = [];
     for (const r of lastResults) {
+      // v0.6.0：目录名命中不是可替换对象（readFile 目录必失败，会误计入失败数）
+      if (r.kind === 'dir') continue;
       if (!files.includes(r.file)) files.push(r.file);
     }
     const shown = resultsTotal();

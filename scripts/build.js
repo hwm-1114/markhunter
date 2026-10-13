@@ -51,11 +51,28 @@ async function main() {
     logLevel: 'info',
   });
 
-  // 4) 体积对比（P5 收益记录）
+  // 4) KaTeX 静态资源（v0.6.0 数学公式）：katex.min.css → dist/katex.css，
+  //    其引用的字体（fonts/*.woff2 等，url 相对 css 位置）→ dist/fonts/。
+  //    index.html 以 <link href="dist/katex.css"> 同源引入，CSP default-src 'self' 兼容；
+  //    electron-builder 的 files: src/**/* 已覆盖这两个产物（与 bundle.js 同目录）。
+  const katexPkg = path.join(root, 'node_modules', 'katex', 'dist');
+  const katexCssOut = path.join(root, 'src', 'renderer', 'dist', 'katex.css');
+  const katexFontsOut = path.join(root, 'src', 'renderer', 'dist', 'fonts');
+  fs.copyFileSync(path.join(katexPkg, 'katex.min.css'), katexCssOut);
+  fs.rmSync(katexFontsOut, { recursive: true, force: true });
+  fs.mkdirSync(katexFontsOut, { recursive: true });
+  for (const f of fs.readdirSync(path.join(katexPkg, 'fonts'))) {
+    // 只拷 woff2（Chromium 原生支持，体积约为 woff/ttf 的 60%；css 的 src 列表按序回退，
+    // 缺失的格式浏览器自动跳过）
+    if (f.endsWith('.woff2')) fs.copyFileSync(path.join(katexPkg, 'fonts', f), path.join(katexFontsOut, f));
+  }
+
+  // 5) 体积对比（P5 收益记录）
   const fmt = (n) => (n / 1024 / 1024).toFixed(2) + ' MB';
   const bundleSize = fs.statSync(bundleOut).size;
   const chunkSize = fs.existsSync(mermaidOut) ? fs.statSync(mermaidOut).size : -1;
-  console.log('[build] bundle.js =', fmt(bundleSize), '| mermaid-chunk.js =', fmt(chunkSize), '| 合计 =', fmt(bundleSize + Math.max(0, chunkSize)));
+  const katexCssSize = fs.statSync(katexCssOut).size;
+  console.log('[build] bundle.js =', fmt(bundleSize), '| mermaid-chunk.js =', fmt(chunkSize), '| katex.css =', fmt(katexCssSize), '| 合计 =', fmt(bundleSize + Math.max(0, chunkSize) + katexCssSize));
 }
 
 main().catch((err) => {

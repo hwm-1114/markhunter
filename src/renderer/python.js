@@ -89,12 +89,13 @@ export function createPythonPanel(getTab, getSettings, onSave) {
   async function run() {
     const tab = getTab();
     if (!tab) {
-      toast('请先打开一个 Python 文件');
+      toast('请先打开一个可运行文件（.py / .bat / .cmd）');
       return;
     }
     const name = tab.name.toLowerCase();
-    if (!name.endsWith('.py')) {
-      toast('当前文件不是 .py，无法运行');
+    const isBat = name.endsWith('.bat') || name.endsWith('.cmd');
+    if (!name.endsWith('.py') && !isBat) {
+      toast('当前文件不是 .py / .bat / .cmd，无法运行');
       return;
     }
     if (running) {
@@ -118,11 +119,15 @@ export function createPythonPanel(getTab, getSettings, onSave) {
         return;
       }
     }
-    const settings = getSettings();
-    const pythonPath = (settings.pythonPath || '').trim();
+    // pythonPath 只对 .py 有意义（批处理由主进程交给 cmd.exe 执行）
+    let pythonPath;
+    if (!isBat) {
+      const settings = getSettings();
+      pythonPath = (settings.pythonPath || '').trim() || undefined;
+    }
     setStatus('启动中…', 'running');
     try {
-      await window.api.runPython(tab.path, pythonPath || undefined);
+      await window.api.runPython(tab.path, pythonPath);
     } catch (err) {
       setStatus('启动失败');
       append(`\n[错误] ${err.message || err}\n`, 'stderr');

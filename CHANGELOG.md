@@ -1,5 +1,39 @@
 # 更新说明（Changelog）
 
+## v0.6.0（2026-10-13）
+
+主题：**五项生产力优化**——批处理运行、文件树与系统剪贴板互通、重命名改扩展名即时生效、Markdown 数学公式（KaTeX）、全局搜索文件名/目录名。
+
+### 新功能：批处理脚本运行（.bat / .cmd）
+- `▶ 运行` 按钮与底部运行面板不再只认 `.py`：`.bat` / `.cmd` 批处理由主进程以 `cmd.exe /d /s /c <脚本>` 执行（**路径只作为单个 argv 传给 cmd，不 `shell:true`、不做字符串拼接**，含空格路径由 Node 自动加引号），cwd 为脚本所在目录；与 Python 共用同一套进程管理（进程树终止 / 输出 60ms·4KB 合批 / runSeq 迟到退出守卫）与 `python:*` 事件协议，渲染端面板零协议改动。批处理输出按系统代码页解码（中文 Windows = GBK；ASCII 两种编码字节一致不受影响），`StringDecoder` 不认 GBK，主进程以 WHATWG `TextDecoder('gbk', {stream:true})` 包成同形解码器。
+- 面板 tab 文案改为「运行（Python / 批处理）」，运行按钮可用口径 = `.py / .bat / .cmd`（`ui.isRunnableScript`），`pythonPath` 设置只对 `.py` 生效。
+
+### 新功能：文件树 ⇄ 系统剪贴板互通（Ctrl+C / Ctrl+V 复制粘贴文件与文件夹）
+- **复制**：树中选中文件或目录后 `Ctrl+C`（或树右键「📋 复制（Ctrl+C）」）→ 路径以 Windows **CF_HDROP**（DROPFILES 结构，`pFiles=20`、`fWide=1`、**双 null 终止**——HDROP 无计数字段，消费方靠双终止判界）写入系统剪贴板：资源管理器、桌面等一切接受文件粘贴的目标都能直接 `Ctrl+V`。源路径须过 `requireApproved` 且真实存在（与「复制路径」同口径）。
+- **粘贴**：树中 `Ctrl+V`（或右键「📥 粘贴到此处」）→ 读回 CF_HDROP 文件列表逐个复制进当前选中目录（`fs.cp` 递归，目录合并语义）。**源来自系统剪贴板**（用户在资源管理器 `Ctrl+C` 的任意路径），语义等同"把外部文件拖进窗口"，源不要求白名单；目标目录必须已批准且存在。冲突三选（应用内弹窗）：覆盖 / 保留两者（`name (2)` 自动改名，与拖拽传输同款）/ 取消；ask 模式**先整单预检**（任一冲突即整体不落盘，杜绝半截粘贴）。
+- 新增 IPC：`clipboard:copy-files`（写，源过白名单）、`clipboard:read-files`（只读探测）、`fs:paste-files`（粘贴落地，目标过白名单）；粘贴成功 `markSelfWrite` 吸收监听回声 + `approve` 新文件（立即可编辑）。
+- 树容器 `tabIndex=0` 可聚焦：**真实点击/右键树行把焦点收进树**（此后 `Ctrl+C/V` 作用于树；`e.isTrusted` 区分合成事件，冒烟/自动化不受影响），树不画焦点轮廓；焦点在编辑器时行为完全不变。
+
+### 修复：重命名改变扩展名后不生效（如 .txt 改 .md 无预览/无高亮）
+- 根因：树重命名回调只更新 `tab.path/name`，`tab.lang` 与 CodeMirror 语言模式停留在旧扩展名，且无任何依赖扩展名的 UI 刷新。现在 `onClosePath` 重命名分支调用新增的 `editor.reconfigureTabLang(tab, langFor(newPath))`（`langCompartment` 在线热切换，**同文档多视图逐个 reconfigure**，与只读热切换同款做法，不重建 DOM 不丢光标），并统一刷新预览图层显隐（`applyMode`）、预览按钮、大纲显隐、运行按钮四类依赖扩展名的 UI。
+
+### 新功能：Markdown 数学公式（KaTeX）全面支持
+- 新增 `src/renderer/katex-math.js` markdown-it 插件（+ `katex` 依赖，静态打进主 bundle）：**块级** `$$ ... $$`（单行/跨行）与 `\[ ... \]`，**行内** `$...$` 与 `\( ... \)`；渲染失败不中断整篇（`throwOnError:false` 红字原码 + 插件层兜底占位 `.mh-math-error`）。
+- 误判防御（全部有真实样例覆盖）：`$5 和 $10` 货币写法不进公式（`$` 后/闭合 `$` 前不得是空白、内容不得跨行、空内容不算）；行内代码与围栏代码块/mermaid 块内的 `$` 天然不解析（注册位次：block 在 `paragraph` 前、fence 之后；inline 在 `escape` 前，backticks 一次性消费 code span）；`$$` 未闭合时按普通段落原样渲染不吞内容；`\$` 转义保留字面量。
+- 资源链路：构建时 `katex.min.css` → `dist/katex.css`、`fonts/*.woff2` → `dist/fonts/`（css 内 `url(fonts/...)` 相对引用天然成立，CSP `default-src 'self'` 同源兼容）；样式补块级公式横向滚动（长公式不撑破分栏）、行内字号微调；KaTeX 字色继承 `currentColor`，56 套明暗主题自动适配。
+- 流程图（mermaid）适配顺带加固：既有横向滚动/主题缓存/错误占位口径不变，公式与流程图可在同一文档混排互不干扰（冒烟覆盖）。
+
+### 新功能：全局搜索支持文件名与目录名（点击在文件树定位）
+- `search-worker.js` 遍历改为 `walk(dir, {withDirs:true})`（目录也作为条目产出；`Ctrl+P` 文件清单口径不变），**文件名与目录名参与匹配**（大小写不敏感子串，与内容同口径；名字匹配对任意扩展名文件生效——找二进制文件的名字也算），结果条目新增 `kind` 字段：`'name'`（文件名命中，line=0）/ `'dir'`（目录名命中，line=0）/ 缺省=内容命中（既有形态，替换等消费方零改动兼容）；名字命中与内容命中可并存。
+- 渲染端：名字行显示图标 + 高亮文件名 + 相对活动目录的路径（目录行加「（目录）」标记）；**点击名字/目录结果行 = 左侧文件树直接跳转定位**（展开父级链 + 选中滚动到可见，不打开文件——找位置意图优先）；文件头行点击仍打开文件；「全部替换」自动跳过目录结果（readFile 目录必失败）。
+
+### 测试
+- 冒烟新增 5 项（**226 → 231**）：`runBat`（cmd 批处理运行输出/退出码 + 运行按钮对 .bat 可用）、`renameExtSwitch`（走真实树重命名弹窗：.txt→.md 后 `tab.lang` 切换、预览出现且含 KaTeX）、`treeClipboard`（Ctrl+C 合成键路径 → CF_HDROP 剪贴板往返 → ask 冲突拒粘/dedupe 落地 `name (2)`/树级粘贴入口全链）、`mathRender`（块级/行内/`\(``\[`/货币防御/代码内不解析，katex=4 display=2）、`gsNameDir`（文件名/目录名命中 kind 断言 + 点击名字行后树 `.selected` 定位）。
+- 既有用例口径更新：主流程 `globalSearch` 的 hello 匹配数 2 → 3（v0.6.0 起文件名也计 1 处）；`searchCancel`/`hugeSearchFast`/`bigSearchStream`/`globalSearchUI`/`gsHighlight`/`globalReplace` 的关键词均不在任何文件名/目录名中，断言不变。
+- **extCtxMenu 假红排障记录（2026-10-13，非产品缺陷）**：v0.6.0 开发中 `extCtxMenu` 连续 6 轮红（`no file node`），产品代码整体 stash 回基线后**仍红**，确诊为**环境敏感**而非回归——外部链 reveal 需 `readTree` 盘符→目标的每一级目录，夹具 EXT_ROOT 原挂在 `AppData\Local\Temp` 下，开发机 Temp 积累数千条目（`fs:read-tree` 逐条 `statSync`）导致单次 readTree(Temp) 达数秒，链展开在等待窗口内完不成。处置：EXT_ROOT 改挂 `os.homedir()` 直下（链更短、条目少；长拼写与 8.3 短名规避不变），`extCtxMenu` 的文件行查找从固定 400ms 改为与 `extReveal` 同款 `waitFor` 轮询。**教训已注在 smoke.js 的 EXT_ROOT 定义处**：今后外部链用例变慢先查夹具父链的目录体量。
+- 插件层单测：markdown-it + KaTeX 11 种形态全过（含 mermaid fence 不被 `$$` 误吃、未闭合回退、`\$` 转义）；CF_HDROP 结构单测（双 null 终止、UTF-16 往返、单/多路径）+ Electron 真机探针（writeBuffer/readBuffer('CF_HDROP') 往返、writeBuffer 替换整个剪贴板的语义确认——树复制会清掉旧剪贴板内容，与 Explorer 行为一致）。
+- 验收：`npm run smoke` **231 项全绿**（`SMOKE_VERIFY OK`：true 226 + 信息型 5（`findAll`/`pyUI`/`hugeIndexCold`/`hugeIndexCache`/`hugeSearchFast`），false 0，ERR 0）。
+
 ## v0.5.1（2026-09-22）
 
 ### 新建文件/目录：权限全部放开 + 多窗口权限根因修复

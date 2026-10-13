@@ -11,7 +11,7 @@ import { createOutline } from './outline.js';
 import { createQuickOpen } from './quickopen.js';
 import { createHelp, matchShortcut, shortcutRows } from './help.js';
 import { createRecover } from './recover.js';
-import { isMarkdown, isPython } from './ui.js';
+import { isMarkdown, isRunnableScript, langFor } from './ui.js';
 
 async function boot() {
   // 全局错误捕获（辅助排查，console 输出会被主进程 --smoke 转发）
@@ -390,7 +390,12 @@ async function boot() {
     if (p) previewFor(p.id).refreshMermaid();
   }
   find = createFind(() => editor, getActiveTab);
-  globalSearch = createGlobalSearch(() => state.rootDir, openFileAt);
+  // v0.6.0：第三参 onReveal —— 文件名/目录名命中结果点击时在左侧文件树定位（不打开文件）
+  globalSearch = createGlobalSearch(
+    () => state.rootDir,
+    openFileAt,
+    (p) => { tree.reveal(p).catch(() => {}); }
+  );
   python = createPythonPanel(getActiveTab, () => state.settings, (tab) => editor.saveNow(tab));
   tree = createTree();
   // B1：大纲 / TOC 侧栏（数据源 = 焦点栏的活动文档；见 outline.js 顶部三条硬口径）
@@ -412,8 +417,9 @@ async function boot() {
   const recover = createRecover({ api: window.api, editor });
 
   function updateRunButton() {
+    // v0.6.0：▶ 运行可用口径扩为 .py / .bat / .cmd（主进程 python:run 同步支持批处理）
     const tab = getActiveTab();
-    $('#btn-run-py').disabled = !(tab && isPython(tab.name));
+    $('#btn-run-py').disabled = !(tab && !tab.kind && isRunnableScript(tab.name));
   }
 
   // ---------- B8：字号步进（Ctrl+= / Ctrl+-）与「视图缩放复位」（Ctrl+0） ----------
@@ -676,6 +682,10 @@ async function boot() {
         if (newPath) {
           tab.path = newPath;
           tab.name = newPath.split(/[\\/]/).pop();
+          // v0.6.0：扩展名随重命名改变时，语言模式按新扩展名热切换 —— 此前只改
+          // path/name，tab.lang 与编辑器语法高亮停留在旧扩展名（.txt 改 .md 后
+          // 预览/高亮双双不生效的根因之一）。多视图下对每个绑定视图 reconfigure。
+          editor.reconfigureTabLang(tab, langFor(newPath));
           editor.renderTabs();
           // 重命名后旧路径已不存在：停止旧监听，为新路径重建文件监听
           window.api.unwatchFile(p);
@@ -686,6 +696,13 @@ async function boot() {
             })
             .catch(() => {});
           syncExternalTree(); // 外部文件重命名后同步外部区（原路径移除、新路径加入）
+          // 依赖扩展名的 UI 全部跟随刷新：预览图层显隐（md 才有）、预览按钮、
+          // 大纲显隐（非 md 整体隐藏）、▶ 运行按钮（.py/.bat/.cmd）
+          const pid = editor.paneIdOf(tab) || editor.getFocusPaneId();
+          try { previewFor(pid).applyMode(); } catch (err) { console.warn('[rename]', err && err.message ? err.message : err); }
+          setPreviewLabel();
+          updateRunButton();
+          if (outline) outline.refresh();
         } else {
           // 删除路径：不保存（save:false）—— 否则 dirty 标签的保存会把已删除的文件写回磁盘
           editor.closeByPath(p, false, { save: false });

@@ -222,7 +222,12 @@ async function runFileList(id, dir) {
   }
 }
 
-async function* walk(dir) {
+/** 递归遍历目录。
+ *  缺省只产出文件路径（string）—— runFileList（Ctrl+P 快速打开）沿用；
+ *  opts.withDirs=true 时产出 { path, isDir }（目录也会作为条目产出）——
+ *  全局搜索用它做**文件名/目录名匹配**（v0.6.0：全局搜索的匹配对象扩为
+ *  文件内容 + 文件名 + 目录名，三者共用同一次遍历）。 */
+async function* walk(dir, opts = {}) {
   let entries;
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true });
@@ -234,21 +239,40 @@ async function* walk(dir) {
     const full = path.join(dir, ent.name);
     if (ent.isDirectory()) {
       if (SKIP_DIRS.has(ent.name)) continue;
-      yield* walk(full);
+      if (opts.withDirs) yield { path: full, isDir: true };
+      yield* walk(full, opts);
     } else {
-      yield full;
+      if (opts.withDirs) yield { path: full, isDir: false };
+      else yield full;
     }
   }
 }
 
-/** 单任务执行：返回 { results } 或 { cancelled: true }（任务被替换/取消时提前退出） */
+/** 单任务执行：返回 { results } 或 { cancelled: true }（任务被替换/取消时提前退出）。
+ *  v0.6.0：除文件内容外，**文件名与目录名**也参与匹配（大小写不敏感子串，与内容同口径）。
+ *  结果条目的 kind 字段：'name'（文件名命中，line=0）/ 'dir'（目录名命中，line=0）/
+ *  缺省 = 内容命中（既有形态，渲染端与替换逻辑零改动兼容）。名字命中与内容命中可并存
+ *  （同一文件两条结果，渲染端按文件分组后行级区分展示）。 */
 async function runSearch(id, dir, query, maxResults) {
   const q = String(query).toLowerCase();
   const isCancelled = () => cancelled || currentId !== id;
   const results = [];
   let scanned = 0;
-  for await (const file of walk(dir)) {
+  for await (const ent of walk(dir, { withDirs: true })) {
     if (isCancelled()) return { cancelled: true };
+    // 名字匹配（文件名与目录名统一处理）
+    if (path.basename(ent.path).toLowerCase().indexOf(q) >= 0) {
+      results.push({
+        file: ent.path,
+        line: 0,
+        text: '',
+        matchIndex: 0,
+        kind: ent.isDir ? 'dir' : 'name',
+      });
+      if (results.length >= maxResults) return { results };
+    }
+    if (ent.isDir) continue; // 目录无内容可扫
+    const file = ent.path;
     scanned++;
     if (scanned % PROGRESS_EVERY === 0) {
       process.parentPort.postMessage({ id, type: 'progress', scanned, matches: results.length });

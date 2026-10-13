@@ -2607,6 +2607,24 @@ export function createEditor(callbacks) {
     return true;
   }
 
+  /** v0.6.0：重命名改变了文件扩展名后，把文档的语言模式按新扩展名热切换
+   *  （langCompartment reconfigure，与 setTabReadOnly 同款"文档级多视图"做法 ——
+   *  同一文档在两栏各有视图时每个 view 都要 reconfigure，否则另一栏语法高亮停在旧语言）。
+   *  lang 不变时幂等返回（调用方无需自行比对）。图片/对比/大文件等 kind 标签不适用。 */
+  function reconfigureTabLang(tab, lang) {
+    if (!tab || tab.kind || !tab.state) return false;
+    const next = lang || tab.lang || 'text';
+    if (tab.lang === next) return false;
+    tab.lang = next;
+    const views = registry.viewsOf(tab);
+    for (const vw of views) {
+      try { vw.dispatch({ effects: langCompartment.reconfigure(langExt(next)) }); } catch { /* 视图已销毁 */ }
+    }
+    const pv = primaryViewOf(tab);
+    if (pv) tab.state = pv.state;
+    return true;
+  }
+
   // ==========================================================================
   // 0.5.0 Phase 4：跨窗口「接管编辑」（L2）+ 冲突提示（L3，默认关）
   // --------------------------------------------------------------------------
@@ -3686,7 +3704,7 @@ export function createEditor(callbacks) {
     }
   }
 
-  return { openFile, openDiffTab, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs, scrollToTop, scrollToBottom, viewerJump, setViewerEditing, revealViewerAt, slideViewerWindow: slideViewer, setTabReadOnly, toggleReadOnly, ensureFullyLoaded,
+  return { openFile, openDiffTab, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs, scrollToTop, scrollToBottom, viewerJump, setViewerEditing, revealViewerAt, slideViewerWindow: slideViewer, setTabReadOnly, toggleReadOnly, reconfigureTabLang, ensureFullyLoaded,
     // ---------- 0.5.0 Phase 2：分栏 API（app.js 的 Ctrl+\ / Ctrl+1/2 与冒烟 split* 用例使用） ----------
     /** 分屏/合屏开关：单栏 → 右侧开一个空栏并聚焦；两栏 → 合并回单栏。返回合栏后的栏数 */
     toggleSplit: () => { toggleSplit(); return panes.length; },

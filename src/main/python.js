@@ -235,15 +235,23 @@ function registerPythonIpc(_getWindow) {
     return found;
   });
 
-  // 运行 Python 脚本（S7：扩展名 + 路径校验；pythonPath 必须为合法解释器）
+  // 运行脚本（S7：扩展名 + 路径校验；pythonPath 必须为合法解释器）。
+  // v0.6.0 起支持 .bat / .cmd 批处理：由 cmd.exe /d /s /c 执行（cwd = 脚本所在目录），
+  // 与 Python 共用同一套进程管理（currentProc / killTree / 输出聚合 / runSeq 令牌），
+  // 渲染端面板与 python:* 事件协议零改动。
   ipcMain.handle('python:run', async (_e, payload) => {
     const { filePath, pythonPath } = payload || {};
     if (!filePath) throw new Error('缺少脚本文件路径');
-    if (!/\.py$/i.test(String(filePath))) throw new Error('只能运行 .py 脚本文件');
+    const fp = String(filePath);
+    const isBat = /\.(bat|cmd)$/i.test(fp);
+    if (!isBat && !/\.py$/i.test(fp)) throw new Error('只能运行 .py / .bat / .cmd 脚本文件');
     if (!isApproved(filePath)) throw new Error('脚本文件不在当前工作目录内，操作已拒绝');
     if (!fs.existsSync(filePath)) throw new Error('脚本文件不存在');
     let interpreter = 'python';
-    if (pythonPath) {
+    if (isBat) {
+      // 批处理解释器 = cmd.exe（COMSPEC 缺省回退）。pythonPath 参数对批处理无意义，忽略。
+      interpreter = process.env.COMSPEC || 'cmd.exe';
+    } else if (pythonPath) {
       const pp = String(pythonPath).trim();
       if (!pp) throw new Error('Python 解释器路径为空');
       if (!fs.existsSync(pp) || !fs.statSync(pp).isFile()) {
@@ -265,14 +273,42 @@ function registerPythonIpc(_getWindow) {
     const batcher = createOutputBatcher(() => win);
     // v0.3.0：按流增量解码 —— 直接 d.toString('utf8') 会在管道分块边界切断多字节字符，
     // 输出里出现 U+FFFD（实测 sys.stdout.write("中"*100000) 出现 8 个替换符）。
-    const decStdout = new StringDecoder('utf8');
-    const decStderr = new StringDecoder('utf8');
+    // v0.6.0：批处理（cmd.exe）默认按系统代码页输出（中文 Windows = GBK）——
+    // ASCII 部分两种编码字节一致，中文按 GBK 解才能可读；若脚本自行 chcp 65001 输出
+    // UTF-8 中文则需在 bat 内部自行保证（罕见场景，权衡取 GBK）。
+    // StringDecoder 只认 utf8/utf16le/latin1 系，GBK 走 WHATWG TextDecoder（stream:true
+    // 同样正确处理分块边界的截断多字节序列）；统一包成 { write, end } 形状，调用点零改动。
+    const batEnc = isBat && process.platform === 'win32' ? 'gbk' : 'utf8';
+    const makeDecoder = (enc) => {
+      if (/^(utf-?8|utf16le|latin1)$/i.test(enc)) {
+        const sd = new StringDecoder(enc);
+        return { write: (b) => sd.write(b), end: () => sd.end() };
+      }
+      try {
+        const td = new TextDecoder(enc);
+        return { write: (b) => td.decode(b, { stream: true }), end: () => td.decode() };
+      } catch {
+        const sd = new StringDecoder('utf8'); // 未知编码回退（防御，正常到不了这里）
+        return { write: (b) => sd.write(b), end: () => sd.end() };
+      }
+    };
+    const decStdout = makeDecoder(batEnc);
+    const decStderr = makeDecoder(batEnc);
     // 使用 ['--', filePath]：避免以 '-' 开头的文件名被解释为解释器选项
-    const child = spawn(interpreter, ['--', filePath], {
-      cwd: path.dirname(filePath),
-      windowsHide: true,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-    });
+    // 批处理走 cmd.exe ['/d','/s','/c', filePath]：路径只作为单个 argv 传给 cmd
+    //（Node 会为含空格路径自动加引号；不使用 shell:true，杜绝元字符拼接面），
+    // PYTHONIOENCODING 对 cmd 无害（它会忽略不认识的环境变量）。
+    const child = isBat
+      ? spawn(interpreter, ['/d', '/s', '/c', fp], {
+          cwd: path.dirname(fp),
+          windowsHide: true,
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+        })
+      : spawn(interpreter, ['--', filePath], {
+          cwd: path.dirname(filePath),
+          windowsHide: true,
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+        });
     currentProc = child;
     const token = ++runSeq;
     win.webContents.send('python:start', { interpreter, file: filePath, token });

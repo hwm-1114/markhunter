@@ -582,6 +582,117 @@ function registerFileIpc(_getWindow) {
     clipboard.writeText(text);
     return { ok: true, path: g.path, kind, text, length: text.length };
   });
+
+  // ==========================================================================
+  // v0.6.0：文件/文件夹经系统剪贴板复制粘贴（文件树 Ctrl+C / Ctrl+V，与资源管理器互通）
+  // --------------------------------------------------------------------------
+  // 复制 = 把选中项路径以 Windows **CF_HDROP**（DROPFILES 结构 + 双 \0 结尾的 UTF-16 路径
+  //   列表）写入系统剪贴板 —— 资源管理器 / 桌面等一切接受"文件粘贴"的目标都能直接 Ctrl+V。
+  //   Chromium 的 Windows 剪贴板层把 "CF_HDROP" 字符串映射为标准剪贴板格式 CF_HDROP
+  //   （非 RegisterClipboardFormat 的自造格式），因此 Explorer 认得出。
+  // 粘贴 = 读回 CF_HDROP 列表，逐个复制进目标目录。**源路径来自系统剪贴板**（用户在资源
+  //   管理器里 Ctrl+C 的任意路径，应用外）—— 语义等同"把外部文件拖进窗口"，源不要求白名单；
+  //   目标目录必须过 requireApproved + 真实存在（写盘面与 create/rename/transfer 一致）。
+  //   自包含防御：源等于目标、目标是源的子目录时跳过该项（与 fs:transfer 同口径）。
+  // ==========================================================================
+
+  /** 构造 CF_HDROP 载荷：20 字节 DROPFILES 头（pFiles=20, pt=(0,0), fNC=0, fWide=1）+ UTF-16 路径列表。
+   *  列表按规范以**双 null**（连续两个 UTF-16 0x0000）终止 —— HDROP 结构没有计数字段，
+   *  消费方（Explorer/DragQueryFile）靠双终止判断列表结束，单终止会读越界。 */
+  function buildHDROP(paths) {
+    const listBuf = Buffer.from(paths.join('\0') + '\0\0', 'utf16le'); // 每条路径一个 \0 分隔 + 整体一个 \0 终止
+    const buf = Buffer.alloc(20 + listBuf.length);
+    buf.writeUInt32LE(20, 0);  // pFiles：文件列表相对结构体起点的偏移
+    buf.writeInt32LE(0, 4);    // pt.x（粘贴位置无关，置 0）
+    buf.writeInt32LE(0, 8);    // pt.y
+    buf.writeUInt32LE(0, 12);  // fNC（非客户区标志，无关）
+    buf.writeUInt32LE(1, 16);  // fWide=1：路径列表为 UTF-16
+    listBuf.copy(buf, 20);
+    return buf;
+  }
+
+  /** 解析 CF_HDROP 载荷 → 路径数组（fWide=0 的 ANSI 形态一并兼容；结构异常返回 []） */
+  function parseHDROP(buf) {
+    if (!Buffer.isBuffer(buf) || buf.length < 20) return [];
+    const pFiles = buf.readUInt32LE(0);
+    const fWide = buf.readUInt32LE(16);
+    if (pFiles <= 0 || pFiles >= buf.length) return [];
+    const raw = fWide
+      ? buf.toString('utf16le', pFiles)
+      : buf.toString('latin1', pFiles);
+    return raw.split('\0').map((s) => s.trim()).filter(Boolean);
+  }
+
+  // 复制文件/文件夹到系统剪贴板（每条路径都必须已批准且存在 —— 与 clipboard:write-text 同口径）
+  ipcMain.handle('clipboard:copy-files', (_e, paths) => {
+    const list = (Array.isArray(paths) ? paths : [paths])
+      .map((p) => String(p || '').trim())
+      .filter(Boolean);
+    if (list.length === 0) return { ok: false, reason: 'EMPTY', message: '没有可复制的路径' };
+    for (const p of list) {
+      const g = guardApprovedExisting(p);
+      if (!g.ok) return g;
+    }
+    clipboard.writeBuffer('CF_HDROP', buildHDROP(list));
+    return { ok: true, count: list.length };
+  });
+
+  // 读剪贴板文件列表（paste 的探测面 / 冒烟用：只读，不写盘）
+  ipcMain.handle('clipboard:read-files', () => {
+    const files = parseHDROP(clipboard.readBuffer('CF_HDROP')).filter((p) => fs.existsSync(p));
+    return { ok: true, count: files.length, files };
+  });
+
+  // 把剪贴板里的文件/文件夹复制进目标目录。
+  // opts.conflict：'ask'（默认，冲突即整单返回由渲染端弹窗确认，**一个都不先粘**，避免半截状态）
+  //   | 'dedupe'（自动改名 name (2).ext）| { overwrite: true }（覆盖/合并，与 fs:transfer 语义一致）
+  ipcMain.handle('fs:paste-files', async (_e, destDir, opts = {}) => {
+    const dst = normalize(destDir);
+    requireApproved(dst, '目标目录不在已打开目录内，操作已拒绝');
+    let dstSt;
+    try {
+      dstSt = fs.statSync(dst);
+    } catch {
+      return { ok: false, reason: 'ENOENT', message: `目标目录不存在：${dst}` };
+    }
+    if (!dstSt.isDirectory()) return { ok: false, reason: 'NOT_A_DIR', message: `目标不是目录：${dst}` };
+    const files = parseHDROP(clipboard.readBuffer('CF_HDROP'))
+      .filter((p) => { try { return fs.statSync(p).isFile() || fs.statSync(p).isDirectory(); } catch { return false; } });
+    if (files.length === 0) return { ok: false, reason: 'EMPTY', message: '剪贴板里没有可粘贴的文件' };
+
+    // 先做整单冲突预检（ask 模式）：任一目标名已存在 → 返回冲突，由渲染端确认后重调
+    const overwrite = opts.overwrite === true;
+    const strategy = opts.conflict || 'ask';
+    const pending = []; // { src, name, dest }
+    for (const src of files) {
+      const name = path.basename(src);
+      const dest = path.join(dst, name);
+      if (samePath(src, dst) || isUnderDir(dst, src)) continue; // 源==目标 / 目标在源内部：跳过
+      if (fs.existsSync(dest)) {
+        if (!overwrite && strategy === 'ask') {
+          return { ok: false, conflict: true, name, count: files.length };
+        }
+        if (!overwrite && strategy === 'dedupe') {
+          const deduped = path.join(dst, dedupeName(dst, name));
+          pending.push({ src, name: path.basename(deduped), dest: deduped });
+          continue;
+        }
+        // overwrite（或 dedupe 之外的既有路径）：类型不一致先清目标（目录 vs 文件无法合并）
+        const srcIsDir = fs.statSync(src).isDirectory();
+        const destIsDir = fs.statSync(dest).isDirectory();
+        if (srcIsDir !== destIsDir) await fsp.rm(dest, { recursive: true, force: true });
+      }
+      pending.push({ src, name, dest });
+    }
+    const pasted = [];
+    for (const it of pending) {
+      await fsp.cp(it.src, it.dest, { recursive: true, force: true, errorOnExist: false });
+      await markSelfWrite(it.dest); // 目标可能被本窗口监听：吸收自写回声
+      approve(it.dest);             // 粘贴进来的文件立即可编辑（等同拖拽打开后的 approve 语义）
+      pasted.push(it.dest);
+    }
+    return { ok: true, pasted, skipped: files.length - pasted.length };
+  });
 }
 
 module.exports = { registerFileIpc, isInside, readRangeBytes };
