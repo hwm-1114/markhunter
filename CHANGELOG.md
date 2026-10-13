@@ -1,5 +1,15 @@
 # 更新说明（Changelog）
 
+## v0.6.1（2026-10-13）
+
+### 预览的图片与流程图默认原始尺寸（无需双击放大）
+- **图片**：预览中的图片不再被 `max-width:100%` 压缩到预览栏宽度 —— 按**原始像素 1:1 渲染**（零画质损失，位图不放大不缩小），超宽部分由预览区横向滚动查看。配套 `.markdown-body { min-width:0 }`：防止大图把 flex 子项的 min-content 推高、把正文 860px 排版整段拉宽（文本排版不受大图影响）。
+- **流程图（mermaid）**：全部 15 种图类型初始化 `useMaxWidth:false`（flowchart / sequence / class / state / er / journey / gantt / pie / timeline / gitGraph / mindmap / quadrantChart / xychart / block / sankey），SVG 输出**固定像素宽度**（节点文字按可读字号排布）而非 `max-width:100%` 自适应压缩 —— 大流程图不再被压到预览栏宽度、节点文字小到看不清；`.mermaid-wrap svg { max-width:none }` 同步放开，超宽由 wrap 横向滚动，矢量缩放无损。主题切换缓存/双击放大查看器等既有行为不变（查看器宽度由 viewBox 独立计算）。
+
+### 测试
+- 冒烟新增 `mediaNaturalSize`（**231 → 232**）：2000×900 SVG 图在预览中渲染宽度 === naturalWidth（未被压缩），10 节点 LR 流程图 SVG 渲染宽度 === 其固定像素宽（>400 且未缩到容器宽）、`.mermaid-wrap` 滚动区容纳全图。
+- 既有 mermaid/图片用例（`mermaidRender`/`mermaidCacheId`/`imgDetail`/`mermaidViewer`/`viewerScrollFull` 等）只断言存在性/查看器行为，与预览端尺寸解耦，零改动兼容。
+
 ## v0.6.0（2026-10-13）
 
 主题：**五项生产力优化**——批处理运行、文件树与系统剪贴板互通、重命名改扩展名即时生效、Markdown 数学公式（KaTeX）、全局搜索文件名/目录名。

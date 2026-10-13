@@ -684,7 +684,10 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   display: flex;
 }
 .preview-host.full { border-left: none; }
-.markdown-body { flex: 1; padding: 28px 36px 80px; max-width: 860px; margin: 0 auto; }
+/* min-width:0（v0.6.1）：#preview-host 是 flex 容器，flex item 默认 min-width:auto ——
+   含原始尺寸大图时 min-content 会被推到图片宽度，把整个正文排版拉宽（860px 限宽失效）。
+   显式允许收缩到容器宽：文本保持正常排版，超宽图片溢出为横向滚动（见 img 规则）。 */
+.markdown-body { flex: 1; min-width: 0; padding: 28px 36px 80px; max-width: 860px; margin: 0 auto; }
 
 .editor-empty {
   position: absolute; inset: 0;
@@ -1267,7 +1270,13 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   border-top: 1px solid var(--mh-border);
   margin: 1.6em 0;
 }
-.markdown-body img { max-width: 100%; border-radius: 8px; }
+.markdown-body img {
+  /* v0.6.1：按原始尺寸显示（不做 max-width:100% 缩放）—— 大图不再被压到预览栏宽度、
+     看不清还得双击放大；浏览器按图片原生像素 1:1 渲染（零画质损失），超宽部分由
+     #preview-host 的 overflow:auto 横向滚动查看。 */
+  max-width: none;
+  border-radius: 8px;
+}
 .markdown-body .preview-img { cursor: zoom-in; }
 
 /* mermaid 图 */
@@ -1280,7 +1289,9 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   border-radius: 10px;
   padding: 14px;
 }
-.mermaid-wrap svg { max-width: 100%; height: auto; }
+/* v0.6.1：SVG 不做 max-width:100% 压缩 —— mermaid 已按 useMaxWidth:false 输出固定像素宽度
+   （节点文字按可读字号排），超宽由 .mermaid-wrap 横向滚动，矢量放大无损。 */
+.mermaid-wrap svg { max-width: none; height: auto; }
 .mermaid-error {
   /* L5（v0.1.44）：原 #fdf0f0 底 + 暗色主题下 --mh-danger 浅红字（对比度≈2:1）失效，
      改由主题令牌推导：底色 = danger 12% 混合面板色，暗色下自适应加深、文字对比度恢复 */

@@ -794,6 +794,41 @@ const RENDERER_TEST = `
       : 'name=' + nameHit + ',dir=' + dirHit + ',reveal=' + revealed;
   });
 
+  // ---- v0.6.1：预览中的图片与流程图默认按原始尺寸显示（不压缩、无需双击放大） ----
+  await step('mediaNaturalSize', async () => {
+    // 2000×900 的 SVG 图（声明宽高 = naturalSize；矢量无损）
+    await api.writeFile(root + '/nat-big.svg',
+      '<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="900" viewBox="0 0 2000 900"><rect width="2000" height="900" fill="#4f8cff"/></svg>');
+    const BT = String.fromCharCode(96);
+    const fence = BT + BT + BT;
+    let nodes = '';
+    for (let i = 0; i < 10; i++) nodes += '  N' + i + ' --> N' + (i + 1) + '\\n';
+    await api.writeFile(root + '/nat.md',
+      '# 原始尺寸\\n\\n![big](./nat-big.svg)\\n\\n' + fence + 'mermaid\\ngraph LR\\n' + nodes + fence + '\\n');
+    const tabNat = await app.editor.openFile(root + '/nat.md');
+    app.preview.setMode('split');
+    await new Promise((r) => setTimeout(r, 2500)); // mermaid chunk 动态加载 + 异步渲染
+    const img = document.querySelector('#preview-content img.preview-img');
+    if (!img) return 'no img';
+    const imgW = img.getBoundingClientRect().width;
+    const natW = img.naturalWidth || 2000;
+    const imgOk = Math.abs(imgW - natW) <= 2; // 图片按原始像素 1:1 渲染（未被 max-width 压缩）
+    const svg = document.querySelector('#preview-content .mermaid-wrap svg');
+    if (!svg) return 'no mermaid svg';
+    // useMaxWidth:false 后 mermaid 输出固定像素宽（width 属性或 style.width），且渲染宽=该值
+    const wAttr = parseFloat(svg.getAttribute('width') || '') || parseFloat(svg.style.width || '') || 0;
+    const svgW = svg.getBoundingClientRect().width;
+    const svgOk = wAttr > 400 && Math.abs(svgW - wAttr) <= 2;
+    const wrapEl = svg.closest('.mermaid-wrap');
+    const wrapScrollable = !!wrapEl && wrapEl.scrollWidth >= Math.round(svgW); // 超宽时 wrap 滚动区容纳全图
+    if (tabNat) app.editor.closeTab(tabNat); // 对象引用关闭
+    await api.remove(root + '/nat.md', false);
+    await api.remove(root + '/nat-big.svg', false);
+    return imgOk && svgOk && wrapScrollable
+      ? true
+      : 'img=' + imgOk + '(' + Math.round(imgW) + '/' + natW + '),svg=' + svgOk + '(' + Math.round(svgW) + '/' + wAttr + '),scroll=' + wrapScrollable;
+  });
+
   // ---- Python 输出面板与设置面板 UI 验证 ----
   await step('pyUI', async () => {
     await api.writeFile(root + '/pyui.py', 'print("PY_UI_OK")\\nimport sys\\nprint("err", file=sys.stderr)');

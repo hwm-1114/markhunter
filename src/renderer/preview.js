@@ -191,16 +191,35 @@ export function createPreview(getEditor, getTab, getIsDark, opt) {
 
   /** 按当前明暗初始化 mermaid（需要已加载的实例 m）。
    *  明暗未变化且已初始化时返回 false 并跳过（P3：避免每次 applyTheme 全量重初始化）；
-   *  返回 true 表示本次发生了初始化。 */
+   *  返回 true 表示本次发生了初始化。
+   *  v0.6.1：全部图类型 useMaxWidth:false —— SVG 输出**固定像素宽度**（按图内容自然尺寸），
+   *  而不是 max-width:100% 自适应（那会把大流程图压缩到预览栏宽度、节点文字小到看不清，
+   *  每次都得双击放大）；配合 .mermaid-wrap 的 overflow-x:auto 超宽横向滚动，矢量无损。 */
   function ensureMermaidTheme(m) {
     const dark = !!(getIsDark && getIsDark());
     if (lastMermaidDark === dark && !mermaidThemeDirty) return false;
     lastMermaidDark = dark;
     mermaidThemeDirty = false;
+    const noMaxWidth = { useMaxWidth: false };
     m.initialize({
       startOnLoad: false,
       theme: dark ? 'dark' : 'default',
       securityLevel: 'strict',
+      flowchart: noMaxWidth,
+      sequence: noMaxWidth,
+      class: noMaxWidth,
+      state: noMaxWidth,
+      er: noMaxWidth,
+      journey: noMaxWidth,
+      gantt: noMaxWidth,
+      pie: noMaxWidth,
+      timeline: noMaxWidth,
+      gitGraph: noMaxWidth,
+      mindmap: noMaxWidth,
+      quadrantChart: noMaxWidth,
+      xychart: noMaxWidth,
+      block: noMaxWidth,
+      sankey: noMaxWidth,
     });
     return true;
   }
