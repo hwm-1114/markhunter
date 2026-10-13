@@ -1,7 +1,7 @@
 {
     "name": "@hwm-1114/markhunter",
     "productName": "MarkHunter",
-    "version": "0.5.1",
+    "version": "0.6.0",
     "description": "MarkHunter 马克猎手 —— 执笔即江湖，所写皆锋芒",
     "main": "src/main/main.js",
     "repository": {
@@ -46,6 +46,7 @@
         "tailwindcss": "^4.3.3"
     },
     "dependencies": {
-        "diff": "^9.0.0"
+        "diff": "^9.0.0",
+        "katex": "^0.19.0"
     }
 }

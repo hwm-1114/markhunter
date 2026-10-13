@@ -5,6 +5,7 @@
 // chunk 内 iife 将 mermaid 实例暴露到 window.__mermaid；就绪前 mermaid 块保持 pre>code 占位，
 // 失败时显示错误占位。异步就绪已融入渲染路径（renderMermaid 内部 await），冒烟用例等待即可。
 import MarkdownIt from 'markdown-it';
+import mathPlugin from './katex-math.js';
 import { $, isMarkdown, stripChunkMarkers, showContextMenu, toast } from './ui.js';
 import { openViewer } from './viewer.js';
 
@@ -14,6 +15,10 @@ const md = new MarkdownIt({
   breaks: true,
   typographer: true,
 });
+
+// v0.6.0：数学公式（KaTeX）—— $...$ / \(...\) 行内与 $$...$$ / \[...\] 块级；
+// 字体与样式经 index.html 的 dist/katex.css（构建时从 node_modules 拷贝，CSP 'self' 同源）
+md.use(mathPlugin);
 
 md.renderer.rules.table_open = () => '<div class="table-wrap"><table>';
 md.renderer.rules.table_close = () => '</table></div>';

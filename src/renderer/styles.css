@@ -1293,6 +1293,27 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   font-size: 12.5px;
 }
 
+/* ---------- v0.6.0：KaTeX 数学公式（预览与查看器共用） ---------- */
+/* 块级公式：横向可滚（长公式不撑破分栏）、上下留白与段落协调；KaTeX 字色继承 currentColor，
+   明暗主题自动适配（无需 per-theme 覆盖）。样式表本体在 dist/katex.css（构建时拷贝）。 */
+.markdown-body .katex-display {
+  margin: 1.1em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+/* 行内公式字号略大于正文（与多数 Markdown 渲染器的观感一致） */
+.markdown-body .katex { font-size: 1.06em; }
+/* 公式源码渲染失败占位（KaTeX 抛异常的兜底路径；KaTeX 可自证的语法错误由
+   throwOnError:false 走 KaTeX 内置红字，不经这个类） */
+.mh-math-error {
+  color: var(--mh-danger);
+  background: color-mix(in oklab, var(--mh-danger) 8%, transparent);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-family: Consolas, 'Courier New', monospace;
+}
+
 /* 图片详情弹窗 */
 .img-detail { display: flex; flex-direction: column; gap: 14px; }.img-detail > img {
   max-width: 100%;

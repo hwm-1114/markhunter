@@ -55,6 +55,11 @@ export function isPython(name) {
   return langFor(name) === 'python';
 }
 
+/** v0.6.0：可在工具内直接运行的脚本（▶ 运行按钮的可用口径 = .py + .bat + .cmd） */
+export function isRunnableScript(name) {
+  return /\.(py|bat|cmd)$/i.test(String(name));
+}
+
 export function baseName(p) {
   const parts = String(p).replace(/\\/g, '/').split('/');
   return parts[parts.length - 1];

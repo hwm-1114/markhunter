@@ -12,8 +12,12 @@ const TEST_ROOT = path.join(__dirname, '..', '.smoke-test');
 // 注意：不能用 os.tmpdir() 直接拼 —— 本机 os.tmpdir() 返回 8.3 短名
 // （如 C:\Users\ADMINI~1\...），而 readTree/readdir 返回长名（Administrator），
 // 会导致外部链按短名逐级展开时 findNode 失配、树定位中断。
-// 用 os.homedir()（长名）+ AppData/Local/Temp 得到同目录的长拼写。
-const EXT_ROOT = path.join(os.homedir(), 'AppData', 'Local', 'Temp', 'mh-smoke-ext-' + Date.now());
+// v0.6.0：挂在 homedir 直下而非 AppData\Local\Temp —— 外部链 reveal 需要 readTree
+// 盘符→目标 的每一级目录，而开发机的 Temp 常积累数千条目（fs:read-tree 逐条 statSync），
+// 一次 readTree(Temp) 可达数秒，extCtxMenu 等用例的等待窗口内链展开不完（2026-10-13
+// 实测连续 6 轮假红、产品代码回退到基线仍红，确诊环境敏感）；homedir 一级浅、条目少，
+// 链路长拼写与 8.3 问题同样不受影响。
+const EXT_ROOT = path.join(os.homedir(), 'mh-smoke-ext-' + Date.now());
 
 function cleanTestRoot() {
   if (fs.existsSync(TEST_ROOT)) {
@@ -63,9 +67,9 @@ const RENDERER_TEST = `
   tree = await api.readTree(root);
   results.push(['createDir', tree.some((t) => t.isDir && t.name === 'sub')]);
 
-  // 5. 全局搜索（应命中 hello.md 2 处）
+  // 5. 全局搜索（v0.6.0 起文件名/目录名也参与匹配：hello.md 内容 2 处 + 文件名 1 处 = 3）
   const gs = await api.globalSearch(root, 'hello');
-  results.push(['globalSearch', gs.length === 2]);
+  results.push(['globalSearch', gs.length === 3 && gs.some((r) => r.kind === 'name' && String(r.file).endsWith('hello.md'))]);
 
   // 6. 设置读写
   const s0 = await api.getSettings();
@@ -613,6 +617,181 @@ const RENDERER_TEST = `
     return findVal === '树测试' && marks > 0
       ? true
       : 'val=' + findVal + ',marks=' + marks;
+  });
+
+  // ================= v0.6.0 新增功能冒烟 =================
+  // 注意本段在 RENDERER_TEST 模板字符串内：写 LaTeX/换行时反斜杠翻倍（\\\\( 展开后为 \\(，
+  // 渲染端字符串求值才是 \(；\\n 同理），且不得出现裸反引号（坑①）。
+
+  // ---- 功能1：批处理脚本运行（cmd.exe /d /s /c，输出与退出码与 Python 同一面板/事件） ----
+  await step('runBat', async () => {
+    const bat = root + '/run-bat.bat';
+    await api.writeFile(bat, '@echo off\\r\\necho BAT_E2E_OK');
+    const r = await new Promise((resolve) => {
+      let out = '';
+      let done = false;
+      const onOut = (d) => { out += d.data; };
+      const onExit = (d) => {
+        if (done) return;
+        done = true;
+        resolve({ ok: out.includes('BAT_E2E_OK'), code: d.code, out });
+      };
+      api.onPythonOutput(onOut);
+      api.onPythonExit(onExit);
+      api.runPython(bat);
+      setTimeout(() => { if (!done) { done = true; resolve({ ok: false, code: null, out, timeout: true }); } }, 15000);
+    });
+    // UI 面：打开 .bat 标签 → ▶ 运行按钮应可用（.py/.bat/.cmd 同口径）
+    const batTab = await app.editor.openFile(bat);
+    const btnEnabled = !document.getElementById('btn-run-py').disabled;
+    if (batTab) app.editor.closeTab(batTab); // 对象引用关闭（路径形态差异会让 findTabByPath 失配）
+    await api.remove(bat, false);
+    return r.ok && r.code === 0 && btnEnabled
+      ? true
+      : 'ok=' + r.ok + ',code=' + r.code + ',btn=' + btnEnabled + ',out=' + r.out.slice(-80);
+  });
+
+  // ---- 功能3：重命名改变扩展名 → 语言模式/预览按新扩展名生效（.txt→.md） ----
+  await step('renameExtSwitch', async () => {
+    const old = root + '/ext-sw.txt';
+    const now = root + '/ext-sw.md';
+    await api.writeFile(old, '# 扩展名切换\\n\\n行内公式 $E=mc^2$ 测试\\n\\n$$a^2 + b^2 = c^2$$');
+    const tab = await app.editor.openFile(old);
+    const langBefore = tab.lang;
+    // 真实入口：树右键「重命名」的同一个函数（内部走 showPrompt 弹窗，手动填写并确认；
+    // renameEntry 本身不返回 Promise —— 交互由弹窗回调驱动，这里按节奏等待）
+    app.tree.renameEntry(old, 'ext-sw.txt');
+    await new Promise((r) => setTimeout(r, 150));
+    const input = document.querySelector('#modal-body input');
+    if (!input) return 'no prompt';
+    input.value = 'ext-sw.md';
+    const btns = Array.from(document.querySelectorAll('#modal-actions .tbtn'));
+    btns[btns.length - 1].click();
+    await new Promise((r) => setTimeout(r, 600)); // api.rename + onClosePath（语言热切换/预览刷新）+ 树刷新
+    const langAfter = tab.lang;
+    // 主进程 rename 返回反斜杠路径（path.join），用例里的 now 是正斜杠 —— 归一化后比较
+    const norm = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+    const nameOk = tab.name === 'ext-sw.md' && norm(tab.path) === norm(now);
+    // 预览按新扩展名启用：分屏模式下 #preview-host 可见且含 KaTeX 输出
+    app.preview.setMode('split');
+    app.preview.applyMode();
+    await new Promise((r) => setTimeout(r, 150));
+    const previewVisible = !document.querySelector('#preview-host').classList.contains('hidden');
+    const katexCount = document.querySelectorAll('#preview-content .katex').length;
+    app.editor.closeTab(tab); // 直接用对象引用（tab.path 为主进程反斜杠形态，findTabByPath 传正斜杠会失配残留）
+    await api.remove(now, false);
+    return langBefore === 'text' && langAfter === 'markdown' && nameOk && previewVisible && katexCount >= 2
+      ? true
+      : 'lang=' + langBefore + '->' + langAfter + ',name=' + nameOk + ',pv=' + previewVisible + ',katex=' + katexCount;
+  });
+
+  // ---- 功能2：文件树与系统剪贴板互通（Ctrl+C 复制目录 → CF_HDROP 往返 → 粘贴/冲突/树级入口） ----
+  await step('treeClipboard', async () => {
+    await api.create(root, 'clip-src', 'dir');
+    await api.writeFile(root + '/clip-src/a.txt', 'CLIP_DATA');
+    await api.create(root, 'clip-sub', 'dir');
+    // 夹具是动态创建的：先刷新树（nodeMap 里要有 clip-src 行，复制入口按 nodeMap 校验）
+    await app.tree.refreshNode(root, true);
+    await new Promise((r) => setTimeout(r, 250));
+    const src = root + '/clip-src';
+    // 1) Ctrl+C 键盘路径：容器聚焦 + 合成 keydown → copyEntryToClipboard → CF_HDROP 写入
+    const treeEl = document.getElementById('file-tree');
+    app.tree.select(src);
+    treeEl.focus();
+    treeEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 300));
+    const rd = await api.clipboardReadFiles();
+    const normP2 = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+    const copied = rd && rd.ok === true && rd.count === 1 &&
+      normP2(rd.files[0] || '') === normP2(src);
+    // 2) ask 冲突 → conflict:true（一个都不先粘）；dedupe → clip-src (2)
+    const p1 = await api.pasteFiles(root, { conflict: 'ask' });
+    const conflictOk = p1 && p1.conflict === true;
+    const p2 = await api.pasteFiles(root, { conflict: 'dedupe' });
+    const pastedOk = p2 && p2.ok === true && Array.isArray(p2.pasted) && p2.pasted.length === 1;
+    let dataOk = false;
+    try { dataOk = (await api.readFile(root + '/clip-src (2)/a.txt')).content === 'CLIP_DATA'; } catch { dataOk = false; }
+    // 3) 树级粘贴入口（pasteEntryFromClipboard：粘贴进 clip-sub + 刷新 + 选中）
+    await app.tree.pasteEntryFromClipboard(root + '/clip-sub');
+    await new Promise((r) => setTimeout(r, 600));
+    let subOk = false;
+    try { subOk = (await api.readFile(root + '/clip-sub/clip-src/a.txt')).content === 'CLIP_DATA'; } catch { subOk = false; }
+    await api.remove(src, true);
+    await api.remove(root + '/clip-src (2)', true);
+    await api.remove(root + '/clip-sub', true);
+    // 收尾恢复剪贴板为 1×1 图片：previewImgCtx（本用例之前跑过）写入的图片剪贴板被本用例的
+    // CF_HDROP 写入替换（writeBuffer 是整剪贴板替换语义，与 Explorer 一致）—— 主进程段稍后的
+    // previewImgClip 断言依赖那份图片，这里用同一字节恢复，保持既有用例的隐式前提成立。
+    try {
+      const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      const png = root.replace(/\\//g, '\\\\') + '\\\\clip-restore.png';
+      await api.writeBinary(png, Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+      await window.api.copyImage(png);
+      await api.remove(png, false);
+    } catch { /* 恢复失败不判红（剪贴板终态不属于本用例的断言面） */ }
+    return copied && conflictOk && pastedOk && dataOk && subOk
+      ? true
+      : 'copied=' + copied + ',conflict=' + conflictOk + ',pasted=' + pastedOk + ',data=' + dataOk + ',sub=' + subOk;
+  });
+
+  // ---- 功能4：数学公式渲染（KaTeX：块级/行内/定界符变体/货币误判防御/代码块不解析） ----
+  await step('mathRender', async () => {
+    const f = root + '/math-katex.md';
+    // 源码里的 \\\\(.…经模板展开与渲染端求值后是 \(；\\\\sum → \sum；\\\\[ → \[
+    // 行内代码反引号不能用字面量（坑①：会截断 RENDERER_TEST 模板），以 96 号字符动态构造
+    const BT = String.fromCharCode(96);
+    await api.writeFile(f,
+      '# 数学\\n\\n行内 $a+b$ 与 \\\\(c+d\\\\) 混排\\n\\n' +
+      '$$\\\\sum_{i=1}^{n} i = \\\\frac{n(n+1)}{2}$$\\n\\n' +
+      '\\\\[E = mc^2\\\\]\\n\\n' +
+      '价格 $5 和 $10 的文本\\n\\n' +
+      '代码 ' + BT + '$not_math$' + BT + ' 不解析\\n');
+    const mathTab = await app.editor.openFile(f);
+    app.preview.setMode('split');
+    app.preview.applyMode();
+    await new Promise((r) => setTimeout(r, 200));
+    const all = document.querySelectorAll('#preview-content .katex').length;
+    const disp = document.querySelectorAll('#preview-content .katex-display').length;
+    const txt = (document.querySelector('#preview-content') || { textContent: '' }).textContent || '';
+    const moneyOk = txt.includes('$5 和 $10'); // 货币写法不得被当公式（原样文本）
+    const codeOk = txt.includes('$not_math$'); // 行内代码里的 $ 不解析
+    if (mathTab) app.editor.closeTab(mathTab); // 对象引用关闭（路径形态差异会让 findTabByPath 失配）
+    await api.remove(f, false);
+    return all === 4 && disp === 2 && moneyOk && codeOk
+      ? true
+      : 'katex=' + all + ',display=' + disp + ',money=' + moneyOk + ',code=' + codeOk;
+  });
+
+  // ---- 功能5：全局搜索的文件名/目录名匹配 + 点击结果在文件树定位 ----
+  await step('gsNameDir', async () => {
+    await api.create(root, 'zzd-probe', 'dir');
+    await api.writeFile(root + '/zzd-probe/zzn-target.md', '正文不含关键词');
+    // 夹具动态创建：先刷新树（reveal 沿已加载的目录行逐级展开，目录行必须在 nodeMap 里）
+    await app.tree.refreshNode(root, true);
+    await new Promise((r) => setTimeout(r, 250));
+    app.state.rootDir = root;
+    const byName = await api.globalSearch(root, 'zzn-target');
+    const nameHit = byName.some((r) => r.kind === 'name' && String(r.file).endsWith('zzn-target.md'));
+    const byDir = await api.globalSearch(root, 'zzd-probe');
+    const dirHit = byDir.some((r) => r.kind === 'dir' && String(r.file).endsWith('zzd-probe'));
+    // UI：搜索 → 点击名字行（.gs-name-row）→ 树展开并选中该文件
+    const gi = document.querySelector('#gs-input');
+    gi.value = 'zzn-target';
+    await app.globalSearch.run();
+    await new Promise((r) => setTimeout(r, 300));
+    const row = document.querySelector('#gs-results .gs-name-row');
+    let revealed = false;
+    if (row) {
+      row.click();
+      await new Promise((r) => setTimeout(r, 700)); // reveal 逐级懒加载展开
+      const sel = document.querySelector('#file-tree .tree-node.selected .name');
+      revealed = !!sel && sel.textContent === 'zzn-target.md';
+    }
+    gi.value = '';
+    await api.remove(root + '/zzd-probe', true);
+    return nameHit && dirHit && revealed
+      ? true
+      : 'name=' + nameHit + ',dir=' + dirHit + ',reveal=' + revealed;
   });
 
   // ---- Python 输出面板与设置面板 UI 验证 ----
@@ -1689,8 +1868,13 @@ const RENDERER_TEST = `
 
   await step('extCtxMenu', async () => {
     await app.editor.openFile(extRoot + '/note.md');
-    await new Promise((r) => setTimeout(r, 400));
-    const fileNode = Array.from(document.querySelectorAll('#file-tree .tree-node')).find((n) => normP(n.dataset.path) === normP(extRoot + '/note.md'));
+    // 外部链 reveal 是逐级懒加载的异步链（readTree 盘符→目标 的每一级），与 extReveal
+    // 同款轮询等待（waitFor 只回布尔，元素在闭包里取）
+    let fileNode = null;
+    await waitFor(() => {
+      fileNode = Array.from(document.querySelectorAll('#file-tree .tree-node')).find((n) => normP(n.dataset.path) === normP(extRoot + '/note.md'));
+      return !!fileNode;
+    });
     if (!fileNode) return 'no file node';
     fileNode.dispatchEvent(new MouseEvent('contextmenu', { clientX: 120, clientY: 120, bubbles: true, cancelable: true }));
     await new Promise((r) => setTimeout(r, 60));

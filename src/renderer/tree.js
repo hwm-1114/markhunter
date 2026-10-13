@@ -91,6 +91,12 @@ export function commonCtxItems(p) {
   ];
 }
 
+// ---------- v0.6.0：文件树与系统剪贴板互通（Ctrl+C 复制 / Ctrl+V 粘贴） ----------
+/** 合成行 key 判定（外部文件虚拟根/盘符行，key 含 \u0000）—— 不是真实路径，不可复制 */
+function isSyntheticKey(p) {
+  return !p || String(p).indexOf('\u0000') >= 0;
+}
+
 // ---------- 外部文件区（需求1：跨目录树定位） ----------
 // 「外部文件」虚拟根行 key：含 \u0000 绝不可能是真实路径，与真实树无交集
 const EXT_ROOT_KEY = '\u0000ext\u0000';
@@ -260,6 +266,10 @@ export function createTree() {
 
     row.addEventListener('click', async (e) => {
       e.stopPropagation();
+      // v0.6.0：真实点击把焦点收进树容器 —— 之后 Ctrl+C（复制选中项）/ Ctrl+V（粘贴进
+      // 选中目录）作用于树（VS Code 同款行为）。合成事件（冒烟/自动化）不转移焦点，
+      // 用例需要键盘路径时可显式 container.focus()。
+      if (e.isTrusted) { try { container.focus({ preventScroll: true }); } catch { /* 忽略 */ } }
       if (opts.onClick) {
         await opts.onClick(node, row, children);
         return;
@@ -279,6 +289,7 @@ export function createTree() {
     row.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if (e.isTrusted) { try { container.focus({ preventScroll: true }); } catch { /* 忽略 */ } }
       if (opts.onContext) {
         opts.onContext(e.clientX, e.clientY, node, row);
         return;
@@ -633,6 +644,78 @@ export function createTree() {
     }
   }
 
+  // ---------- v0.6.0：文件树与系统剪贴板互通（Ctrl+C 复制 / Ctrl+V 粘贴） ----------
+  /** 复制选中项（文件或目录）到系统剪贴板（CF_HDROP）：资源管理器/桌面可直接 Ctrl+V。
+   *  合成行（外部文件虚拟根/盘符行）不是真实路径，拒绝。
+   *  nodeMap 匹配走 normalizeKey（findNode 同款）—— selectedPath 可能与 readTree 返回的
+   *  行键分隔符/大小写不同（正斜杠 vs 反斜杠），精确 has 会误拒。 */
+  async function copyEntryToClipboard(path) {
+    if (isSyntheticKey(path) || !findNode(normalizeKey(String(path)))) {
+      toast('请先在文件树中选中一个文件或目录');
+      return false;
+    }
+    try {
+      const r = await window.api.clipboardCopyFiles([path]);
+      if (!r || r.ok !== true) {
+        toast(`复制失败：${(r && r.message) || (r && r.reason) || '未知错误'}`);
+        return false;
+      }
+      toast(`已复制「${baseName(path)}」，可在资源管理器中 Ctrl+V`);
+      return true;
+    } catch (err) {
+      toast('复制失败：' + (err && err.message ? err.message : err));
+      return false;
+    }
+  }
+
+  /** 把系统剪贴板里的文件/文件夹粘贴进 destDir（冲突弹窗复用拖拽传输的同款） */
+  async function pasteEntryFromClipboard(destDir) {
+    if (!destDir) {
+      toast('请先打开一个目录');
+      return false;
+    }
+    try {
+      let res = await window.api.pasteFiles(destDir, { conflict: 'ask' });
+      if (res && res.conflict) {
+        const choice = await overwriteDialog(destDir + '/' + res.name, 'copy');
+        if (!choice) return false;
+        res = await window.api.pasteFiles(
+          destDir,
+          choice === 'overwrite' ? { overwrite: true } : { conflict: 'dedupe' }
+        );
+      }
+      if (!res || res.ok !== true) {
+        toast(`粘贴失败：${(res && res.message) || '未知错误'}`);
+        return false;
+      }
+      toast(`已粘贴 ${res.pasted.length} 项${res.skipped ? `（跳过 ${res.skipped} 项）` : ''}`);
+      await refreshNode(destDir, true);
+      if (res.pasted.length === 1) select(res.pasted[0]);
+      return true;
+    } catch (err) {
+      toast('粘贴失败：' + (err && err.message ? err.message : err));
+      return false;
+    }
+  }
+
+  // 树容器可聚焦（接收 Ctrl+C / Ctrl+V 键事件）：
+  // · 点击树行 / 右键时把焦点收到树（VS Code 同款行为——点了树，键盘就作用于树；
+  //   编辑器不受影响：点击文件打开标签不会把焦点留在树之外的地方）；
+  // · 不画焦点轮廓（树只需接收键事件，焦点环反而是视觉噪音）。
+  container.tabIndex = 0;
+  container.style.outline = 'none';
+  container.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const k = String(e.key || '').toLowerCase();
+    if (k === 'c') {
+      e.preventDefault();
+      void copyEntryToClipboard(selectedPath);
+    } else if (k === 'v') {
+      e.preventDefault();
+      void pasteEntryFromClipboard(getTargetDir());
+    }
+  });
+
   // ---------- 右键菜单（委托 ui.js 通用菜单；items 结构与原 renderCtxMenu 一致） ----------
   function showCtx(x, y, node) {
     const items = [];
@@ -640,6 +723,13 @@ export function createTree() {
       items.push({ label: '📝 新建文件', onClick: () => createEntry(node.path, 'file') });
       items.push({ label: '📁 新建目录', onClick: () => createEntry(node.path, 'dir') });
       items.push({ sep: true });
+      // v0.6.0：剪贴板互通（合成行的「目录」是外部链目录行，不是根内路径 —— 复制仍可用
+      //（已批准），粘贴目标对它没有意义（getTargetDir 会回落活动目录），故只给复制）
+      if (!isSyntheticKey(node.path)) {
+        items.push({ label: '📋 复制（Ctrl+C）', onClick: () => { void copyEntryToClipboard(node.path); } });
+        items.push({ label: '📥 粘贴到此处（Ctrl+V）', onClick: () => { void pasteEntryFromClipboard(node.path); } });
+        items.push({ sep: true });
+      }
       items.push({ label: '🔄 刷新', onClick: () => refreshNode(node.path) });
       if (node.root) {
         // v0.2.3 多目录：根行菜单 —— 活动切换 + 关闭（根目录本体不允许「删除」，改提供「关闭」）
@@ -681,6 +771,10 @@ export function createTree() {
       items.push({ sep: true });
       items.push({ label: '✏️ 重命名', onClick: () => renameEntry(node.path, node.name) });
       items.push({ label: '🗑 删除文件', danger: true, onClick: () => removeEntry(node.path, false) });
+      // v0.6.0：文件行也给「复制」+「粘贴」（粘贴目标 = 文件所在目录，与 getTargetDir 同推导）
+      items.push({ sep: true });
+      items.push({ label: '📋 复制（Ctrl+C）', onClick: () => { void copyEntryToClipboard(node.path); } });
+      items.push({ label: '📥 粘贴到所在目录（Ctrl+V）', onClick: () => { void pasteEntryFromClipboard(dirOf(node.path)); } });
     }
     // F2：常用项（在资源管理器中显示 / 复制路径 / 复制文件名 / 在终端打开 / 用默认程序打开）
     // 目录行与文件行都给（终端打开时主进程会取目录本身；文件取其所在目录）
@@ -929,5 +1023,5 @@ export function createTree() {
     fileEntry.row.scrollIntoView({ block: 'nearest' });
   }
 
-  return { setRoot, setRoots, setCallbacks, refreshNode, refreshSelected, getTargetDir, select, hideCtx, reveal, isInsideRoot, setExternalFiles, revealExternal };
+  return { setRoot, setRoots, setCallbacks, refreshNode, refreshSelected, getTargetDir, select, hideCtx, reveal, isInsideRoot, setExternalFiles, revealExternal, copyEntryToClipboard, pasteEntryFromClipboard, renameEntry };
 }
