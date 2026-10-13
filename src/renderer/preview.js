@@ -388,6 +388,37 @@ export function createPreview(getEditor, getTab, getIsDark, opt) {
     if (contentEl.querySelector('pre > code.language-mermaid')) {
       renderMermaid();
     }
+    // v0.7.0：代码块一键复制 —— 每个围栏代码块右上角挂常驻按钮（不 hover 也可见），
+    // 点击把 code.textContent 原样写入系统剪贴板（经主进程通道；file:// 下
+    // navigator.clipboard 不可用）。mermaid 块随后被替换成图，按钮随 pre 一起消失，无残留。
+    for (const pre of Array.from(contentEl.querySelectorAll('pre > code:not(.language-mermaid)'))) {
+      const host = pre.parentElement;
+      if (host.querySelector('.code-copy-btn')) continue; // 防重复挂接
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'code-copy-btn';
+      btn.textContent = '复制';
+      btn.title = '复制代码块内容';
+      host.appendChild(btn);
+      btn.addEventListener('click', async () => {
+        const text = pre.textContent;
+        try {
+          await window.api.writeClipboardText(text);
+          btn.textContent = '已复制 ✓';
+          btn.classList.add('copied');
+          clearTimeout(btn._t);
+          btn._t = setTimeout(() => {
+            btn.textContent = '复制';
+            btn.classList.remove('copied');
+          }, 1600);
+        } catch (err) {
+          btn.textContent = '失败';
+          toast('复制失败：' + (err && err.message ? err.message : err));
+          clearTimeout(btn._t);
+          btn._t = setTimeout(() => { btn.textContent = '复制'; }, 1600);
+        }
+      });
+    }
   }
 
   function applyMode() {

@@ -1068,9 +1068,8 @@ async function boot() {
     });
     pyField.append(pyLabel, pyRow, pyHint);
 
-    // 大文件上限（1 ~ 4096 MB；v0.1.49 起支持 4GB 以下分层：>256MB 进只读查看器+区域编辑；
-    // v0.4.0 起 >1GB 再上一档：虚拟滚动查看器 —— 连续滚动，可启用编辑后按 Ctrl+G 跳行号）
-    const MAX_SIZE_MB = 4096;
+    // 大文件上限（1 ~ 5120 MB = 5GB；v0.7.0 起上限提至 5GB：>1GB 虚拟滚动查看器打开即编辑）
+    const MAX_SIZE_MB = 5120;
     const sizeField = document.createElement('div');
     sizeField.className = 'field';
     const sizeLabel = document.createElement('label');
@@ -1082,7 +1081,7 @@ async function boot() {
     sizeInput.value = s.maxFileSizeMB;
     const sizeHint = document.createElement('div');
     sizeHint.className = 'hint';
-    sizeHint.textContent = `可调整范围 1 ~ ${MAX_SIZE_MB} MB（超过上限拒绝打开）。≤256MB 直接编辑（>64MB 保存走流式写）；>256MB 以只读查看器打开（可切换区域编辑）；>1GB 走虚拟滚动查看器（连续滚动，底部「✎ 启用编辑」后可改，Ctrl+G 跳行号，Ctrl+S 保存）`;
+      sizeHint.textContent = `可调整范围 1 ~ ${MAX_SIZE_MB} MB（超过上限拒绝打开）。≤256MB 直接编辑（>64MB 保存走流式写）；>256MB 以只读查看器打开（可切换区域编辑）；>1GB 虚拟滚动查看器（连续滚动直达任意位置，打开即编辑、Ctrl+G 跳行号、Ctrl+S 保存）`;
     sizeField.append(sizeLabel, sizeInput, sizeHint);
 
     // 自动保存间隔
@@ -1185,7 +1184,7 @@ async function boot() {
             const patch = {
               theme: themeSelect.value,
               pythonPath: pyInput.value.trim(),
-              maxFileSizeMB: Math.min(4096, Math.max(1, parseInt(sizeInput.value, 10) || 50)),
+              maxFileSizeMB: Math.min(5120, Math.max(1, parseInt(sizeInput.value, 10) || 50)),
               autoSaveDelay: Math.max(100, parseInt(saveInput.value, 10) || 800),
               scrollbarWidth: Math.min(40, Math.max(6, parseInt(sbInput.value, 10) || 10)),
               indentSize: Math.min(8, Math.max(1, parseInt(indentInput.value, 10) || 4)),

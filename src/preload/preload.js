@@ -73,6 +73,8 @@ contextBridge.exposeInMainWorld('api', {
   clipboardCopyFiles: (paths) => ipcRenderer.invoke('clipboard:copy-files', paths),
   clipboardReadFiles: () => ipcRenderer.invoke('clipboard:read-files'),
   pasteFiles: (destDir, opts) => ipcRenderer.invoke('fs:paste-files', destDir, opts),
+  // v0.7.0：任意文本写剪贴板（预览代码块一键复制；file:// 下 navigator.clipboard 不可用）
+  writeClipboardText: (text) => ipcRenderer.invoke('clipboard:write-any-text', text),
   watchFile: (p, mtime) => ipcRenderer.invoke('fs:watch-file', p, mtime),
   unwatchFile: (p) => ipcRenderer.invoke('fs:unwatch-file', p),
   onFileChanged: (cb) => ipcRenderer.on('file-changed', (_e, d) => cb(d)),

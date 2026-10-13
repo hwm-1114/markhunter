@@ -21,18 +21,17 @@ const CHUNK_PREFETCH_MARGIN = 256 * 1024;            // 距底部 <256px 触发�
 const CHUNK_MAX_BLOCKS = 4096;                       // 单文件最多分段数兜底（4096×2MB = 8GB）
 
 // ---------- 1B-2：大文件查看器（viewer-lg） ----------
-// >256MB 文件进入：只读滑窗查看（默认 ~8MB/窗，滚动到边缘自动翻页、百分比/字节偏移跳转）；
-// 「启用区域编辑」把当前窗口转为可编辑（≤40MB），保存时按字节偏移拼接写回原文件（fs:splice-file）。
-// 理由：CM6 全量驻留内存 + V8 单字符串上限，>256MB 全文编辑不可行（见开发计划 C1/C2）。
-const VIEWER_THRESHOLD = 256 * 1024 * 1024;   // >256MB → 查看器（分页式，可区域编辑）
-// v0.4.0 Phase B：>1GB 走「虚拟滚动查看器」（连续滚动 + 任意位置 O(1) 定位）。
-// 阈值先取 1GB 做灰度：256MB~1GB 仍走原分页查看器，避免一次性替换影响现有冒烟口径。
-const HUGE_SCROLL_THRESHOLD = 1024 * 1024 * 1024;
+// v0.7.0 起 viewer-lg（只读滑窗分页 + 区域编辑）**不再被默认分档到达**：虚拟滚动查看器的
+// 门槛降到与它相同（>256MB 即走连续滚动 + 打开即编辑），分页翻页体验整体退役。
+// 代码路径与 viewerJump / setViewerEditing / slideViewer 等 API 保留（历史口径兼容，
+// 显式把 hugeScrollThreshold 调高即可回到旧行为）。
+const VIEWER_THRESHOLD = 256 * 1024 * 1024;   // >256MB → 大文件（v0.7.0 起全走虚拟滚动）
+// v0.7.0：虚拟滚动查看器门槛 1GB → 256MB（用户口径：「大文件直接展示全量数据、不分页、
+// 打开即可编辑」—— >256MB 全部连续滚动，任意位置 O(1) 定位，5GB 上限内打开即编辑）。
+const HUGE_SCROLL_THRESHOLD = 256 * 1024 * 1024;
 // 该阈值的**可变运行时值**：默认恒等于上面的常量（无调用方时行为与硬编码完全一致）。
-// 存在的唯一理由是测试面：冒烟夹具里唯一 >1GB 的文件是 3.9GB 稀疏 NUL（二进制、不可编辑），
-// 而 280MB 真实文本夹具按默认阈值会分档到 viewer-lg —— 想覆盖「huge 视口内编辑」只能在
-// 用例内部临时降阈值（见 editor.setHugeThresholdMB，dev 测试面）。**每个用例必须 set→断言→恢复**，
-// 否则后续边界用例的档位预期会被打乱。
+// 测试面入口（editor.setHugeThresholdMB）：既有用例临时降档覆盖 huge 编辑不受影响
+//（280MB 文本夹具现在默认就是 huge，降阈值只是让它「仍然是」）。
 let hugeScrollThreshold = HUGE_SCROLL_THRESHOLD;
 const VIEWER_WINDOW = 8 * 1024 * 1024;        // 窗口大小（字节）
 const VIEWER_STEP = 6 * 1024 * 1024;          // 翻页步进（字节，2MB 重叠）
@@ -1159,12 +1158,15 @@ export function createEditor(callbacks) {
     return tab.huge;
   }
 
-  /** 估算 huge 视图当前视口首行：hugeview 只暴露渲染窗起点（含上屏 overscan），减去一屏即视口首行 */
+  /** 估算 huge 视图当前视口首行：优先用 hugeview 暴露的真实视口首行（firstLine）；
+   *  旧回退公式只在异常时兜底（OVERSCAN=1 时代的口径，v0.7.0 起 firstLine 才是权威值） */
   function hugeTopLine(tab) {
     if (!tab || !tab.huge) return 1;
     let st = null;
     try { st = tab.huge.getState(); } catch { return 1; }
-    if (!st || !st.rendered) return 1;
+    if (!st) return 1;
+    if (typeof st.firstLine === 'number' && st.firstLine >= 1) return st.firstLine;
+    if (!st.rendered) return 1;
     const h = tab.hugeEl ? tab.hugeEl.clientHeight : 0;
     const per = Math.max(8, Math.ceil((h || 0) / (st.lineHeight || 20)) || 30); // 与 hugeview.render 同口径
     return Math.max(1, st.rendered.from + per);

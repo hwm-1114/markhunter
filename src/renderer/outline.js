@@ -108,17 +108,25 @@ export function createOutline({ getEditor, getActiveDoc }) {
       row.className = 'outline-item';
       row.dataset.line = String(h.line);
       row.dataset.level = String(h.level);
+      row.dataset.idx = String(items.length); // 预览跳转用：与预览 DOM 里的 heading 序号对齐
       row.style.paddingLeft = 4 + (h.level - 1) * 12 + 'px';
       row.title = `第 ${h.line} 行 · ${'#'.repeat(h.level)} ${h.text}`;
       const txt = document.createElement('span');
       txt.className = 'ol-text';
       txt.textContent = h.text;
       row.appendChild(txt);
-      // 点击跳转：走 editor.jumpToLine（内部 switchTab + 聚焦该标签所属栏 + 居中滚动）
+      // 点击跳转（v0.7.0 起分两种模式）：
+      //  · 仅预览模式（编辑器隐藏、预览独占）→ 滚动**预览区**到对应标题 —— 用户在预览
+      //    模式下点大纲是为了在渲染结果里定位，跳回编辑器反而打断阅读；
+      //  · 其余（编辑/分屏）→ 走 editor.jumpToLine（内部 switchTab + 聚焦该标签所属栏
+      //    + 居中滚动），预览若有滚动同步照旧。
       row.addEventListener('click', () => {
         const t = lastTab;
         if (!t) return;
-        try { getEditor().jumpToLine(t, h.line); } catch (err) { console.warn('[outline]', err && err.message ? err.message : err); }
+        try {
+          if (jumpPreviewIfPreviewMode(t, Number(row.dataset.idx))) return;
+          getEditor().jumpToLine(t, h.line);
+        } catch (err) { console.warn('[outline]', err && err.message ? err.message : err); }
         markCurrent(h.line); // 立即反馈（jumpToLine 会触发 selectionSet → 也会走到 markCurrent，幂等）
       });
       frag.appendChild(row);
@@ -126,6 +134,32 @@ export function createOutline({ getEditor, getActiveDoc }) {
     }
     listEl.appendChild(frag);
     return items.length;
+  }
+
+  /** 仅预览模式下滚动预览区到第 idx 个标题（返回 true 表示已处理）。
+   *  判据：该栏的编辑器层隐藏且预览层可见 = preview 实例的 mode==='preview'（applyMode
+   *  的显隐口径同源）；heading 序号与 parseHeadings 的输出一一对齐（两边都跳过围栏
+   *  代码块内的 #）。 */
+  function jumpPreviewIfPreviewMode(tab, idx) {
+    try {
+      const ed = getEditor();
+      const pid = ed.paneIdOf(tab);
+      const pe = ed.getPaneElsById(pid);
+      if (!pe || !pe.previewContent) return false;
+      const previewOnly = pe.editorHost.classList.contains('hidden')
+        && !pe.previewHost.classList.contains('hidden');
+      if (!previewOnly) return false;
+      const heads = pe.previewContent.querySelectorAll('h1, h2, h3, h4, h5, h6');
+      const target = heads[idx];
+      if (!target) return false;
+      target.scrollIntoView({ block: 'start' });
+      // 短暂高亮反馈（与编辑器跳转的光标反馈对等）
+      target.classList.add('ol-jump-flash');
+      setTimeout(() => target.classList.remove('ol-jump-flash'), 900);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function headingIndexOfLine(line) {

@@ -301,11 +301,10 @@ function registerFileIpc(_getWindow) {
   // src（文件或目录）传输到目录 destDir 下：mode='copy'|'move'。
   // conflict='ask'（默认）→ 目标已存在时返回 { conflict: true }，渲染层确认后带
   // overwrite=true 重调；conflict='dedupe' → 自动改名为「name (2).ext」。
-  // 权限口径：源与目标目录都必须在侧栏根集合内（或已批准），与写/删/改名一致；
-  // 移动成功后 remapApproved（外部文件标签保存仍可用）、跨盘回退删除源后 revokeUnder。
+  // v0.7.0（用户决策口径）：源与目标只校验**存在**，不再要求白名单 —— 树内可见即可拖
+  // （外部文件分支的文件/目录链之间互传不再被拒）。移动成功后 remapApproved、跨盘回退
+  // 删除源后 revokeUnder 的既有语义保持。
   ipcMain.handle('fs:transfer', async (_e, srcPath, destDir, mode, opts = {}) => {
-    requireApproved(srcPath, '源路径不在已打开目录内，操作已拒绝');
-    requireApproved(destDir, '目标目录不在已打开目录内，操作已拒绝');
     const src = normalize(srcPath);
     const dst = normalize(destDir);
     const srcSt = await fsp.stat(src);
@@ -487,27 +486,22 @@ function registerFileIpc(_getWindow) {
   // ==========================================================================
   // 0.5.0 Phase 5a 第 2 批 F2：树/标签右键「常用项」的三条通道
   // --------------------------------------------------------------------------
-  // 安全面（任务书硬要求，逐条落地）：
-  //   ① **三条通道全部先过 `security.requireApproved`**（路径白名单：任一侧栏根内，或曾成功读取过的
-  //      路径）—— 渲染进程无法借这些入口去碰白名单之外的任何路径；拒绝时返回 {ok:false,reason:'NOT_APPROVED'}
-  //      而不是抛异常（渲染端据此给明确 toast，不静默失败）；
-  //   ② **「在终端打开」= 本地命令执行**：必须由用户显式动作（右键菜单项点击）触发，且**路径只经
-  //      `cwd` 传给子进程** —— 命令行参数恒为空数组、`shell:false`，路径里的 `& | ^ % " ` 等 cmd
-  //      元字符**根本没有机会进入命令行**（不做任何字符串拼接，不存在转义遗漏面）；
-  //   ③ **「用默认程序打开」只调 `shell.openPath`**（绝不用 `shell.openExternal`，避免把任意 URL/协议
-  //      交给系统），且仅对「已批准 + 真实存在」的路径生效；不存在/未批准一律拒绝。
-  //  另外 `clipboard:write-text` 也要求带来源路径并过白名单 —— 复制路径/文件名同样不接受任意字符串。
+  // 安全面（v0.7.0 用户决策口径变更，与 v0.5.1 的 fs:create 放开同源）：
+  //   ① 「用默认程序打开」「在终端打开」「复制路径/文件名」「复制文件到剪贴板」这些
+  //      **树内可达的读侧操作不再做白名单校验，只校验路径存在** —— 用户口径：
+  //      左侧栏打开的所有目录/文件（含外部文件分支与目录链）都不能再出现
+  //      「路径不在已打开目录内，操作已拒绝」。渲染进程本就能通过系统对话框/
+  //      拖拽拿到任意路径，这几条通道不构成新的信息面；
+  //   ② 「在终端打开」仍保持 **路径只作 cwd**（argv 恒空、shell:false）的既有硬约束；
+  //   ③ 「用默认程序打开」仍只走 shell.openPath（绝不用 shell.openExternal）。
+  //   fs:write / fs:delete / fs:rename / fs:write-binary 的写盘白名单口径**不变**
+  //   （侧栏根内 + 已打开文件的面已覆盖「左侧栏打开的目录与文件」）。
   // ==========================================================================
 
-  /** F2 公共守卫：路径非空 + **已批准** + **存在**。返回 {ok:true,path,stat} 或 {ok:false,reason,message} */
+  /** F2 公共守卫（v0.7.0 起只校验存在性）：返回 {ok:true,path,stat} 或 {ok:false,reason,message} */
   function guardApprovedExisting(target) {
     const p = String(target || '');
     if (!p) return { ok: false, reason: 'EMPTY', message: '缺少路径参数' };
-    try {
-      requireApproved(p, '路径不在已打开目录内，操作已拒绝');
-    } catch (err) {
-      return { ok: false, reason: 'NOT_APPROVED', message: String((err && err.message) || err) };
-    }
     let stat = null;
     try {
       stat = fs.statSync(p);
@@ -517,9 +511,20 @@ function registerFileIpc(_getWindow) {
     return { ok: true, path: p, stat };
   }
 
-  // 「用默认程序打开」（文件或目录）：只走 shell.openPath，绝不 openExternal
+  // 「用默认程序打开」（文件或目录）：只走 shell.openPath，绝不 openExternal。
+  // **唯一保留白名单的通道**（v0.7.0 口径评审）：它能以系统默认关联启动任意程序
+  // （.bat/.exe/任意扩展名），是"树内可达操作"里外向性最强的一条 —— 未批准路径仍拒绝；
+  // 侧栏根内与已打开过的文件（含外部文件分支）不受影响。其余通道（终端 cwd/剪贴板/
+  // 复制粘贴/拖拽）见上方 v0.7.0 说明，均为存在性校验。
   ipcMain.handle('shell:open-path', async (_e, target) => {
-    const g = guardApprovedExisting(target);
+    const p = String(target || '');
+    if (!p) return { ok: false, reason: 'EMPTY', message: '缺少路径参数' };
+    try {
+      requireApproved(p, '路径不在已打开目录内，操作已拒绝');
+    } catch (err) {
+      return { ok: false, reason: 'NOT_APPROVED', message: String((err && err.message) || err) };
+    }
+    const g = guardApprovedExisting(p);
     if (!g.ok) return g;
     try {
       const errMsg = await shell.openPath(g.path); // 成功返回空串；失败返回错误描述
@@ -568,10 +573,8 @@ function registerFileIpc(_getWindow) {
   });
 
   // 「复制路径 / 复制文件名」：写入系统剪贴板。
-  // **文本由主进程自拼**（渲染端只给 { path, kind }）—— 三条约束合起来才是完整的通道口径：
-  //   ① 路径必须过 requireApproved 且真实存在（白名单）；
-  //   ② 渲染进程**无法**借这条通道往剪贴板写任意内容（没有 text 入参；正文 = 已批准路径本身或其文件名）；
-  //   ③ 复制内容与"用户右键的那一行/那一个标签"恒一致，不存在"显示 A、复制 B"的错配面。
+  // v0.7.0 起只校验路径存在（见上方守卫说明）：正文仍由主进程按来源路径自拼
+  // （渲染端只给 { path, kind }，没有 text 入参 —— 这条通道依旧写不了任意内容）。
   ipcMain.handle('clipboard:write-text', (_e, payload) => {
     const arg = payload && typeof payload === 'object' ? payload : {};
     const g = guardApprovedExisting(arg.path);
@@ -581,6 +584,14 @@ function registerFileIpc(_getWindow) {
     const text = kind === 'name' ? (base || g.path) : g.path;
     clipboard.writeText(text);
     return { ok: true, path: g.path, kind, text, length: text.length };
+  });
+
+  // 任意文本写入系统剪贴板（v0.7.0 新增）：预览代码块「一键复制」用。
+  // 口径说明：这是用户决策的功能放开 —— 能力等价于浏览器网页的 navigator.clipboard.writeText
+  // （file:// 下该 API 不可用，故走 IPC）。写盘零接触，风险面 = 往剪贴板放文本。
+  ipcMain.handle('clipboard:write-any-text', (_e, text) => {
+    clipboard.writeText(String(text == null ? '' : text));
+    return { ok: true };
   });
 
   // ==========================================================================
@@ -623,7 +634,7 @@ function registerFileIpc(_getWindow) {
     return raw.split('\0').map((s) => s.trim()).filter(Boolean);
   }
 
-  // 复制文件/文件夹到系统剪贴板（每条路径都必须已批准且存在 —— 与 clipboard:write-text 同口径）
+  // 复制文件/文件夹到系统剪贴板（v0.7.0 起只校验存在 —— 外部文件分支的目录链行也可复制）
   ipcMain.handle('clipboard:copy-files', (_e, paths) => {
     const list = (Array.isArray(paths) ? paths : [paths])
       .map((p) => String(p || '').trim())
@@ -644,11 +655,13 @@ function registerFileIpc(_getWindow) {
   });
 
   // 把剪贴板里的文件/文件夹复制进目标目录。
+  // v0.7.0（用户决策口径）：目标目录只校验**存在且是目录**，不再要求白名单 —— 用户口径
+  // 「左侧栏打开的所有目录都能操作，不能出现权限拒绝」（外部文件分支的目录链同样是
+  // 粘贴目标）。源来自系统剪贴板（用户自己的复制动作）的既有语义不变。
   // opts.conflict：'ask'（默认，冲突即整单返回由渲染端弹窗确认，**一个都不先粘**，避免半截状态）
   //   | 'dedupe'（自动改名 name (2).ext）| { overwrite: true }（覆盖/合并，与 fs:transfer 语义一致）
   ipcMain.handle('fs:paste-files', async (_e, destDir, opts = {}) => {
     const dst = normalize(destDir);
-    requireApproved(dst, '目标目录不在已打开目录内，操作已拒绝');
     let dstSt;
     try {
       dstSt = fs.statSync(dst);

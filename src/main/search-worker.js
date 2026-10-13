@@ -34,7 +34,7 @@ const TEXT_EXT = new Set([
 ]);
 
 const MAX_SEARCH_FILE_MB = 10;      // 小文件路径上限：整读进内存逐行匹配
-const MAX_STREAM_FILE_MB = 4096;    // 1B-4：大文件流式扫描上限（流式逐行 + 编码探测，内存有界）
+const MAX_STREAM_FILE_MB = 5120;    // 1B-4：大文件流式扫描上限（v0.7.0：4GB→5GB，与打开上限同步）
 const PROGRESS_EVERY = 25;          // 每扫描 25 个文件回传一次进度（1GB 工程 ≈ 数千文件 → 数百条进度）
 
 const ASCII_ONLY = /^[\x20-\x7e]+$/; // 纯可打印 ASCII 查询 → 走原生字节匹配快路径

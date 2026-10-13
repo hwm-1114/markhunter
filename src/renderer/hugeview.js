@@ -25,7 +25,7 @@
 //      不受 40000 字符截断），因此超长行（> LINE_TEXT_LIMIT）直接拒绝编辑；
 //   3) 打开编辑会话后，视口取数从 `huge:lines`（原文件 + 行索引）切到 `huge:doc-lines`
 //      （overlay 视角：看得见未保存修改与新行数）—— 这是「编辑后行数 +3」能成立的前提。
-const OVERSCAN = 1;                 // 视口上下各多取一屏
+const OVERSCAN = 2;                 // 视口上下各多取的屏数（v0.7.0：1→2，快速滚动时视口边缘更少闪白）
 const BATCH_MAX_LINES = 1000;       // 单次批量取行上限（与主进程 lineindex.BATCH_MAX_LINES 对齐）
 const LINE_TEXT_LIMIT = 40000;      // 超长行入 DOM 前的截断（与主进程 LINE_MAX_CHARS 一致）
 // Chromium 的布局/滚动高度上限约 33.5M px（超过即被静默截断，表现为"滚不到后面"）。
@@ -93,6 +93,7 @@ export function createHugeView(host, opts) {
   let editable = false;          // 当前是否处于编辑态（视口内可输入）
   let docInfo = null;            // huge:doc-open 的返回（{ docId, editable, reason, lines, ... }）
   let docEditable = false;       // 主进程判定该文件能否编辑（GBK/二进制/超大单块 → false）
+  let docEditableKnown = false;  // v0.7.0：docEditable 是否已经主进程判定过（false=还没查，不能当"不可编辑"用）
   let docReason = '';            // 不可编辑原因（原样显示给用户）
   let docLines = 0;              // overlay 视角的总行数（编辑后与 lineindex 的原文件行数不同）
   let dirty = false;
@@ -359,6 +360,7 @@ export function createHugeView(host, opts) {
     docInfo = r || null;
     if (docInfo) {
       docEditable = docInfo.editable === true;
+      docEditableKnown = true;
       docReason = docInfo.reason || '';
       if (typeof docInfo.lines === 'number' && docInfo.lines > 0) docLines = docInfo.lines;
       setDirty(false, 0);
@@ -405,7 +407,7 @@ export function createHugeView(host, opts) {
       redoDepth = Number(s.redoDepth) || 0;
       canUndo = s.canUndo === true;
       canRedo = s.canRedo === true;
-      if (typeof s.editable === 'boolean') docEditable = s.editable;
+      if (typeof s.editable === 'boolean') { docEditable = s.editable; docEditableKnown = true; }
       setDirty(s.dirty === true, s.dirtyCount);
       return s;
     } catch (err) {
@@ -561,18 +563,35 @@ export function createHugeView(host, opts) {
   /** 视口内键盘：可打印字符 / Backspace / Delete / Enter / Ctrl+Z / Ctrl+Y / 方向键 / Home / End。
    *  其余组合键（Ctrl+S、Ctrl+G 等）不拦截 —— 冒泡给 app.js 的全局快捷键。 */
   function onKeyDown(e) {
-    if (destroyed || !editable) return;
+    if (destroyed) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key;
     if (mod && (key === 'z' || key === 'Z')) { e.preventDefault(); void (e.shiftKey ? opRedo() : opUndo()); return; }
     if (mod && (key === 'y' || key === 'Y')) { e.preventDefault(); void opRedo(); return; }
     if (mod || e.altKey) return; // 组合键交给全局（Ctrl+S / Ctrl+G / Ctrl+F…）
+    // v0.7.0：**首次键入自动进入编辑**（打开即可改，无需先点「✎ 启用编辑」）。本键消费掉
+    //（开启是异步 IPC），下一次键入即正常落字；能否编辑仍由主进程 editable 决定（二进制/
+    // GBK → 保持只读并显示原因）。光标落在当前视口首行 —— 「所见即所编辑」。
+    if (!editable) {
+      if (key.length === 1 || key === 'Enter' || key === 'Backspace' || key === 'Delete') {
+        e.preventDefault();
+        if (!docEditableKnown || docEditable) void setEditable(true);
+      }
+      return;
+    }
     if (!editReady()) { if (key.length === 1 || key === 'Enter' || key === 'Backspace') e.preventDefault(); return; }
+    // v0.7.0：「所见即所编辑」—— 滚到别处后直接打字落在**当前视口**而不是把视口拽回旧光标行。
+    const fv = firstVisibleLine();
+    const perScr = Math.max(8, Math.ceil((root.clientHeight || 0) / (lineHeight || 20)) || 30);
+    const caretOffscreen = caret.line < fv || caret.line > fv + perScr + OVERSCAN * 2;
+    const reCaret = caretOffscreen
+      ? queue(() => placeCaret(fv, 0))
+      : Promise.resolve();
     const { line, col, text } = caret;
     switch (key) {
-      case 'Enter': e.preventDefault(); void opInsertText('\n'); return;
-      case 'Backspace': e.preventDefault(); void opBackspace(); return;
-      case 'Delete': e.preventDefault(); void opDeleteForward(); return;
+      case 'Enter': e.preventDefault(); void reCaret.then(() => opInsertText('\n')); return;
+      case 'Backspace': e.preventDefault(); void reCaret.then(() => opBackspace()); return;
+      case 'Delete': e.preventDefault(); void reCaret.then(() => opDeleteForward()); return;
       case 'ArrowLeft':
         e.preventDefault();
         if (col > 0) void moveCaret(line, col - 1);
@@ -590,7 +609,7 @@ export function createHugeView(host, opts) {
       case 'PageUp': case 'PageDown': return; // 让浏览器滚屏（光标不动）
       default: break;
     }
-    if (key.length === 1) { e.preventDefault(); void opInsertText(key); }
+    if (key.length === 1) { e.preventDefault(); void reCaret.then(() => opInsertText(key)); }
   }
   root.addEventListener('keydown', onKeyDown);
 
@@ -828,6 +847,10 @@ export function createHugeView(host, opts) {
   applySizer();
   render();
   loadIndex();
+  // v0.7.0：**首次键入自动进入编辑**（onKeyDown 里触发，见 hugeview 的键处理）—— 体验上
+  // 等同「打开即可编辑」：直接打字就行，不需要先点「✎ 启用编辑」。刻意**不在挂载时**自动
+  // 开会话：打开→跳转→编辑的快速序列里，挂载即开的编辑链与滚动/光标放置存在时序纠缠
+  //（实测会把视口拽回文件头），而「键入时开启」天然把光标落在用户所见的位置。
 
   return {
     path: filePath,
@@ -846,6 +869,9 @@ export function createHugeView(host, opts) {
     applyEditForTest,
     getState: () => ({
       lines: totalLines(),
+      // 真实视口首行（比例/直映两模式统一换算）：tabs.js 的 hugeTopLine 采集器用它 ——
+      // 不能用 rendered.from 反推（v0.7.0 OVERSCAN 1→2 后渲染窗起点语义变了，反推会偏一屏）
+      firstLine: firstVisibleLine(),
       indexed: !!index || !!docInfo,
       indexedLines: index ? index.lines : null,
       encoding: index ? index.encoding : (docInfo ? docInfo.encoding : null),

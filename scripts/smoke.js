@@ -719,9 +719,19 @@ const RENDERER_TEST = `
     await api.remove(src, true);
     await api.remove(root + '/clip-src (2)', true);
     await api.remove(root + '/clip-sub', true);
+    // v0.7.0 权限口径：**未批准但存在**的路径也可复制（用户决策：树内可见即可操作，
+    // 外部文件分支/目录链不再被「路径不在已打开目录内」拒绝）—— 用系统里必然存在的
+    // 未批准文件（hosts）验证（api.writeFile 未批准路径仍会被拒，不能用它造探针）
+    let unappOk = false;
+    try {
+      const r3 = await window.api.clipboardCopyFiles(['C:/Windows/System32/drivers/etc/hosts']);
+      const rd3 = await api.clipboardReadFiles();
+      unappOk = !!(r3 && r3.ok === true) && rd3.count === 1;
+    } catch { unappOk = false; }
     // 收尾恢复剪贴板为 1×1 图片：previewImgCtx（本用例之前跑过）写入的图片剪贴板被本用例的
     // CF_HDROP 写入替换（writeBuffer 是整剪贴板替换语义，与 Explorer 一致）—— 主进程段稍后的
     // previewImgClip 断言依赖那份图片，这里用同一字节恢复，保持既有用例的隐式前提成立。
+    // （必须放最后：上面的探针也会替换剪贴板）
     try {
       const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
       const png = root.replace(/\\//g, '\\\\') + '\\\\clip-restore.png';
@@ -729,9 +739,9 @@ const RENDERER_TEST = `
       await window.api.copyImage(png);
       await api.remove(png, false);
     } catch { /* 恢复失败不判红（剪贴板终态不属于本用例的断言面） */ }
-    return copied && conflictOk && pastedOk && dataOk && subOk
+    return copied && conflictOk && pastedOk && dataOk && subOk && unappOk
       ? true
-      : 'copied=' + copied + ',conflict=' + conflictOk + ',pasted=' + pastedOk + ',data=' + dataOk + ',sub=' + subOk;
+      : 'copied=' + copied + ',conflict=' + conflictOk + ',pasted=' + pastedOk + ',data=' + dataOk + ',sub=' + subOk + ',unapp=' + unappOk;
   });
 
   // ---- 功能4：数学公式渲染（KaTeX：块级/行内/定界符变体/货币误判防御/代码块不解析） ----
@@ -829,6 +839,76 @@ const RENDERER_TEST = `
       : 'img=' + imgOk + '(' + Math.round(imgW) + '/' + natW + '),svg=' + svgOk + '(' + Math.round(svgW) + '/' + wAttr + '),scroll=' + wrapScrollable;
   });
 
+  // ---- v0.7.0：代码块一键复制（常驻按钮，点击整块进剪贴板） ----
+  await step('codeCopyBtn', async () => {
+    const BT = String.fromCharCode(96);
+    const fence = BT + BT + BT;
+    await api.writeFile(root + '/code-copy.md',
+      '# 复制\\n\\n' + fence + 'js\\nconsole.log("CODE_COPY_OK_9527");\\n' + fence + '\\n\\n正文段落\\n');
+    const ccTab = await app.editor.openFile(root + '/code-copy.md');
+    app.preview.setMode('split');
+    await new Promise((r) => setTimeout(r, 400));
+    const pre = document.querySelector('#preview-content pre');
+    if (!pre) { if (ccTab) app.editor.closeTab(ccTab); return 'no pre'; }
+    const btn = pre.querySelector('.code-copy-btn');
+    if (!btn) { if (ccTab) app.editor.closeTab(ccTab); return 'no copy btn'; }
+    // 常驻可见：不依赖 hover（computed opacity 恒 1，无 opacity:0 隐藏）
+    const cs = getComputedStyle(btn);
+    const alwaysVisible = cs.opacity === '1' && cs.visibility !== 'hidden';
+    // 尺寸够大：min-width ≥ 50px、padding ≥ 4px（「复制键大一点」的量化口径）
+    const rect = btn.getBoundingClientRect();
+    const bigEnough = rect.width >= 50 && rect.height >= 22;
+    btn.click();
+    await new Promise((r) => setTimeout(r, 300));
+    const clip = await api.readClipboardText();
+    const copiedOk = clip.includes('CODE_COPY_OK_9527');
+    const labelAfter = btn.textContent;
+    if (ccTab) app.editor.closeTab(ccTab);
+    await api.remove(root + '/code-copy.md', false);
+    // 收尾恢复图片剪贴板（previewImgClip 的隐式前提；本用例的文本写入替换了它）
+    try {
+      const b64c = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      const pngc = root.replace(/\\//g, '\\\\') + '\\\\code-copy-restore.png';
+      await api.writeBinary(pngc, Uint8Array.from(atob(b64c), (c) => c.charCodeAt(0)));
+      await window.api.copyImage(pngc);
+      await api.remove(pngc, false);
+    } catch { /* 恢复失败不判红 */ }
+    return alwaysVisible && bigEnough && copiedOk && labelAfter.includes('已复制')
+      ? true
+      : 'visible=' + alwaysVisible + ',big=' + bigEnough + '(' + Math.round(rect.width) + 'x' + Math.round(rect.height) + '),copied=' + copiedOk + ',label=' + labelAfter;
+  });
+
+  // ---- v0.7.0：仅预览模式下点大纲 → 预览区滚动到对应标题（不再跳回编辑器） ----
+  await step('outlinePreviewJump', async () => {
+    let md = '# 首标题 A\\n\\n' + '占位段落\\n\\n'.repeat(3);
+    for (let i = 1; i <= 6; i++) md += '## 章节标题' + i + '\\n\\n' + '内容行\\n\\n'.repeat(40);
+    await api.writeFile(root + '/outline-jump.md', md);
+    const ojTab = await app.editor.openFile(root + '/outline-jump.md');
+    app.preview.setMode('preview'); // 仅预览
+    app.preview.applyMode();
+    await new Promise((r) => setTimeout(r, 400));
+    await window.__app.outline.refresh();
+    const rowsEls = Array.from(document.querySelectorAll('#outline-list .outline-item'));
+    if (rowsEls.length < 6) { if (ojTab) app.editor.closeTab(ojTab); return 'outline rows=' + rowsEls.length; }
+    const ph = document.querySelector('#preview-host');
+    const before = ph.scrollTop;
+    rowsEls[5].click(); // 点「章节标题5」→ 预览滚到对应 h2
+    await new Promise((r) => setTimeout(r, 400));
+    const after = ph.scrollTop;
+    const heads = document.querySelectorAll('#preview-content h1, #preview-content h2');
+    const target = heads[5]; // 大纲第 6 项（idx=5：h1 占 idx0，章节5 是 h2 列表的第 5 个）
+    const inView = !!target && target.getBoundingClientRect().top >= 0
+      && target.getBoundingClientRect().top < ph.clientHeight;
+    // 高亮反馈类
+    const flash = target && target.classList.contains('ol-jump-flash');
+    app.preview.setMode('split');
+    if (ojTab) app.editor.closeTab(ojTab);
+    await api.remove(root + '/outline-jump.md', false);
+    return after > before && inView && flash !== false
+      ? true
+      : 'scroll=' + before + '->' + after + ',inView=' + inView + ',flash=' + !!flash;
+  });
+
   // ---- Python 输出面板与设置面板 UI 验证 ----
   await step('pyUI', async () => {
     await api.writeFile(root + '/pyui.py', 'print("PY_UI_OK")\\nimport sys\\nprint("err", file=sys.stderr)');
@@ -844,11 +924,11 @@ const RENDERER_TEST = `
     await new Promise((r) => setTimeout(r, 200));
     const visible = !document.querySelector('#modal-mask').classList.contains('hidden');
     const inputs = document.querySelectorAll('#modal-body input').length;
-    // 范围提示应显示大文件上限最大值（v0.1.49 起 4096）与滚动条宽度最大值
+    // 范围提示应显示大文件上限最大值（v0.7.0 起 5120 = 5GB）与滚动条宽度最大值
     const hints = Array.from(document.querySelectorAll('#modal-body .hint'))
       .map((h) => h.textContent)
       .join('|');
-    const rangeOk = hints.includes('4096') && hints.includes('40');
+    const rangeOk = hints.includes('5120') && hints.includes('40');
     // 取消关闭
     const cancelBtn = document.querySelector('#modal-actions .tbtn');
     if (cancelBtn) cancelBtn.click();
@@ -2058,15 +2138,19 @@ const RENDERER_TEST = `
   });
 
   await step('multiRootTransferReject', async () => {
-    // 权限口径：外部未批准路径作为传输目标/源必须被拒（extRoot 已不再是根）
+    // v0.7.0 权限口径变更（用户决策）：树内可达的拖拽传输不再做白名单 —— 外部未批准目录
+    // 作为传输目标**放行**（extRoot 已不再是根也能拖过去）；语义与 fs:create/剪贴板一致。
     await app.editor.closeAll();
-    let rejected = false;
+    let copied = null;
     try {
-      await api.transferFiles(root + '/drag-cp.md', extRoot, 'copy', {});
+      const r = await api.transferFiles(root + '/drag-cp.md', extRoot, 'copy', { conflict: 'dedupe' });
+      copied = !!(r && r.dest);
     } catch (e) {
-      rejected = String(e.message).indexOf('不在已打开目录内') >= 0;
+      copied = false;
     }
-    return rejected;
+    // 清理刚拖过去的副本（不留垃圾影响后续目录断言）
+    if (copied) await api.remove(extRoot + '/drag-cp.md', false).catch(() => {});
+    return copied;
   });
 
   // ================= 多主题皮肤（阶段2：主题下拉 / 持久化 / 白名单 / 防闪白 / 明暗适配） =================
@@ -3072,11 +3156,10 @@ const RENDERER_TEST = `
     return kinds && grew ? true : 'kinds=' + kinds + ',grew=' + grew;
   });
 
-  // boundaryViewer：3.9GB 只读查看器（滑页/跳转）+ 512MB 同档 + 4.1GB 拒绝
+  // boundaryViewer（v0.7.0 口径）：3.9GB 走「虚拟滚动查看器」（连续滚动 + 任意位置定位）、
+  // 512MB 同档（门槛降至 256MB，分页查看器退役）、4.1GB 超上限拒绝。
   await step('boundaryViewer', async () => {
     const tab = await app.editor.openFile(root + '/build/bd-3g9.bin');
-    // v0.4.0 Phase B：>1GB 改走「虚拟滚动查看器」（连续滚动 + 任意位置 O(1) 定位），
-    // 3.9GB 夹具的断言口径随实现切换；512MB 仍在阈值内，保持原分页查看器口径（防回归）。
     if (tab && tab.kind === 'huge') {
       const hv = tab.huge;
       let st0 = hv ? hv.getState() : null;
@@ -3089,90 +3172,98 @@ const RENDERER_TEST = `
       const rowsOk = !!st1 && st1.renderedRows > 0 && st1.renderedRows < 400;
       const jumpOk = hv ? (await hv.gotoLine(Math.max(1, Math.round((st0 ? st0.lines : 1) * 0.9)))) > 0 : false;
       const t512 = await app.editor.openFile(root + '/build/bd-512mb.bin');
-      const ok512 = t512 && t512.kind === 'viewer-lg';
+      const ok512 = t512 && t512.kind === 'huge'; // v0.7.0：>256MB 全走虚拟滚动（不再分页）
+      // 4.1GB 超上限拒绝（alertBox 弹窗需关闭）
+      const t41 = await app.editor.openFile(root + '/build/bd-4g1.bin');
+      const rejected = t41 === null;
+      const mask = document.getElementById('modal-mask');
+      const modalShown = !mask.classList.contains('hidden');
+      const btn = document.querySelector('#modal-actions .tbtn');
+      if (btn) btn.click();
       await app.editor.closeAll();
-      return linesOk && midOk && rowsOk && jumpOk && ok512
+      return linesOk && midOk && rowsOk && jumpOk && ok512 && rejected && modalShown
         ? true
-        : 'huge lines=' + (st0 && st0.lines) + ',mid=' + half + ',rows=' + (st1 && st1.renderedRows) + ',jump=' + jumpOk + ',512=' + ok512;
+        : 'huge lines=' + (st0 && st0.lines) + ',mid=' + half + ',rows=' + (st1 && st1.renderedRows) + ',jump=' + jumpOk + ',512=' + ok512 + ',rej=' + rejected + '/' + modalShown;
     }
-    const kindOk = tab && tab.kind === 'viewer-lg';
-    const barVisible = !document.getElementById('viewer-bar').classList.contains('hidden');
-    const posText = (document.getElementById('viewer-pos').textContent || '').includes('%');
-    const size0 = tab.vwin.size;
-    // 翻页按钮路径（滑窗 API）：offset 0 → 6MB（稀疏 NUL 单行无纵向滚动，滚动触发不适用）
-    await app.editor.slideViewerWindow(tab, 1);
-    let slid = false;
-    for (let i = 0; i < 10 && !slid; i++) {
-      await new Promise((r) => setTimeout(r, 300));
-      slid = tab.vwin.offset > 0;
-    }
-    // 二进制窗口（NUL）：区域编辑应被拒绝
-    const binaryGuard = (await app.editor.setViewerEditing(tab, true)) === false;
-    // 跳转 50%：窗口居中
-    const jumped = await app.editor.viewerJump(tab, '50%');
-    const target = Math.max(0, Math.floor(size0 / 2 - 4 * 1024 * 1024));
-    const jumpOk = jumped && Math.abs(tab.vwin.offset - target) < 1024 * 1024;
-    // 512MB 同为查看器
-    const t512 = await app.editor.openFile(root + '/build/bd-512mb.bin');
-    const ok512 = t512 && t512.kind === 'viewer-lg';
-    // 4.1GB 超限拒绝（alertBox 弹窗需关闭）
-    const t41 = await app.editor.openFile(root + '/build/bd-4g1.bin');
-    const rejected = t41 === null;
-    const mask = document.getElementById('modal-mask');
-    const modalShown = !mask.classList.contains('hidden');
-    const btn = document.querySelector('#modal-actions .tbtn');
-    if (btn) btn.click();
     await app.editor.closeAll();
-    return kindOk && barVisible && posText && slid && binaryGuard && jumpOk && ok512 && rejected && modalShown
-      ? true
-      : 'kind=' + kindOk + ',bar=' + barVisible + ',pos=' + posText + ',slid=' + slid + ',binGuard=' + binaryGuard + ',jump=' + jumpOk + ',512=' + ok512 + ',rej=' + rejected + '/' + modalShown;
+    return 'kind=' + (tab && tab.kind);
   });
 
-  // viewerRegionEdit：280MB 查看器区域编辑 → 拼接写回（大小 + 内容校验）
+  // viewerRegionEdit → hugeEditDefaultOn（v0.7.0 语义改写）：280MB 文本文件走虚拟滚动查看器，
+  // **首次键入自动进入编辑**（无需点「✎ 启用编辑」；本键被消费用于开启，下一次键入落字）。
+  // 视口内编辑 + 保存的写盘校验由 hugeEditChunkCoW / hugeEditSaveAtomic 覆盖（同夹具副本）。
   await step('viewerRegionEdit', async () => {
     const path = root + '/build/bd-280mb.bin';
-    const st0 = await api.stat(path);
     const tab = await app.editor.openFile(path);
-    if (!tab || tab.kind !== 'viewer-lg') {
+    if (!tab || tab.kind !== 'huge') {
       await app.editor.closeAll();
       return 'kind=' + (tab && tab.kind);
     }
-    const on = await app.editor.setViewerEditing(tab, true);
-    const view = app.editor.getView();
-    view.dispatch({ changes: { from: 0, insert: 'REGION_EDIT_OK_7788' } });
-    await new Promise((r) => setTimeout(r, 100));
-    const saved = await app.editor.saveNow(tab);
-    const st1 = await api.stat(path);
-    const sizeOk = st1.size === st0.size + 'REGION_EDIT_OK_7788'.length;
-    const r = await api.readFileRange(path, 0, 64);
-    const head = new TextDecoder('utf-8').decode(r.bytes);
-    const contentOk = head.includes('REGION_EDIT_OK_7788');
-    const off = await app.editor.setViewerEditing(tab, false);
+    const hv = tab.huge;
+    let st = null;
+    for (let i = 0; i < 20 && !(st && st.indexed); i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      st = hv ? hv.getState() : null;
+    }
+    const initiallyOff = !!st && st.editable === false; // 打开时未进入编辑（等首次键入）
+    // 真实键盘路径：第一次键入触发自动开启（被消费），第二次键入落字
+    const rootEl = hv ? document.querySelector('.huge-view') : null;
+    if (!rootEl) { await app.editor.closeAll(); return 'no root'; }
+    rootEl.focus();
+    rootEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true }));
+    let st2 = null;
+    for (let i = 0; i < 20 && !(st2 && st2.editable === true); i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      st2 = hv ? hv.getState() : null;
+    }
+    const autoOn = !!st2 && st2.editable === true && st2.docEditable === true;
+    rootEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'y', bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 600));
+    const st3 = hv ? hv.getState() : null;
+    const typed = !!st3 && st3.dirty === true;
+    // 保存落盘再继续（脏着的 huge 标签直接关闭会把块表留在崩溃恢复区，污染下游
+    // hugeRecover* 用例的条目数/清场断言；280MB 原子重写几秒，可接受）
+    if (typed) await hv.save();
+    const off = hv ? await hv.setEditable(false) : false;
+    const stOff = hv ? hv.getState() : null;
+    const backOn = hv ? await hv.setEditable(true) : true;
     await app.editor.closeAll();
-    return on && saved && sizeOk && contentOk && off ? true : 'on=' + on + ',saved=' + saved + ',size=' + sizeOk + '(' + st1.size + '/' + (st0.size + 14) + '),content=' + contentOk + ',off=' + off;
+    return initiallyOff && autoOn && typed && off === false && stOff && stOff.editable === false && backOn === true
+      ? true
+      : 'initOff=' + initiallyOff + ',auto=' + autoOn + ',typed=' + typed + ',off=' + off + ',editableOff=' + (stOff && stOff.editable) + ',back=' + backOn;
   });
 
-  // viewerReadOnly：>256MB 查看器在「启用区域编辑」前必须是真只读（state.readOnly === true）。
-  // 修复前 openViewerTab 不设 readOnly，switchTab 把它重配成可编辑 → 能直接输入，
-  // 而 saveViewerRegion 因 !editing 静默返回 true（假装保存成功）→ 输入内容随翻页丢失。
+  // viewerReadOnly → hugeReadOnlyBinary（v0.7.0 语义改写）：二进制大文件（全 NUL 的 3.9GB 稀疏
+  // 夹具）即使**键入触发自动开启编辑**也必须保持只读（主进程 editable=false），且给出原因。
   await step('viewerReadOnly', async () => {
-    const path = root + '/build/bd-280mb.bin';
+    const path = root + '/build/bd-3g9.bin';
     const tab = await app.editor.openFile(path);
-    if (!tab || tab.kind !== 'viewer-lg') {
+    if (!tab || tab.kind !== 'huge') {
       await app.editor.closeAll();
       return 'kind=' + (tab && tab.kind);
     }
-    await new Promise((r) => setTimeout(r, 400));
-    const view = app.editor.getView();
-    const readOnlyBefore = view.state.readOnly === true;
-    const barText = (document.getElementById('viewer-pos').textContent || '');
-    const on = await app.editor.setViewerEditing(tab, true);
-    const editableAfter = on === true && app.editor.getView().state.readOnly === false;
-    await app.editor.setViewerEditing(tab, false);
+    const hv = tab.huge;
+    let st = null;
+    for (let i = 0; i < 20 && !(st && st.indexed); i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      st = hv ? hv.getState() : null;
+    }
+    const before = !!st && st.editable === false;
+    // 键入尝试自动开启：二进制文件必须保持只读
+    const rootEl = document.querySelector('.huge-view');
+    if (rootEl) {
+      rootEl.focus();
+      rootEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true }));
+    }
+    await new Promise((r) => setTimeout(r, 800));
+    const st2 = hv ? hv.getState() : null;
+    const stayOff = !!st2 && st2.editable === false;
+    const on = hv ? await hv.setEditable(true) : true; // 显式尝试同样被拒 + 有原因
+    const st3 = hv ? hv.getState() : null;
     await app.editor.closeAll();
-    return readOnlyBefore && editableAfter && barText.includes('只读')
+    return before && stayOff && on === false && !!st3 && !!st3.editableReason
       ? true
-      : 'ro=' + readOnlyBefore + ',editable=' + editableAfter + ',bar=' + barText;
+      : 'before=' + before + ',stay=' + stayOff + ',on=' + on + ',reason=' + (st3 && st3.editableReason);
   });
 
   // bigSearchStream：15MB 文件流式搜索（原 >10MB 整档跳过；行号全局精确）
@@ -7785,9 +7876,11 @@ async function runSmoke(win) {
               'copy-name-writes-clipboard': !!(tabMenu && tabMenu.clicked === true && tabMenu.clip === path.basename(P6_CTX_FILE)),
               'terminal-cwd-only-no-argv': !!(term && term.ok === true && term.cwd === P6_CTX_DIR && Array.isArray(term.argv) && term.argv.length === 0 && term.shell === false && term.mode === 'cwd'),
               'terminal-file-uses-its-dir': !!(termFile && termFile.ok === true && termFile.cwd === P6_CTX_DIR && termFile.argv.length === 0),
-              'terminal-unapproved-rejected': !!(termNo && termNo.ok === false && termNo.reason === 'NOT_APPROVED'),
-              'openpath-unapproved-rejected': !!(openNo && openNo.ok === false && openNo.reason === 'NOT_APPROVED'),
-              'clipboard-unapproved-rejected': !!(clipNo && clipNo.ok === false && clipNo.reason === 'NOT_APPROVED'),
+              // v0.7.0 权限口径变更（用户决策）：树内可达操作不再做白名单 —— 终端（cwd 口径不变）与
+              // 剪贴板对未批准但存在的路径放行；openPath 因可启动任意默认程序（外向性最强）保留白名单
+              'terminal-unapproved-now-allowed': !!(termNo && termNo.ok === true && termNo.mode === 'cwd' && termNo.argv.length === 0),
+              'openpath-unapproved-still-rejected': !!(openNo && openNo.ok === false && openNo.reason === 'NOT_APPROVED'),
+              'clipboard-unapproved-now-allowed': !!(clipNo && clipNo.ok === true && clipNo.text === P6_NOTAPPROVED),
               'clipboard-text-built-by-main': !!(clipForge && clipForge.res && clipForge.res.ok === true && clipForge.res.kind === 'path'
                 && clipForge.res.text === P6_CTX_FILE && clipForge.clip === P6_CTX_FILE && clipForge.clip.indexOf('MH-FORGED') < 0),
               'openpath-missing-rejected': !!(openMissing && openMissing.ok === false && openMissing.reason === 'ENOENT'),

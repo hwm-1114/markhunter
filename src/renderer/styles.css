@@ -1325,6 +1325,39 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   font-family: Consolas, 'Courier New', monospace;
 }
 
+/* ---------- v0.7.0：代码块一键复制按钮（常驻、明显，不依赖 hover） ---------- */
+.markdown-body pre { position: relative; }
+.code-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 2;
+  min-width: 58px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  line-height: 1.2;
+  border: 1px solid var(--mh-border);
+  border-radius: 7px;
+  background: var(--mh-bg-panel);
+  color: var(--mh-text);
+  cursor: pointer;
+  opacity: 1;               /* 常驻可见 —— 刻意不用 hover 才出现的交互 */
+  box-shadow: 0 1px 4px rgba(16, 42, 84, 0.18);
+}
+.code-copy-btn:hover { border-color: var(--mh-accent); color: var(--mh-accent); }
+.code-copy-btn.copied {
+  border-color: var(--mh-accent);
+  color: var(--mh-accent);
+  background: color-mix(in oklab, var(--mh-accent) 10%, var(--mh-bg-panel));
+}
+
+/* v0.7.0：预览模式大纲点击跳转的目标标题短暂高亮 */
+@keyframes ol-jump-flash { from { background: var(--mh-accent-soft); } to { background: transparent; } }
+.markdown-body :is(h1, h2, h3, h4, h5, h6).ol-jump-flash {
+  animation: ol-jump-flash 0.9s ease-out;
+  border-radius: 4px;
+}
+
 /* 图片详情弹窗 */
 .img-detail { display: flex; flex-direction: column; gap: 14px; }.img-detail > img {
   max-width: 100%;
