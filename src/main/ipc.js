@@ -190,7 +190,6 @@ function registerFileIpc(_getWindow) {
 
   // 写文件（必须先通过路径校验）
   ipcMain.handle('fs:write-file', async (_e, filePath, content) => {
-    requireApproved(filePath, '路径不在当前工作目录内，操作已拒绝');
     await fsp.writeFile(filePath, content, 'utf8');
     await markSelfWrite(filePath); // 记录本次写入的 mtime，避免文件监听误报为外部修改
     return true;
@@ -210,14 +209,9 @@ function registerFileIpc(_getWindow) {
     return { bytes: ab, start: r.start, end: r.end, size: r.size, mtime: r.mtime };
   });
 
-  // 写二进制文件（粘贴图片用；必须先通过路径校验）
+  // 写二进制文件（粘贴图片用）
   ipcMain.handle('fs:write-binary', async (_e, filePath, buffer) => {
-    // M3（v0.1.44）：外部文件粘贴图片放行 —— 目标为「已批准文件所在目录」内即可。
-    // write-binary 仅粘贴图片使用，权限面最窄：不放开 create/delete/rename 等其它写操作；
-    // rootDir 内目录仍由 isInside 覆盖，不放开无关目录（S1 语义保持）。
-    const dir = path.dirname(String(filePath));
-    const ok = isApproved(filePath) || isApproved(dir) || dirHasApprovedFile(dir);
-    if (!ok) throw new Error('路径不在当前工作目录内，操作已拒绝');
+    // v0.7.1（用户决策）：写盘白名单整体移除 —— 保留图片扩展名限制（通道语义即「粘贴图片」）。
     const ext = path.extname(filePath).toLowerCase();
     const okExt = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico'];
     if (!okExt.includes(ext)) throw new Error('不支持的图片格式：' + ext);
@@ -265,7 +259,6 @@ function registerFileIpc(_getWindow) {
 
   // 删除（前端已确认；禁止删除任何侧栏根目录本身）
   ipcMain.handle('fs:delete', async (_e, target, isDir) => {
-    requireApproved(target, '路径不在当前工作目录内，操作已拒绝');
     const samePath = (a, b) =>
       process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
     const rp = realpath(target);
@@ -354,7 +347,6 @@ function registerFileIpc(_getWindow) {
 
   // 重命名（旧路径必须已批准）
   ipcMain.handle('fs:rename', async (_e, oldPath, newName) => {
-    requireApproved(oldPath, '路径不在当前工作目录内，操作已拒绝');
     const safe = String(newName).replace(/[\\/:*?"<>|]/g, '_').trim();
     if (!safe) throw new Error('名称不合法');
     const target = path.join(path.dirname(oldPath), safe);
@@ -381,7 +373,6 @@ function registerFileIpc(_getWindow) {
   let writeStreamSeq = 0;
 
   ipcMain.handle('fs:write-stream-open', async (_e, filePath) => {
-    requireApproved(filePath, '路径不在当前工作目录内，操作已拒绝');
     const fh = await fsp.open(filePath, 'w');
     const id = ++writeStreamSeq;
     writeStreams.set(id, { fh, path: filePath });
@@ -409,7 +400,6 @@ function registerFileIpc(_getWindow) {
   // 把 [offset, offset+oldLength) 字节替换为新内容：临时文件流式拷贝 前段+新内容+后段 →
   // 校验大小 → rename 原子覆盖。区域内容单串传输（≤48MB 上限），头尾拷贝在主进程流式进行。
   ipcMain.handle('fs:splice-file', async (_e, filePath, offset, oldLength, content) => {
-    requireApproved(filePath, '路径不在当前工作目录内，操作已拒绝');
     const st = await fsp.stat(filePath);
     if (!st.isFile()) throw new Error('目标不是文件');
     const off = Math.max(0, Math.floor(Number(offset) || 0));

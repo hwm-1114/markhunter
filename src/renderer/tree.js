@@ -418,7 +418,7 @@ export function createTree() {
   function renderExternal() {
     if (externalOpen.size === 0) return Promise.resolve();
     const extRootRow = makeRow({ name: '外部文件', path: EXT_ROOT_KEY, isDir: true, root: true }, {
-      external: true, // 合成行（非真实路径）：不参与拖拽
+      synthetic: true, // 合成行（非真实路径）：不参与拖拽
       onClick: () => toggleSynth(EXT_ROOT_KEY, extRootRow.row),
       onContext: () => {},
     });
@@ -438,7 +438,7 @@ export function createTree() {
     for (const drv of drvs) {
       const driveKey = synthDriveKey(drv);
       const driveRow = makeRow({ name: driveLabel(drv), path: driveKey, isDir: true }, {
-        external: true, // 合成行（非真实路径）：不参与拖拽
+        synthetic: true, // 合成行（非真实路径）：不参与拖拽
         onClick: () => {
           if (expanded.has(driveKey)) {
             expanded.delete(driveKey);
@@ -491,25 +491,55 @@ export function createTree() {
     }
   }
 
-  /** 外部区文件行菜单：仅 打开/重命名/删除（不提供新建；S1 会拒外部新建，避免暴露报错路径） */
+  /** 外部区文件行菜单：v0.7.1 起与内部文件行同面（打开/对比基准/重命名/删除/复制/粘贴） */
   function showExternalFileCtx(x, y, node) {
     select(node.path);
-    showContextMenu(x, y, [
-      { label: '📄 打开', onClick: () => onOpenFile && onOpenFile(node.path) },
-      { sep: true },
-      { label: '✏️ 重命名', onClick: () => renameEntry(node.path, node.name) },
-      { label: '🗑 删除文件', danger: true, onClick: () => removeEntry(node.path, false) },
-    ]);
+    const items = [{ label: '📄 打开', onClick: () => onOpenFile && onOpenFile(node.path) }];
+    // v0.2.1 对比：与内部文件行同款（无基准 → 设为基准；有基准且非自身 → 与基准对比）
+    if (!compareBase) {
+      items.push({ label: '🔖 设为对比基准', onClick: () => {
+        compareBase = node.path;
+        toast(`对比基准：${node.name}（在另一文件上右键「与基准对比」）`);
+      } });
+    } else if (compareBase !== node.path) {
+      items.push({ label: `🔀 与基准对比（${(compareBase.split(/[\\/]/).pop() || '').slice(0, 18)}）`, onClick: () => {
+        const base = compareBase;
+        compareBase = null;
+        onCompareFiles && onCompareFiles(base, node.path);
+      } });
+    }
+    items.push({ sep: true });
+    items.push({ label: '✏️ 重命名', onClick: () => renameEntry(node.path, node.name) });
+    items.push({ label: '🗑 删除文件', danger: true, onClick: () => removeEntry(node.path, false) });
+    // v0.7.1：剪贴板互通与内部一致（复制 / 粘贴到所在目录）
+    items.push({ sep: true });
+    items.push({ label: '📋 复制（Ctrl+C）', onClick: () => { void copyEntryToClipboard(node.path); } });
+    items.push({ label: '📥 粘贴到所在目录（Ctrl+V）', onClick: () => { void pasteEntryFromClipboard(dirOf(node.path)); } });
+    items.push(...commonCtxItems(node.path));
+    renderCtxMenu(x, y, items);
   }
 
-  /** 外部区目录行菜单：仅 刷新 + 切换工作目录到此目录（不提供新建文件/新建目录） */
+  /** 外部区目录行菜单：v0.7.1 起与内部目录行同面（新建文件/目录/刷新/重命名/删除/复制/粘贴）
+   *  + 外部链特有的「切换工作目录到此目录」；仅虚拟根/盘符行（合成 key）保持只读展示。 */
   function showExternalDirCtx(x, y, node) {
     select(node.path);
-    const items = [{ label: '🔄 刷新', onClick: () => refreshNode(node.path, true) }];
+    const items = [
+      { label: '📝 新建文件', onClick: () => createEntry(node.path, 'file') },
+      { label: '📁 新建目录', onClick: () => createEntry(node.path, 'dir') },
+      { sep: true },
+      { label: '📋 复制（Ctrl+C）', onClick: () => { void copyEntryToClipboard(node.path); } },
+      { label: '📥 粘贴到此处（Ctrl+V）', onClick: () => { void pasteEntryFromClipboard(node.path); } },
+      { sep: true },
+      { label: '🔄 刷新', onClick: () => refreshNode(node.path, true) },
+    ];
     if (typeof onSwitchRoot === 'function') {
       items.push({ label: '📂 切换工作目录到此目录', onClick: () => onSwitchRoot(node.path) });
     }
-    showContextMenu(x, y, items);
+    items.push({ sep: true });
+    items.push({ label: '✏️ 重命名', onClick: () => renameEntry(node.path, node.name) });
+    items.push({ label: '🗑 删除目录', danger: true, onClick: () => removeEntry(node.path, true) });
+    items.push(...commonCtxItems(node.path));
+    renderCtxMenu(x, y, items);
   }
 
   // ---------- v0.2.3 跨目录拖拽传输 ----------
@@ -534,9 +564,11 @@ export function createTree() {
     }
   }
 
-  /** 为行挂接拖拽：外部区目录行不可拖（未批准路径传输必被拒）；根行可作放置目标但不可被拖 */
+  /** 为行挂接拖拽：v0.7.1 起外部链的**真实目录行**与内部一致（可拖可收，传输通道已放开）；
+   *  合成行（「外部文件」虚拟根 / 盘符行，opts.synthetic）不是真实路径，不拖不收；
+   *  根行可作放置目标但不可被拖。 */
   function attachDrag(row, node, opts = {}) {
-    if (opts.external && node.isDir) return; // 外部文件链的目录行：不拖不收
+    if (opts.synthetic) return; // 合成行：不拖不收
     row.draggable = !node.root;
     row.addEventListener('dragstart', (e) => {
       if (node.root) {

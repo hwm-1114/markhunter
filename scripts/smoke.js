@@ -1945,6 +1945,38 @@ const RENDERER_TEST = `
       : 'deep=' + deep + ',content=' + rb.content + ',cleanup=' + cleanup;
   });
 
+  // extDirFullOps（v0.7.1）：外部链目录上的**全套写操作**直接放行（不再分活动/外部）——
+  // 创建文件/目录（含内容写入）、复制到剪贴板、粘贴、重命名、删除，全程零权限拒绝。
+  await step('extDirFullOps', async () => {
+    await api.create(extRoot, 'full-ops', 'dir');
+    await api.create(extRoot + '/full-ops', 'inner', 'dir');
+    await api.writeFile(extRoot + '/full-ops/src.md', 'EXT_FULL_OPS_DATA');
+    // 复制 src.md → 粘贴到 inner/（树级剪贴板通道；写盘白名单已移除，全程不拒）
+    await window.api.clipboardCopyFiles([extRoot + '/full-ops/src.md']);
+    const pasted = await api.pasteFiles(extRoot + '/full-ops/inner', { conflict: 'ask' });
+    const pastedOk = !!(pasted && pasted.ok === true && Array.isArray(pasted.pasted) && pasted.pasted.length === 1);
+    let dataOk = false;
+    try { dataOk = (await api.readFile(extRoot + '/full-ops/inner/src.md')).content === 'EXT_FULL_OPS_DATA'; } catch { dataOk = false; }
+    // 重命名（外部目录内的写路径）+ 改名后写入
+    const rn = await api.rename(extRoot + '/full-ops/src.md', 'src-renamed.md');
+    let writeAfterRename = false;
+    try { writeAfterRename = (await api.writeFile(rn, 'EXT_FULL_OPS_DATA_V2')) === true; } catch { writeAfterRename = false; }
+    // 在外部目录里再建一层深层目录 + 删除
+    const deep = await api.create(extRoot + '/full-ops/inner', 'deep', 'dir');
+    const cleanup = await api.remove(extRoot + '/full-ops', true).then(() => true).catch(() => false);
+    // 收尾恢复图片剪贴板（本用例的 CF_HDROP 写入替换了 previewImgCtx 留下的图片，previewImgClip 依赖它）
+    try {
+      const b64f = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      const pngf = root.replace(/\\//g, '\\\\') + '\\\\ext-fullops-restore.png';
+      await api.writeBinary(pngf, Uint8Array.from(atob(b64f), (c) => c.charCodeAt(0)));
+      await window.api.copyImage(pngf);
+      await api.remove(pngf, false);
+    } catch { /* 恢复失败不判红 */ }
+    return pastedOk && dataOk && writeAfterRename && !!deep && cleanup
+      ? true
+      : 'paste=' + pastedOk + ',data=' + dataOk + ',write=' + writeAfterRename + ',deep=' + !!deep + ',clean=' + cleanup;
+  });
+
   await step('extSwitchRoot', async () => {
     await app.editor.openFile(extRoot + '/note.md');
     await new Promise((r) => setTimeout(r, 300));
@@ -2003,7 +2035,11 @@ const RENDERER_TEST = `
     dirNode.dispatchEvent(new MouseEvent('contextmenu', { clientX: 120, clientY: 120, bubbles: true, cancelable: true }));
     await new Promise((r) => setTimeout(r, 60));
     const items2 = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).map((el) => el.textContent);
-    const dOk = items2.some((t) => t.indexOf('切换工作目录') >= 0) && items2.some((t) => t.indexOf('刷新') >= 0) && !items2.some((t) => t.indexOf('新建') >= 0);
+    // v0.7.1：外部目录行菜单与内部一致（新建/复制/粘贴/重命名/删除）+ 外部链特有的切换工作目录
+    const dOk = items2.some((t) => t.indexOf('新建文件') >= 0) && items2.some((t) => t.indexOf('新建目录') >= 0) &&
+      items2.some((t) => t.indexOf('重命名') >= 0) && items2.some((t) => t.indexOf('删除目录') >= 0) &&
+      items2.some((t) => t.indexOf('复制') >= 0) && items2.some((t) => t.indexOf('粘贴') >= 0) &&
+      items2.some((t) => t.indexOf('切换工作目录') >= 0) && items2.some((t) => t.indexOf('刷新') >= 0);
     document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await api.setSettings({ lastSession: lastSessionOrig }); // 收尾恢复现场
     app.state.settings = await api.getSettings();
