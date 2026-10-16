@@ -19,7 +19,7 @@
 //  5) 编辑：spliceLines 只物化首尾受影响块（中间块整块丢弃），新文本追加写 overlay 后按
 //     1000 行 / 4MB 切成新块（视口读取只碰一个小分片）；撤销 = 块级操作栈（默认 200 步，
 //     只存块引用，内存与编辑量成正比）。
-//  6) 硬前置 checkEditable：UTF-8 + 非二进制（无 NUL）+ 每个块 ≤ 32MB，否则一律拒绝编辑。
+//  6) 硬前置 checkEditable：UTF-8 + 非二进制（无 NUL）+ 每个块 ≤ 128MB（v0.8.0 起），否则一律拒绝编辑。
 //     理由：Node 只有 GBK 解码器没有编码器（混编码输出会毁文件）；单块过大物化会 OOM
 //     （典型退化场景是「几行却 3.9GB」的稀疏文件，按行分块时它就是单块）。
 //  7) 崩溃恢复：overlay 字节 + <key>.json 块表（file/overlay 块 + 分片表）落盘，进程崩溃后
@@ -38,15 +38,21 @@ const OVL_VERSION = 1;                          // overlay 模型版本（进 do
 const LINES_PER_SPARSE = 1000;                  // 与 lineindex.SPARSE 对齐：每 1000 行一个行首偏移
 const SUB_PER_BLOCK = 100;                      // 每块 = 100 个稀疏条目 = 10 万行
 const LINES_PER_BLOCK = LINES_PER_SPARSE * SUB_PER_BLOCK;
-const BLOCK_SOFT_MAX_BYTES = 32 * 1024 * 1024;  // 单块字节软上限（超过即禁止编辑：物化会爆内存）
+// v0.8.0：32MB → 128MB。128MB UTF-8 块解码成 JS string 最坏占 ~256MB 堆（V8 两字节字符），
+// 远低于 64 位 V8 的默认堆上限（~4GB）；配合下方物化上限 256MB，编辑物化峰值 ≈ 256MB（旧串）
+// + 256MB（新串）≈ 520MB，仍在安全线内。32MB 时代拒编的「行长过大」文件（如 4~5GB 日志）大多
+// 单块在 32~128MB 之间，放宽后可编辑面明显扩大。
+const BLOCK_SOFT_MAX_BYTES = 128 * 1024 * 1024; // 单块字节软上限（超过即禁止编辑：物化会爆内存）
 const CHUNK_LINES = 1000;                       // 物化文本切分片：行数上限
 const CHUNK_BYTES = 4 * 1024 * 1024;            // 物化文本切分片：字节上限（沿用 lineindex 单次读窗口口径）
 const LINE_MAX_CHARS = 40000;                   // 单行截断（与 lineindex.js:41 LINE_MAX_CHARS 一致）
 const BATCH_MAX_LINES = 1000;                   // readLines 单次行数上限（与 lineindex BATCH_MAX_LINES 一致）
 const READ_MAX_BYTES = 4 * 1024 * 1024;         // readLines 单次读窗口上限
 const READ_MIN_BYTES = 64 * 1024;               // readLines 单次读窗口下限（避免超短行反复扩窗）
-const READLINE_MAX_BYTES = 64 * 1024 * 1024;    // readLineText 单行上限（防 GB 级单行把内存打爆）
-const MATERIALIZE_MAX_BYTES = 64 * 1024 * 1024; // 单次编辑物化文本上限
+const READLINE_MAX_BYTES = 64 * 1024 * 1024;    // readLineText 单行上限（防 GB 级单行把内存打爆；v0.8.0 维持不动）
+// v0.8.0：64MB → 256MB，与 BLOCK_SOFT_MAX_BYTES 128MB 配套——单块上限放宽后，物化上限必须 ≥
+// 单块上限，否则「允许编辑的块」一编辑就撞物化上限报错。峰值核算见 BLOCK_SOFT_MAX_BYTES 上方注释。
+const MATERIALIZE_MAX_BYTES = 256 * 1024 * 1024; // 单次编辑物化文本上限
 const UNDO_LIMIT = 200;                         // 撤销栈上限（计划文档 §6 口径）
 const CACHE_MAX_CHUNKS = 8;                     // overlay 分片读缓存：条数
 const CACHE_MAX_BYTES = 16 * 1024 * 1024;       // overlay 分片读缓存：字节数
@@ -1106,7 +1112,7 @@ function createDoc(opts = {}) {
    * 保存成功后把块表「固化」到新文件：所有块按当前虚拟偏移变成 file 块。
    * （保存写出的字节顺序 = 块顺序，所以这一步零 IO 且行数/字节口径完全保持）
    * 注意：新文件的稀疏行首表这里拿不到（lineindex 归它管），故 starts 置空 →
-   * 块内定位退化为「从块首顺序扫换行」（块 ≤32MB，正确但慢），保存后应由第二步
+   * 块内定位退化为「从块首顺序扫换行」（块 ≤128MB，正确但慢），保存后应由第二步
    * 立刻后台重建索引（huge:index）并把 doc 重新挂到新索引上。
    * @param {{size?:number, mtimeMs?:number, file?:string}} stat 新的文件状态
    */

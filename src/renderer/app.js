@@ -825,6 +825,96 @@ async function boot() {
   });
   $('#btn-toggle-fav').addEventListener('click', () => favorites.toggle());
 
+  // ---------- 右侧收藏栏（可隐藏 / 可 pin 常显；#fav-block 已从左栏原样搬入 #fav-rail） ----------
+  // 状态机（设置键 favRailOpen / favRailPinned / favRailWidth，均在 settings.js 白名单）：
+  //   · favRailPinned=true                  → 挤压式常驻（参与 #main 的 flex 布局，分隔条拖宽并持久化）；
+  //   · !pinned && favRailOpen=true         → 覆盖式（.overlay 浮在编辑区右侧，不占布局），
+  //                                           点栏外 / Esc / ✕ 关闭按钮 → favRailOpen=false；
+  //   · !pinned && !open                    → 隐藏。
+  // 顶栏「🗂 收藏栏」（#btn-fav-rail）= 开合入口：pin 态下点它 = 取消 pin 并关闭 —— 语义恒为「切换收藏栏」。
+  // ⚠️ 既有「☆ 收藏」（#btn-toggle-fav）保持「收藏/取消当前目录」语义不动：
+  //    smoke.js 的 favAdd/favRemove/favPersist 点击它断言星标行为（smoke.js:1301-1360），
+  //    因此右栏开合没有复用那个按钮，而是新增独立入口。
+  const FAVRAIL_WIDTH_DEFAULT = 260;
+  const FAVRAIL_WIDTH_MIN = 200; // initDragResize 的 min；CSS 另有 min-width:180 保底（极端小窗夹取）
+  const FAVRAIL_WIDTH_MAX = 480;
+  const clampFavRailWidth = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return FAVRAIL_WIDTH_DEFAULT;
+    return Math.min(FAVRAIL_WIDTH_MAX, Math.max(FAVRAIL_WIDTH_MIN, Math.round(n)));
+  };
+  let favRailOpen = state.settings.favRailOpen === true;
+  let favRailPinned = state.settings.favRailPinned === true;
+  let favRailWidth = clampFavRailWidth(state.settings.favRailWidth);
+  const favRailEl = $('#fav-rail');
+  const favRailDivider = $('#favrail-divider');
+  const btnFavPin = $('#btn-fav-pin');
+  /** 按当前三态刷 DOM（.open/.pinned/.overlay/.hidden 类即测试断言钩子） */
+  function applyFavRail() {
+    const visible = favRailPinned || favRailOpen;
+    favRailEl.classList.toggle('hidden', !visible);
+    favRailEl.classList.toggle('open', visible);
+    favRailEl.classList.toggle('pinned', favRailPinned);
+    favRailEl.classList.toggle('overlay', visible && !favRailPinned);
+    favRailDivider.classList.toggle('hidden', !(visible && favRailPinned)); // 分隔条只在挤压式常驻时出现
+    favRailEl.style.width = clampFavRailWidth(favRailWidth) + 'px';
+    btnFavPin.classList.toggle('on', favRailPinned);
+    btnFavPin.title = favRailPinned ? '取消固定（回到浮层模式）' : '固定为常驻栏（挤压布局）';
+  }
+  function persistFavRail() {
+    // 本地缓存同步（state.settings 是 __app.state.settings 的真源）+ 落盘（settings:changed 不回环本窗口）
+    state.settings.favRailOpen = favRailOpen;
+    state.settings.favRailPinned = favRailPinned;
+    state.settings.favRailWidth = favRailWidth;
+    window.api.setSettings({ favRailOpen, favRailPinned, favRailWidth });
+  }
+  /** 开合（pin 态下 = 取消 pin 并关闭；非 pin = open 取反）。返回操作后的可见性 */
+  function toggleFavRail() {
+    if (favRailPinned) {
+      favRailPinned = false;
+      favRailOpen = false;
+    } else {
+      favRailOpen = !favRailOpen;
+    }
+    persistFavRail();
+    applyFavRail();
+    return favRailPinned || favRailOpen;
+  }
+  /** pin 开关：pin 上即常显（隐含 open=true）；取消 pin 保持 open → 退为覆盖式浮层 */
+  function setFavRailPinned(on) {
+    favRailPinned = !!on;
+    if (favRailPinned) favRailOpen = true;
+    persistFavRail();
+    applyFavRail();
+    return favRailPinned;
+  }
+  /** 关闭：覆盖式 → open=false；pin 态 → 取消 pin 并关闭（与 toggle 的 pin 分支同语义） */
+  function closeFavRail() {
+    if (!favRailPinned && !favRailOpen) return false;
+    favRailOpen = false;
+    favRailPinned = false;
+    persistFavRail();
+    applyFavRail();
+    return true;
+  }
+  applyFavRail(); // 启动即应用（默认 open=false/pinned=false → hidden，观感与旧版左栏折叠态无关）
+  $('#btn-fav-rail').addEventListener('click', () => toggleFavRail());
+  btnFavPin.addEventListener('click', () => setFavRailPinned(!favRailPinned));
+  $('#btn-favrail-close').addEventListener('click', () => closeFavRail());
+  // 覆盖式的「点栏外收起」（挤压式常驻不收）；mousedown 先于 click，栏内点击与 toggle 按钮自身除外
+  document.addEventListener('mousedown', (e) => {
+    if (!favRailOpen || favRailPinned) return;
+    if (e.target.closest('#fav-rail') || e.target.closest('#btn-fav-rail')) return;
+    closeFavRail(); // 此分支 pinned 必为 false → 只清 open
+  });
+  // 覆盖式 Esc 收起：右键菜单 / 弹窗开着时让位（ui.js 的全局 Esc 处理器负责它们，不重复关两层）
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !favRailOpen || favRailPinned) return;
+    if (!$('#ctx-menu').classList.contains('hidden')) return;
+    if (!$('#modal-mask').classList.contains('hidden')) return;
+    closeFavRail();
+  });
+
   async function openDirectory() {
     const dir = await window.api.selectDirectory();
     if (!dir) return;
@@ -1392,6 +1482,30 @@ async function boot() {
   initDragResize($('#sidebar-divider'), { target: '#sidebar', dir: 'x', min: 200, max: 520 });
   initDragResize($('#bottom-divider'), { target: '#bottom-panel', dir: 'y', min: 120, max: 640, reverse: true });
   initDragResize($('#tree-search-divider'), { target: '#sidebar-search', dir: 'y', min: 80, max: 400, reverse: true });
+  // 右侧收藏栏：分隔条在栏**左侧**，向左拖 = 加宽 → reverse:true（同 bottom-panel 的方向关系）
+  initDragResize(favRailDivider, { target: '#fav-rail', dir: 'x', min: FAVRAIL_WIDTH_MIN, max: FAVRAIL_WIDTH_MAX, reverse: true });
+  // 右栏宽度持久化（initDragResize 无回调且 ui.js 不在改动面）：拖完（mouseup）/ 双击复位后量真实宽度落盘
+  favRailDivider.addEventListener('mousedown', () => {
+    const onUp = () => {
+      document.removeEventListener('mouseup', onUp);
+      const w = Math.round(favRailEl.getBoundingClientRect().width);
+      if (w > 0 && w !== favRailWidth) {
+        favRailWidth = clampFavRailWidth(w);
+        persistFavRail();
+      }
+    };
+    document.addEventListener('mouseup', onUp);
+  });
+  favRailDivider.addEventListener('dblclick', () => {
+    // initDragResize 的 dblclick 先清内联宽度（注册顺序在前），下一个宏任务再量复位后的真实宽度
+    setTimeout(() => {
+      const w = Math.round(favRailEl.getBoundingClientRect().width);
+      if (w > 0 && w !== favRailWidth) {
+        favRailWidth = clampFavRailWidth(w);
+        persistFavRail();
+      }
+    }, 0);
+  });
 
   // 预览按钮可用性随标签变化
   const setPreviewLabel = () => {
@@ -1559,6 +1673,13 @@ async function boot() {
     if (s.sidebarCollapsed && JSON.stringify(s.sidebarCollapsed) !== JSON.stringify(prev.sidebarCollapsed)) {
       applySidebarCollapsed(s.sidebarCollapsed);
     }
+    // 右侧收藏栏：其它窗口改了开合/pin/宽度 → 本窗口跟随（同为窗口级 UI，不写回）
+    if (s.favRailOpen !== prev.favRailOpen || s.favRailPinned !== prev.favRailPinned || s.favRailWidth !== prev.favRailWidth) {
+      favRailOpen = s.favRailOpen === true;
+      favRailPinned = s.favRailPinned === true;
+      favRailWidth = clampFavRailWidth(s.favRailWidth);
+      applyFavRail();
+    }
   });
   // 同文件已在另一窗口打开（本窗口为后来者）→ 自动转只读，编辑仍可在标签右键解除；
   // 编辑窗口保存后经 file-changed 静默同步到本窗口（tabs.js 只读节流，不弹提示不抖动）
@@ -1644,6 +1765,28 @@ async function boot() {
         getState: () => ({ ...sidebarCollapsed }),
         toggle: (k) => toggleSidebarSection(k),
         set: (v) => { applySidebarCollapsed(v, true); return { ...sidebarCollapsed }; },
+      },
+      // 右侧收藏栏（需求2）：getState 全是原始值 + DOM 类名（.open/.pinned/.overlay），可结构化克隆；
+      // 状态判读也可直接断言 `#fav-rail.open` / `#fav-rail.pinned` / `#fav-rail.hidden` 与 settings 三键
+      favRail: {
+        getState: () => ({
+          open: favRailOpen,
+          pinned: favRailPinned,
+          width: favRailWidth,
+          visible: !favRailEl.classList.contains('hidden'),
+          overlay: favRailEl.classList.contains('overlay'),
+          cls: favRailEl.className,
+          dividerVisible: !favRailDivider.classList.contains('hidden'),
+          items: document.querySelectorAll('#fav-list .fav-item').length,
+        }),
+        toggle: () => toggleFavRail(),
+        open: () => {
+          if (!favRailOpen || favRailPinned) { favRailOpen = true; persistFavRail(); applyFavRail(); }
+          return favRailOpen;
+        },
+        close: () => closeFavRail(),
+        setPinned: (v) => setFavRailPinned(v),
+        setWidth: (w) => { favRailWidth = clampFavRailWidth(w); persistFavRail(); applyFavRail(); return favRailWidth; },
       },
       // B8：字号 / 行高（设置弹窗与 Ctrl+=/-/0 的共同出口）
       fonts: {        DEFAULTS: { ...FONT_DEFAULTS },

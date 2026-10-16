@@ -1,7 +1,7 @@
 {
     "name": "@hwm-1114/markhunter",
     "productName": "MarkHunter",
-    "version": "0.7.2",
+    "version": "0.8.0",
     "description": "MarkHunter 马克猎手 —— 执笔即江湖，所写皆锋芒",
     "main": "src/main/main.js",
     "repository": {
@@ -27,6 +27,7 @@
         "dev:css": "node node_modules/@tailwindcss/cli/dist/index.mjs -i src/renderer/tailwind-input.css -o src/renderer/dist/tailwind.css --minify --watch=always",
         "icon": "python scripts/gen_icon.py",
         "smoke": "electron . --smoke",
+        "bigprobe": "electron . --bigprobe",
         "release": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
     },
     "author": "VibeCode",

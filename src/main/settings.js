@@ -21,6 +21,10 @@ const ALLOWED_KEYS = new Set([
   'previewFontSize',
   // 0.5.0 Phase 5a E2：侧栏分区折叠态（{ fav, tree, search } 三个布尔）
   'sidebarCollapsed',
+  // 右侧收藏栏（fav 从左侧栏搬到右栏）：开合 / pin 常显 / 宽度
+  'favRailOpen',
+  'favRailPinned',
+  'favRailWidth',
 ]);
 
 // 主题引擎：56 个合法主题名（daisyUI 内置 35 + 自研经典 markhunter-classic + 特效皮肤 20）
@@ -69,6 +73,11 @@ const DEFAULTS = {
   previewFontSize: 14.5, // 预览字号（px，10~32）
   // 0.5.0 Phase 5a E2：侧栏三分区折叠态 { fav, tree, search }（缺省 = 全展开，老用户观感零变化）
   sidebarCollapsed: {},
+  // 右侧收藏栏（渲染端夹取/归一化，与字号等键同口径：本文件只管白名单与默认值）：
+  //   pinned=true → 挤压式常驻；!pinned && open → 覆盖式浮层；!pinned && !open → 隐藏。
+  favRailOpen: false,   // 收藏栏开合（bool）
+  favRailPinned: false, // 收藏栏 pin 常显（bool；true 时隐含可见，open 键不参与其中判定）
+  favRailWidth: 260,    // 收藏栏宽度（px，渲染端夹取 200~480）
 };
 
 /** v0.2.3 sidebarRoots 规范化：仅保留字符串项、去重（Windows 大小写不敏感）、上限 12 */

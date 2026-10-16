@@ -36,7 +36,7 @@
 //  h) meta.chunks 含「撤销/重做遗留但已不被块表引用」的历史分片 → 物理字节 ≥ 被引用分片之和。
 //
 // ── 覆盖不到的（诚实清单：脚本内 skipItem 会打印，且不计入总数）─────────────────────
-// >1GB 稀疏文件 / 真实 32MiB 单块、并发保存、跨窗口所有权（overlay-ipc.js 层，需 electron 桩）、
+// >1GB 稀疏文件 / 真实 128MiB 单块、并发保存、跨窗口所有权（overlay-ipc.js 层，需 electron 桩）、
 // 保存中断与 rename 失败注入、渲染端消费口径（hugeview/tabs）、真实 lineindex.getIndex 全链路、
 // overlay 目录 30 天老化默认值——逐条理由见运行时输出的 [SKIP] 行。
 'use strict';
@@ -149,7 +149,7 @@ const utc = (ms) => new Date(ms).toISOString();
 // 测试数据：确定性大文件
 //   行 i（1 基）= 'L' + i 补零 6 位 + '|' + (i 奇 ? 'x' : 'y') × 108，定长 116 字符，全 ASCII
 //   → 字符数 == 字节数（B 段的列偏移断言才可能是字节级精确的）；
-//   → 116 字节/行 × 105000 行 ≈ 11.7MB（8–20MB 区间，远低于 32MiB 单块软上限）。
+//   → 116 字节/行 × 105000 行 ≈ 11.7MB（8–20MB 区间，远低于 128MiB 单块软上限）。
 // ============================================================================
 const LINE_COUNT = 105000;             // 105000 = 1×10万 + 5000 → 2 块（覆盖跨块与块边界编辑）
 const SPARSE_EVERY = 1000;             // 与 lineindex.SPARSE / overlay.LINES_PER_SPARSE 同口径
@@ -268,7 +268,7 @@ async function main() {
     LINES_PER_SPARSE: 1000,
     SUB_PER_BLOCK: 100,
     LINES_PER_BLOCK: 100000,
-    BLOCK_SOFT_MAX_BYTES: 32 * 1024 * 1024,
+    BLOCK_SOFT_MAX_BYTES: 128 * 1024 * 1024, // v0.8.0：32MiB → 128MiB（overlay.js 常量同步放宽）
   })) {
     if (overlay[n] !== v) {
       throw new Error(`overlay 常量锚点失配：${n} 期望 ${v}，实际 ${raw(overlay[n])}`);
@@ -296,7 +296,7 @@ async function main() {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // 本探针明确**没有**覆盖的面（不计入总数，也不假装通过）——列在输出里便于复核
-  skipItem('B-1', '>1GB 稀疏文件 / 单块 >32MiB 的真实文件',
+  skipItem('B-1', '>1GB 稀疏文件 / 单块 >128MiB 的真实文件',
     '需要 GB 级磁盘与数十秒 IO；单块超限分支已由第 6 项（纯函数 checkEditable）精确覆盖，'
     + '但「真去物化一个 3.9GB 单块」没有实测（预期被 checkEditable 拒绝，故不会走到物化）');
   skipItem('B-2', '并发保存 / 同一 key 的并发编辑',
@@ -506,7 +506,7 @@ async function main() {
       return `${cases.length} 组往返一致 + 10 例退化输入`;
     });
 
-    await check(6, 'checkEditable：正常 / binary / 非 UTF-8 / 单块超 32MiB / 空块表 五种判定', () => {
+    await check(6, 'checkEditable：正常 / binary / 非 UTF-8 / 单块超 128MiB / 空块表 五种判定', () => {
       const ok = [{ kind: 'file', start: 0, bytes: 1024, lines: 10, endsNL: true }];
       const r1 = F.checkEditable({ encoding: 'utf-8' }, ok);
       assertDeep(r1, { editable: true }, '正常 UTF-8 非二进制 → {editable:true}（形状逐字核对）');
@@ -533,19 +533,19 @@ async function main() {
       const r3c = F.checkEditable({}, ok);
       assertDeep(r3c, { editable: true }, 'encoding 缺省按 utf-8 → 可编辑');
 
-      // 32MiB 上限：正常大块临界（=上限，放行）/ 超 1 字节（拒绝）
+      // 128MiB 上限（v0.8.0 起）：正常大块临界（=上限，放行）/ 超 1 字节（拒绝）
       const atLimit = [{ kind: 'file', start: 0, bytes: overlay.BLOCK_SOFT_MAX_BYTES, lines: 1, endsNL: false }];
       assertDeep(F.checkEditable({ encoding: 'utf-8' }, atLimit), { editable: true },
-        '恰好在 32MiB 上限（不 > ）→ 放行');
-      const over = 32 * 1024 * 1024 + 1;
+        '恰好在 128MiB 上限（不 > ）→ 放行');
+      const over = 128 * 1024 * 1024 + 1;
       const r4 = F.checkEditable({ encoding: 'utf-8' }, [
         { kind: 'file', start: 0, bytes: 1024, lines: 10, endsNL: true },
         { kind: 'file', start: 1024, bytes: over, lines: 10, endsNL: true },
       ]);
-      assertEq(r4.editable, false, `单块 ${over} 字节（>32MiB）→ editable:false`);
+      assertEq(r4.editable, false, `单块 ${over} 字节（>128MiB）→ editable:false`);
       assertEq(r4.block, 1, '超限块下标必须是 1（取最大块）');
       assertEq(r4.bytes, over, '超限字节数原样回传');
-      assertDeep(r4.reason, '单块 32.0MB 超出编辑上限 32MB（行长过大或行数过少，物化会占满内存），暂不支持编辑',
+      assertDeep(r4.reason, '单块 128.0MB 超出编辑上限 128MB（行长过大或行数过少，物化会占满内存），暂不支持编辑',
         '超限 reason 逐字核对（这就是「40000 字符超长行 / 稀疏单块」被禁编辑的原因）');
 
       // 空块表
@@ -555,7 +555,7 @@ async function main() {
         '块表 null → 同空块表');
       assertDeep(F.checkEditable(null, []), { editable: false, reason: '块表为空，无法编辑' },
         'base=null 时仍走块表分支（encoding 兜底 utf-8）');
-      return '5 种判定 + 32MiB 临界 + 3 例退化输入，形状逐字核对';
+      return '5 种判定 + 128MiB 临界 + 3 例退化输入，形状逐字核对';
     });
 
     await check(7, 'docKey：同 size+mtime → 同 key；size / mtime / version 任一变化 → 不同 key', () => {
@@ -650,7 +650,7 @@ async function main() {
     assertEq(idxSelf.starts[99], 100000 * (LINE_LEN + 1), 'starts[99] = 第 100001 行行首 = 块 1 首字节');
     assertEq(idxSelf.starts[99], fx.offsets[100000], 'starts[99] 与生成时记录的行首一致');
     assertEq(idxSelf.binary, false, '夹具非二进制');
-    assertTrue(fx.size < 32 * 1024 * 1024, '夹具必须 <32MiB（单块软上限内）');
+    assertTrue(fx.size < overlay.BLOCK_SOFT_MAX_BYTES, '夹具必须在单块软上限内（v0.8.0：128MiB）');
     // 行号换算：插入段占第 2..4 行 → 「插入后文档第 n 行」= 源文件第 (n-3) 行（n ≥ 5 时）
     // 1 基源行号 r ↔ fx.lines[r-1]（0 基）→ INSROW(n) = fx.lines[n-4]
     const OLDROW = (i) => fx.lines[i - 1];

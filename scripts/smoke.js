@@ -8382,6 +8382,234 @@ async function runSmoke(win) {
         }
       }
 
+      // ==========================================================================
+      // v0.8.0 新功能回归批（4 条）—— 位置：v0.7.2 批之后、E2E_RESULTS 之前，真·append。
+      //   ① tabDragReorder：标签栏合成 DragEvent 拖拽重排（DOM 序 + 会话序一致）
+      //   ② favRailToggle：收藏右栏 隐藏→覆盖式打开→pin 常驻→再点关闭 状态机 + 设置落盘
+      //   ③ hugeSelectCopy：大文件视图文本可选中、Ctrl+C 写系统剪贴板（主进程读回）+ 无选区复制当前行
+      //   ④ hugeTypeFocus：点击视口即聚焦、键入即编辑（首键开会话、次键落字）
+      // 坑①：p8Eval 模板串内部只用单引号，绝不出现裸反引号。
+      // ==========================================================================
+      {
+        const P8_DND = [1, 2, 3].map((i) => path.join(TEST_ROOT, 'p8-dnd-' + i + '.md'));
+        const P8_HUGE_TXT = path.join(TEST_ROOT, 'p8-huge-2mb.txt');
+        const P8_HUGE_TYPE = path.join(TEST_ROOT, 'p8-type.bin');
+        const P8_HUGE_SRC = path.join(TEST_ROOT, 'build', 'bd-280mb.bin'); // 主进程 setup 预置的大文件材料
+        for (const f of P8_DND) fs.writeFileSync(f, '# p8 dnd ' + path.basename(f) + '\n', 'utf8');
+        {
+          const line = 'p8 huge line 00000000 abcdefghijklmnopqrstuvwxyz\n'; // 51B
+          const parts = [];
+          for (let i = 0; i < 42000; i++) parts.push(line); // ≈ 2.1MB
+          fs.writeFileSync(P8_HUGE_TXT, parts.join(''), 'utf8');
+        }
+        fs.copyFileSync(P8_HUGE_SRC, P8_HUGE_TYPE);
+
+        const p8Eval = (code) => win.webContents.executeJavaScript(code);
+        const p8Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const p8J = (v) => JSON.stringify(v === undefined ? null : v);
+        const p8Case = async (name, fn) => {
+          let r;
+          try {
+            r = await fn();
+          } catch (err) {
+            r = { ok: false, detail: 'ERR: ' + (err && err.stack ? err.stack.split('\n').slice(0, 3).join(' // ') : String(err)), evidence: '' };
+          }
+          results.push([name, r && r.ok === true ? true : ((r && r.detail) || 'false'), (r && r.evidence) || '']);
+        };
+        const p8Fail = (conj, evidence) => ({
+          ok: Object.keys(conj).every((k) => conj[k] === true),
+          detail: Object.keys(conj).map((k) => k + '=' + conj[k]).join(','),
+          evidence: evidence || '',
+        });
+        const p8Wait = async (code, pred, ms = 10000, step = 200) => {
+          const t0 = Date.now();
+          let v = null;
+          for (;;) {
+            v = await p8Eval(code).catch(() => null);
+            if (v !== null && pred(v)) return v;
+            if (Date.now() - t0 > ms) return v;
+            await p8Sleep(step);
+          }
+        };
+        const p8Reset = async () => {
+          await p8Eval(`(async () => { await window.__app.openDirFromPath(${p8J(TEST_ROOT)}); })()`).catch(() => {});
+          await p8Sleep(120);
+          await p8Eval(`(() => {
+            const e = window.__app.editor;
+            if (window.__app.quickOpen) window.__app.quickOpen.close();
+            document.querySelectorAll('.tabs-menu').forEach((m) => m.classList.add('hidden'));
+            const hm = document.getElementById('ctx-menu'); if (hm) hm.classList.add('hidden');
+            e.hideTabsHud();
+            if (e.getPaneCount() > 1) e.mergePanes();
+            e.closeAll();
+            e.clearClosedStack();
+            return e.getPaneCount();
+          })()`).catch(() => -1);
+          await p8Sleep(200);
+        };
+
+        try {
+          // ==================== 1. tabDragReorder：标签拖拽重排 ====================
+          await p8Case('tabDragReorder', async () => {
+            await p8Reset();
+            for (const f of P8_DND) {
+              await p8Eval(`(async () => { await window.__app.editor.openFile(${p8J(f)}); return true; })()`);
+              await p8Sleep(200);
+            }
+            const before = await p8Eval(`(() => Array.from(document.querySelectorAll('.tab .tab-name')).map((n) => n.textContent))()`);
+            // 合成 DnD：拖第 1 个标签到第 3 个标签的右半（= 插到它后面）
+            const drag = await p8Eval(`(() => {
+              const tabs = Array.from(document.querySelectorAll('.tab'));
+              if (tabs.length !== 3) return { err: 'tabs=' + tabs.length };
+              const dt = new DataTransfer();
+              const target = tabs[2];
+              const r = target.getBoundingClientRect();
+              const opts = { dataTransfer: dt, bubbles: true, cancelable: true, clientX: r.right - 2, clientY: r.top + 2 };
+              tabs[0].dispatchEvent(new DragEvent('dragstart', opts));
+              target.dispatchEvent(new DragEvent('dragover', opts));
+              target.dispatchEvent(new DragEvent('drop', opts));
+              tabs[0].dispatchEvent(new DragEvent('dragend', opts));
+              return { err: null };
+            })()`);
+            await p8Sleep(400);
+            const after = await p8Eval(`(() => Array.from(document.querySelectorAll('.tab .tab-name')).map((n) => n.textContent))()`);
+            const sessionOrder = await p8Eval(`(() => window.__app.editor.getSession().paths.map((p) => p.split(/[\\\\/]/).pop()))()`);
+            const want = ['p8-dnd-2.md', 'p8-dnd-3.md', 'p8-dnd-1.md'];
+            const conj = {
+              'before-order-123': !!(before && before.join(',') === 'p8-dnd-1.md,p8-dnd-2.md,p8-dnd-3.md'),
+              'drag-no-error': !!(drag && drag.err === null),
+              'dom-order-231': !!(after && after.join(',') === want.join(',')),
+              'session-order-231': !!(sessionOrder && sessionOrder.join(',') === want.join(',')),
+            };
+            return p8Fail(conj, 'before=' + p8J(before) + ' after=' + p8J(after) + ' session=' + p8J(sessionOrder) + ' drag=' + p8J(drag));
+          });
+
+          // ==================== 2. favRailToggle：收藏右栏状态机 ====================
+          await p8Case('favRailToggle', async () => {
+            const st0 = await p8Eval(`(() => window.__app.favRail.getState())()`);
+            // 点工具栏「🗂 收藏栏」→ 覆盖式打开
+            await p8Eval(`(() => { document.getElementById('btn-fav-rail').click(); return true; })()`);
+            await p8Sleep(300);
+            const st1 = await p8Eval(`(() => window.__app.favRail.getState())()`);
+            // 点 pin → 挤压式常驻（分隔条可见）
+            await p8Eval(`(() => { document.getElementById('btn-fav-pin').click(); return true; })()`);
+            await p8Sleep(300);
+            const st2 = await p8Eval(`(() => window.__app.favRail.getState())()`);
+            const saved2 = await p8Eval(`window.api.getSettings().then((s) => ({ open: s.favRailOpen, pinned: s.favRailPinned }))`);
+            // pin 态再点「🗂 收藏栏」→ 取消 pin 并关闭
+            await p8Eval(`(() => { document.getElementById('btn-fav-rail').click(); return true; })()`);
+            await p8Sleep(300);
+            const st3 = await p8Eval(`(() => window.__app.favRail.getState())()`);
+            const saved3 = await p8Eval(`window.api.getSettings().then((s) => ({ open: s.favRailOpen, pinned: s.favRailPinned }))`);
+            const conj = {
+              'initial-hidden': !!(st0 && st0.visible === false && st0.pinned === false),
+              'toggle-opens-overlay': !!(st1 && st1.open === true && st1.overlay === true && st1.visible === true && st1.pinned === false),
+              'pin-docks-with-divider': !!(st2 && st2.pinned === true && st2.visible === true && st2.dividerVisible === true),
+              'settings-persist-pinned': !!(saved2 && saved2.pinned === true),
+              'toggle-in-pinned-closes': !!(st3 && st3.visible === false && st3.pinned === false),
+              'settings-persist-closed': !!(saved3 && saved3.open === false && saved3.pinned === false),
+            };
+            return p8Fail(conj, 'st0=' + p8J(st0) + ' st1=' + p8J(st1) + ' st2=' + p8J(st2) + ' saved2=' + p8J(saved2) + ' st3=' + p8J(st3) + ' saved3=' + p8J(saved3));
+          });
+
+          // ==================== 3. hugeSelectCopy：大文件视图选中 + Ctrl+C ====================
+          await p8Case('hugeSelectCopy', async () => {
+            await p8Reset();
+            await p8Eval(`(() => { window.__app.editor.setHugeThresholdMB(1); return true; })()`);
+            await p8Eval(`(async () => { await window.__app.editor.openFile(${p8J(P8_HUGE_TXT)}); return true; })()`);
+            const hvReady = await p8Wait(`(() => { const t = window.__app.editor.getActiveTab();
+              return t && t.kind === 'huge' && t.huge && t.huge.getState().indexed && t.huge.getState().renderedRows > 0 ? true : null; })()`, (v) => v === true, 15000, 300);
+            const sel = await p8Eval(`(() => {
+              const texts = Array.from(document.querySelectorAll('.huge-view .huge-rows .huge-text'));
+              if (texts.length < 2) return { rows: texts.length };
+              const cs = getComputedStyle(texts[0]).userSelect;
+              const r = document.createRange();
+              const n0 = texts[0].firstChild || texts[0];
+              const n1 = texts[1].firstChild || texts[1];
+              r.setStart(n0, 0);
+              r.setEnd(n1, n1.length || 0);
+              const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+              return { cs: cs, len: s.toString().length, head: s.toString().slice(0, 20), rows: texts.length };
+            })()`);
+            await p8Eval(`(() => { const root = document.querySelector('.huge-view'); root.focus();
+              root.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', code: 'KeyC', ctrlKey: true, bubbles: true, cancelable: true })); return true; })()`);
+            await p8Sleep(500);
+            const clip1 = clipboard.readText();
+            // 无选区 → 复制当前行（视口首行）
+            const line1 = await p8Eval(`(() => {
+              window.getSelection().removeAllRanges();
+              const root = document.querySelector('.huge-view'); root.focus();
+              root.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', code: 'KeyC', ctrlKey: true, bubbles: true, cancelable: true }));
+              const st = window.__app.editor.getActiveTab().huge.getState();
+              return { firstLine: st.firstLine };
+            })()`);
+            await p8Sleep(500);
+            const clip2 = clipboard.readText();
+            const conj = {
+              'huge-tab-ready': hvReady === true,
+              'user-select-text': !!(sel && sel.cs === 'text'),
+              'selection-nonempty': !!(sel && sel.len > 20),
+              'ctrlc-writes-clipboard': !!(clip1 && sel && sel.head && clip1.indexOf(sel.head) >= 0),
+              'no-selection-copies-line': !!(clip2 && clip2.indexOf('p8 huge line') >= 0),
+            };
+            return p8Fail(conj, 'sel=' + p8J(sel) + ' clip1=' + p8J(clip1.slice(0, 40)) + ' clip2=' + p8J(clip2.slice(0, 60)) + ' line1=' + p8J(line1));
+          });
+
+          // ==================== 4. hugeTypeFocus：点击聚焦 + 键入即编辑 ====================
+          await p8Case('hugeTypeFocus', async () => {
+            await p8Reset();
+            // 280MB 夹具超默认 50MB 上限：先提上限并显式刷新渲染端缓存（sameFileTwoPanes 同款姿势）
+            await p8Eval(`(async () => { await window.api.setSettings({ maxFileSizeMB: 512 });
+              window.__app.state.settings = await window.api.getSettings();
+              window.__app.editor.setHugeThresholdMB(200); return true; })()`);
+            await p8Eval(`(async () => { await window.__app.editor.openFile(${p8J(P8_HUGE_TYPE)}); return true; })()`);
+            const ready = await p8Wait(`(() => { const t = window.__app.editor.getActiveTab();
+              return t && t.kind === 'huge' && t.huge && t.huge.getState().indexed && t.huge.getState().renderedRows > 0 ? true : null; })()`, (v) => v === true, 20000, 400);
+            const focused = await p8Eval(`(() => {
+              const root = document.querySelector('.huge-view');
+              const row = document.querySelector('.huge-view .huge-rows .huge-line');
+              if (!root || !row) return { err: 'no root/row' };
+              row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+              return { active: document.activeElement === root || root.contains(document.activeElement) };
+            })()`);
+            // 首键开会话
+            await p8Eval(`(() => { const root = document.querySelector('.huge-view');
+              root.dispatchEvent(new KeyboardEvent('keydown', { key: '5', code: 'Digit5', bubbles: true, cancelable: true })); return true; })()`);
+            const editOn = await p8Wait(`(() => { const st = window.__app.editor.getActiveTab().huge.getState();
+              return st.editable === true ? { editable: true, docEditable: st.docEditable } : null; })()`, (v) => !!v, 15000, 300);
+            // 次键落字
+            await p8Eval(`(() => { const root = document.querySelector('.huge-view');
+              root.dispatchEvent(new KeyboardEvent('keydown', { key: '5', code: 'Digit5', bubbles: true, cancelable: true })); return true; })()`);
+            const dirty = await p8Wait(`(() => { const st = window.__app.editor.getActiveTab().huge.getState();
+              return st.dirty === true && st.caret ? { caretLine: st.caret.line, dirtyCount: st.dirtyCount } : null; })()`, (v) => !!v, 15000, 300);
+            // 收尾：保存后关闭（脏关闭会留恢复区块表污染下游用例）
+            if (dirty) {
+              await p8Eval(`(async () => { const hv = window.__app.editor.getActiveTab().huge; await hv.save(); await hv.setEditable(false); return true; })()`);
+            }
+            const conj = {
+              'huge-tab-ready': ready === true,
+              'mousedown-focuses-root': !!(focused && focused.active === true),
+              'first-key-opens-edit': !!(editOn && editOn.editable === true && editOn.docEditable === true),
+              'second-key-types-dirty': !!dirty,
+            };
+            return p8Fail(conj, 'focused=' + p8J(focused) + ' editOn=' + p8J(editOn) + ' dirty=' + p8J(dirty));
+          });
+        } finally {
+          try { await p8Eval(`(async () => {
+            try { window.__app.editor.setHugeThresholdMB(null); } catch (e) {}
+            try { await window.api.setSettings({ maxFileSizeMB: 50 }); window.__app.state.settings = await window.api.getSettings(); } catch (e) {}
+            try { if (window.__app.favRail) { window.__app.favRail.setPinned(false); window.__app.favRail.close(); } } catch (e) {}
+            try { const e2 = window.__app.editor; if (e2.getPaneCount() > 1) e2.mergePanes(); e2.closeAll(); e2.clearClosedStack(); } catch (e) {}
+            try { await window.__app.openDirFromPath(${p8J(TEST_ROOT)}); } catch (e) {}
+            return true;
+          })()`); } catch { /* 忽略 */ }
+          try { await p8Sleep(300); } catch { /* 忽略 */ }
+          for (const f of P8_DND.concat([P8_HUGE_TXT, P8_HUGE_TYPE])) {
+            try { fs.rmSync(f, { force: true }); } catch { /* 占用则忽略 */ }
+          }
+        }
+      }
+
       console.log('E2E_RESULTS');
       for (const r of results) {
         console.log('  -', r.join(' | '));

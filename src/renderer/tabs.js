@@ -556,6 +556,25 @@ export function createEditor(callbacks) {
       e.preventDefault();
       el.scrollLeft += dx;
     }, { passive: false });
+    // 栏内拖拽排序：标签栏**空白处**落点 = 移到该栏末尾（标签元素上的落点由 renderPaneTabs
+    // 的 per-tab dragover/drop 处理并 stopPropagation，冒不到这里；dragTab === 悬停标签的早退
+    // 路径除外，故保留 closest('.tab') 判空）。
+    // ⚠️ 容器监听必须在 createPane 一次性绑定 —— renderPaneTabs 每轮都重建 innerHTML，
+    //    在渲染函数里绑会让监听器随重建次数叠加。
+    pane.tabsEl.addEventListener('dragover', (e) => {
+      if (!dragTab) return; // 树节点 / OS 文件拖拽不归这里管（window 级捕获处理器负责文件拖入）
+      if (e.target.closest('.tab')) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    });
+    pane.tabsEl.addEventListener('drop', (e) => {
+      if (!dragTab) return;
+      if (e.target.closest('.tab')) return;
+      e.preventDefault();
+      const t = dragTab;
+      dragTab = null;
+      moveTabToIndex(t, pane, registry.docsOf(pane.id).filter((x) => x !== t).length); // 末尾
+    });
     // 视图归属靠 updateListener 里的 registry.docOfView(u.view) —— 每个 pane 一个 EditorView
     pane.view = new EditorView({ parent: dom.host, state: makeState('', 'text') });
     // 输入法组合开始/结束：期间 Tab 不触发缩进插入（每视图一份状态）
@@ -712,6 +731,13 @@ export function createEditor(callbacks) {
     if (x < r.width * 0.3) return 'left';
     if (x > r.width * 0.7) return 'right';
     return null;
+  }
+
+  /** 清掉一栏标签上的全部插入指示线（dragend 兜底；renderTabs 重建后元素本就被替换） */
+  function clearTabDropMarks(pane) {
+    for (const el of pane.tabsEl.querySelectorAll('.tab-drop-before, .tab-drop-after')) {
+      el.classList.remove('tab-drop-before', 'tab-drop-after');
+    }
   }
 
   // 首栏（p0）：与 Phase 1 的单栏形态逐位对应
@@ -951,6 +977,42 @@ export function createEditor(callbacks) {
       renderTabsAll();
     }
     updateEmpty();
+    if (onSessionChange) onSessionChange();
+    return true;
+  }
+
+  /** 拖拽排序：把标签移到目标栏的 index 下标（0 基，越界夹取；= 栏内文档数即末尾）。
+   *  pane 可传栏对象 / 栏号 0·1 / 栏 id 'p0'/'p1'（拖放 handler 传栏对象，测试钩子传栏号/栏 id）。
+   *  · 重排基于 docs() 数组的**对象引用**（不按 path —— 同文件两栏视图同 path 无法区分）：
+   *    栏内新顺序算好后用队列回填全局数组（其它栏的文档与相对顺序原地不动），
+   *    registry.replaceAll + renderTabs 重建标签 DOM；活动指针不动（重排不换活动标签）。
+   *  · 跨栏 = 先 moveTabToPane（huge 宿主销毁 / 焦点迁移 / 撤空栏都在里面）再调位 —— 源栏空了
+   *    会被 mergePanes 撤掉、目标栏对象可能已销毁，调位前必须用 paneOfDoc 重新解析。
+   *  · pinned 标签无特殊排序规则（先到先得的普通行为）。
+   *  完成后调 onSessionChange()（顺序进 lastSession 快照）。返回是否真的有移动。 */
+  function moveTabToIndex(tab, paneRef, index) {
+    const pane0 = paneRef && paneRef.tabsEl ? paneRef : paneByRef(paneRef);
+    if (!tab || !pane0) return false;
+    let pane = pane0;
+    let moved = false; // 跨栏搬家本身也算「有移动」——目标栏只有它一个标签时调位恒为 no-op，不能误报 false
+    if (paneOfDoc(tab) !== pane0) {
+      if (!moveTabToPane(tab, pane0)) return false; // 跨栏搬家（内部已 onSessionChange）
+      moved = true;
+      pane = paneOfDoc(tab); // 源栏撤空合并后，目标栏对象可能已换（保留栏恒为 p0）
+      if (!pane) return true;
+    }
+    const pd = registry.docsOf(pane.id);
+    // 下标在「去掉被拖标签」的栏内数组里算：before=目标位、after=目标位+1、末尾=数组长度
+    const without = pd.filter((t) => t !== tab);
+    const n = Number(index);
+    const idx = Math.max(0, Math.min(Number.isFinite(n) ? Math.floor(n) : without.length, without.length));
+    const next = without.slice();
+    next.splice(idx, 0, tab);
+    if (next.length === pd.length && next.every((t, i) => t === pd[i])) return moved; // 栏内顺序未变
+    const inPane = new Set(pd);
+    const queue = next.slice();
+    registry.replaceAll(docs().map((d) => (inPane.has(d) ? queue.shift() : d)));
+    renderTabs();
     if (onSessionChange) onSessionChange();
     return true;
   }
@@ -2819,7 +2881,7 @@ export function createEditor(callbacks) {
       el.className = `tab ${registry.activeOf(pane.id) === tab ? 'active' : ''} ${tab.pinned ? 'pinned' : ''}`;
       el.title = tab.path || tab.name;
       el.dataset.path = tab.path || '';
-      // 拖标签到编辑区左/右边缘 → 该侧开栏（HTML5 DnD；中间区域本阶段不做排序）
+      // 拖标签：落到编辑区左/右边缘 → 该侧开栏；落到标签上/标签栏空白处 → 拖拽排序（HTML5 DnD）
       el.draggable = true;
       el.addEventListener('dragstart', (e) => {
         dragTab = tab;
@@ -2830,7 +2892,39 @@ export function createEditor(callbacks) {
       });
       el.addEventListener('dragend', () => {
         dragTab = null;
-        for (const p of panes) p.body.classList.remove('pane-drop-left', 'pane-drop-right');
+        for (const p of panes) {
+          p.body.classList.remove('pane-drop-left', 'pane-drop-right');
+          clearTabDropMarks(p);
+        }
+      });
+      // 栏内/跨栏拖拽排序：鼠标在目标标签左半 → 插到它前面，右半 → 插到它后面（指示线类见 styles.css）。
+      // 落点下标在「去掉被拖标签」的栏内数组里算（before=目标位，after=目标位+1），跨栏同样适用。
+      el.addEventListener('dragover', (e) => {
+        if (!dragTab || dragTab === tab) return;
+        e.preventDefault();
+        e.stopPropagation(); // 不冒泡到 .tabs 容器（容器空白处落点 = 末尾，见 createPane）
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+        const r = el.getBoundingClientRect();
+        const before = e.clientX < r.left + r.width / 2;
+        el.classList.toggle('tab-drop-before', before);
+        el.classList.toggle('tab-drop-after', !before);
+      });
+      el.addEventListener('dragleave', () => {
+        el.classList.remove('tab-drop-before', 'tab-drop-after');
+      });
+      el.addEventListener('drop', (e) => {
+        if (!dragTab || dragTab === tab) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const r = el.getBoundingClientRect();
+        const before = e.clientX < r.left + r.width / 2;
+        el.classList.remove('tab-drop-before', 'tab-drop-after');
+        const t = dragTab;
+        dragTab = null;
+        const siblings = registry.docsOf(pane.id).filter((x) => x !== t);
+        let idx = siblings.indexOf(tab);
+        if (idx < 0) idx = siblings.length;
+        moveTabToIndex(t, pane, before ? idx : idx + 1);
       });
       const name = document.createElement('span');
       name.className = 'tab-name';
@@ -3783,6 +3877,10 @@ export function createEditor(callbacks) {
     },
     /** 文档 → 栏 id（测试面：断言某标签落在哪一栏） */
     paneIdOf: (tab) => registry.paneOf(tab),
+    /** 拖拽排序（需求1）测试钩子：把 tab 移到目标栏的 index 下标（0 基，越界夹取；= 栏内文档数即末尾）。
+     *  pane 可传栏号 0/1、栏 id 'p0'/'p1' 或栏对象；跨栏 = 先 moveTabToPane 再调位。
+     *  顺序即刻进 docs() 数组与标签栏 DOM，并经 onSessionChange 进 lastSession 快照。返回是否真的有移动。 */
+    moveTabToIndex: (tab, pane, index) => moveTabToIndex(tab, pane, index),
     // ---------- 0.5.0 Phase 4：跨窗口「接管编辑」 ----------
     /** 接管编辑（等价于点只读横幅上的「✏️ 接管编辑」）：成功 → 本窗口可编辑、原窗口转只读 + toast */
     claimEdit: (tab) => claimEdit(tab),

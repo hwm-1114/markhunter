@@ -10,7 +10,12 @@
 //          批量后一屏只有 1 次 IPC、1 次读盘。
 //
 // 关键点：
-//  - 索引未就绪时先用「估算行数」撑起滚动条（首 4MB 平均行长），就绪后校正，用户不必等索引
+//  - 索引未就绪时先用「估算行数」撑起滚动条（首 4MB 平均行长），就绪后校正，用户不必等索引；
+//    v0.8.0 起未就绪期间**不再发取数 IPC**（此前每屏一次 huge:lines 都会在主进程顺带全量建索引、
+//    互相踩踏），改画居中占位行，滚动位置由 sizer + scrollTop 照常记录，就绪后一次落位
+//  - v0.8.0 焦点/复制/滚轮：root 挂载即 tabIndex=0（只读选中、Ctrl+C、键入即编辑都依赖 keydown
+//    到达 root）；Ctrl+C 走 clipboard:write-any-text（有选区复制选区，无选区复制当前行整行原文）；
+//    比例模式（scaled）下滚轮按 ±3 行/notch 折算，避免 1px≈2~3 行时一格滚轮跳几百行
 //  - 行高由实际渲染测量（等宽字体/皮肤可能不同），保证滚动位置与行号严格对应
 //  - 超长行按 CSS 截断显示（不换行），避免 4GB 单行把布局拖垮（主进程已截断到 40000 字符）
 //  - 缺行（超长行跨读窗口 / 读到文件末尾）显示为空行，不影响行号与滚动
@@ -25,6 +30,8 @@
 //      不受 40000 字符截断），因此超长行（> LINE_TEXT_LIMIT）直接拒绝编辑；
 //   3) 打开编辑会话后，视口取数从 `huge:lines`（原文件 + 行索引）切到 `huge:doc-lines`
 //      （overlay 视角：看得见未保存修改与新行数）—— 这是「编辑后行数 +3」能成立的前提。
+import { toast } from './ui.js'; // v0.8.0：复制反馈（与预览代码块复制同一通道/同一提示口径）
+
 const OVERSCAN = 2;                 // 视口上下各多取的屏数（v0.7.0：1→2，快速滚动时视口边缘更少闪白）
 const BATCH_MAX_LINES = 1000;       // 单次批量取行上限（与主进程 lineindex.BATCH_MAX_LINES 对齐）
 const LINE_TEXT_LIMIT = 40000;      // 超长行入 DOM 前的截断（与主进程 LINE_MAX_CHARS 一致）
@@ -46,6 +53,7 @@ export function createHugeView(host, opts) {
   // （此前直接 host.innerHTML='' 会把编辑器 DOM 一并抹掉，属严重隐患）
   const root = document.createElement('div');
   root.className = 'huge-view';
+  root.tabIndex = 0; // v0.8.0：挂载即可获焦（此前只在进编辑态才设）——只读选中、Ctrl+C、键入即编辑都靠 keydown 到达 root
   root.innerHTML = '';
   host.appendChild(root);
   // 状态条放最后（在 sizer 之后 → 不占行几何）：sticky bottom 让它在滚动时钉在视口底部，
@@ -87,6 +95,9 @@ export function createHugeView(host, opts) {
   let offIndexProgress = null;   // 进度监听退订句柄（destroy 时调用，防监听器泄漏）
   let offSaved = null;           // huge:doc-saved 退订句柄（同上）
   let indexRequested = false;    // 索引只请求一次（防重复 loadIndex 重复建索引）
+  let indexPct = null;           // 索引建立进度 0~99（占位行文案复用；null=尚未收到进度）
+  let indexError = null;         // 索引失败原因（占位行改画错误文案，不永远转圈）
+  let placeholderEl = null;      // 当前占位行（进度回调就地更新文案；就绪后随 rows 清空）
   const lastBatch = { lines: 0, bytes: 0, ms: 0 }; // 最近一次批量取数（诊断用，getState 暴露）
 
   // ---------- Phase D：编辑态（渲染端只保存「光标 + 最近一次主进程回执」，不保存文档内容） ----------
@@ -126,16 +137,42 @@ export function createHugeView(host, opts) {
     onStatus(msg || '');
   }
 
-  /** 状态栏基准文案：脏标记优先，其次二进制提示，再次「索引建立中…」 */
+  /** 状态栏基准文案：脏标记优先，其次索引失败/二进制提示，再次「索引建立中…」 */
   function baseStatus() {
     if (destroyed) return;
     if (dirty) { setStatus(`未保存修改 ${dirtyCount || 1} 处 —— Ctrl+S 保存（Ctrl+Z 撤销）`); return; }
+    if (indexError != null) { setStatus('索引失败：' + indexError); return; }
     if (binarySeen) { setStatus('二进制内容：按文本近似显示'); return; }
     setStatus(index || docInfo ? '' : '索引建立中…');
   }
 
   // ---------- 索引 ----------
+  /** 占位行文案：索引失败优先，其次带进度百分比的「建立中」 */
+  function placeholderText() {
+    if (indexError != null) return `索引失败：${indexError} —— 可关闭标签后重开重试`;
+    return `索引建立中 ${indexPct != null ? indexPct + '%' : '…'}—— 可拖动滚动条定位，就绪后自动落位`;
+  }
+
+  /** 索引未就绪时的占位渲染：**不发任何取数 IPC**，只画一行居中提示（钉在视口中央，随滚动跟随） */
+  function renderPlaceholder() {
+    if (destroyed) return;
+    renderedRange = null; // 就绪后必须走真渲染，别被「位置未变」短路
+    rows.innerHTML = '';
+    const el = document.createElement('div');
+    el.className = 'huge-line huge-placeholder';
+    el.style.top = Math.max(0, Math.floor(((root.clientHeight || 0) - lineHeight) / 2)) + 'px';
+    el.style.justifyContent = 'center';
+    if (indexError != null) el.style.color = 'var(--mh-err, #d64545)';
+    else el.style.color = 'var(--mh-text-2)';
+    el.textContent = placeholderText();
+    rows.appendChild(el);
+    rows.style.transform = 'translateY(' + root.scrollTop + 'px)'; // 与真渲染同口径：跟随视口
+    placeholderEl = el;
+  }
+
   async function loadIndex() {
+    indexError = null; // 重载（reloadExternal）时清掉上一次的失败/进度残留
+    indexPct = null;
     // 先估算：读首 4MB 求平均行长，立即撑起滚动条；这次读取同时充当二进制探测的兜底样本
     try {
       const r = await api.readFileRange(filePath, 0, Math.min(4 * 1024 * 1024, size));
@@ -155,8 +192,9 @@ export function createHugeView(host, opts) {
       try {
         const off = api.onHugeIndexProgress((d) => {
           if (destroyed || !d || d.file !== filePath) return;
-          if (binarySeen || dirty) return; // 二进制/脏标记优先，不被进度文案覆盖
-          setStatus(`索引建立中 ${Math.min(99, Math.round((d.done / Math.max(1, d.total)) * 100))}%`);
+          indexPct = Math.min(99, Math.round((d.done / Math.max(1, d.total)) * 100));
+          if (!binarySeen && !dirty) setStatus(`索引建立中 ${indexPct}%`); // 二进制/脏标记优先，不被进度文案覆盖
+          if (placeholderEl && placeholderEl.isConnected) placeholderEl.textContent = placeholderText();
         });
         offIndexProgress = typeof off === 'function' ? off : null; // 旧 preload 不返回退订函数
       } catch { /* 订阅失败不影响查看 */ }
@@ -170,9 +208,11 @@ export function createHugeView(host, opts) {
       if (index && index.binary) markBinary();
       else baseStatus();
       applySizer();
-      await render();               // 行号口径变了，重画当前视口
+      await render();               // 行号口径变了，重画当前视口（此刻起走真渲染，落位当前 scrollTop）
     } catch (err) {
-      setStatus('索引失败：' + msgOf(err));
+      indexError = msgOf(err);
+      setStatus('索引失败：' + indexError);
+      renderPlaceholder();          // 占位换成错误文案，不永远转圈
     }
   }
 
@@ -215,6 +255,10 @@ export function createHugeView(host, opts) {
 
   async function render() {
     if (destroyed) return;
+    // v0.8.0：索引/编辑会话都未就绪时不发取数 IPC（此前每屏一次 huge:lines 都会让主进程顺带
+    // 全量建索引，与 huge:index 的扫描互相踩踏）——改画占位行；sizer 已由 estLines 撑起，
+    // 滚动事件照常改 scrollTop，索引就绪后 loadIndex 里的 render() 自然落到当前位置。
+    if (!index && !docInfo) { renderPlaceholder(); return; }
     const token = ++renderToken;
     const lh = lineHeight;
     // 宿主可能瞬时高度为 0（标签切换/布局未完成）→ 保底 8 行，避免 to < from 算出空视图
@@ -316,6 +360,32 @@ export function createHugeView(host, opts) {
     scrollTimer = setTimeout(render, 16); // 合并高频滚动事件
   }
   root.addEventListener('scroll', onScroll, { passive: true });
+
+  // v0.8.0：scaled（比例映射）模式下滚轮按行滚动。该模式 1px ≈ 2~3 行，原生像素滚动一格
+  // 滚轮（deltaY≈120 → 一百多 px）会一跳几百行，完全没法逐行细读；拦下来换算成
+  // ±3 行/notch（Shift=±1 屏），走既有 scrollToLine 定位链路。非 scaled 保持原生像素滚动。
+  // passive:false 才能 preventDefault；触控板小步长累加到满 1 行再动，避免高频小位移空转渲染。
+  let wheelCarry = 0;
+  function onWheel(e) {
+    if (destroyed || !isScaled()) return;
+    if (e.ctrlKey || e.metaKey) return; // Ctrl+滚轮（缩放类手势）不拦
+    e.preventDefault();
+    const perScreen = Math.max(8, Math.ceil((root.clientHeight || 0) / lineHeight) || 30);
+    if (e.shiftKey) {
+      wheelCarry = 0;
+      const dir = e.deltaY > 0 ? 1 : e.deltaY < 0 ? -1 : 0;
+      if (dir) void scrollToLine(firstVisibleLine() + dir * perScreen);
+      return;
+    }
+    // deltaMode：0=像素（Chromium，1 notch≈120）、1=行（1 notch≈3 行）——统一折算成 notch 数
+    const notches = e.deltaMode === 1 ? e.deltaY / 3 : e.deltaY / 120;
+    wheelCarry += notches * 3;
+    const lines = Math.trunc(wheelCarry); // 向零取整，余量留进累加器
+    if (!lines) return;
+    wheelCarry -= lines;
+    void scrollToLine(firstVisibleLine() + lines);
+  }
+  root.addEventListener('wheel', onWheel, { passive: false });
 
   // ---------- 对外 API ----------
   async function scrollToLine(line) {
@@ -560,6 +630,53 @@ export function createHugeView(host, opts) {
     });
   }
 
+  /**
+   * Ctrl+C 复制闭环（v0.8.0，只读/编辑两态都拦）：
+   *  - 有 DOM 选区 → 复制选中文本；
+   *  - 无选区 → 复制当前行（编辑态=光标行、只读态=视口首行）。
+   *  整行一律经 huge:doc-line / hugeLines / hugeDocLines 取**原文**（**不读 DOM** —— DOM 有
+   *  40000 字符截断）；主进程仍可能截断超长行（LINE_MAX_CHARS）→ 截断复制并在提示里说明。
+   *  通道与预览代码块复制相同（clipboard:write-any-text；file:// 下 navigator.clipboard 不可用）。
+   */
+  async function copySelectionOrLine() {
+    if (destroyed) return;
+    try {
+      const sel = window.getSelection ? String(window.getSelection()) : '';
+      if (sel) {
+        await api.writeClipboardText(sel);
+        if (!destroyed) toast(`已复制选中内容（${sel.length} 字符）`);
+        return;
+      }
+      if (editable && caret && docInfo && docInfo.docId != null) {
+        // 编辑态：光标行完整原文（huge:doc-line 不受 40000 截断）
+        const got = await loadLineText(caret.line);
+        if (destroyed) return;
+        await api.writeClipboardText(got.text);
+        toast(`已复制第 ${caret.line} 行（${got.text.length} 字符）`);
+        return;
+      }
+      // 只读态：视口首行；readWindow 按会话状态自动走 hugeDocLines/hugeLines（所见即所得）
+      const ln = firstVisibleLine();
+      const r = await readWindow(ln, 1);
+      if (destroyed) return;
+      const it = r && Array.isArray(r.lines)
+        ? r.lines.find((x) => x && x.line === ln) || r.lines[0]
+        : null;
+      const text = it && it.text != null ? String(it.text) : '';
+      if (!text) { setStatus(`第 ${ln} 行无内容可复制`); return; }
+      await api.writeClipboardText(text);
+      const total = it && typeof it.chars === 'number' && it.chars > text.length ? it.chars : 0;
+      if ((it && it.truncated) || total) {
+        toast(`已复制第 ${ln} 行（超长行被截断：复制前 ${text.length} 字符${total ? ` / 共 ${total}` : ''}）`);
+      } else {
+        toast(`已复制第 ${ln} 行（${text.length} 字符）`);
+      }
+    } catch (err) {
+      setStatus('复制失败：' + msgOf(err));
+      toast('复制失败：' + msgOf(err));
+    }
+  }
+
   /** 视口内键盘：可打印字符 / Backspace / Delete / Enter / Ctrl+Z / Ctrl+Y / 方向键 / Home / End。
    *  其余组合键（Ctrl+S、Ctrl+G 等）不拦截 —— 冒泡给 app.js 的全局快捷键。 */
   function onKeyDown(e) {
@@ -568,6 +685,8 @@ export function createHugeView(host, opts) {
     const key = e.key;
     if (mod && (key === 'z' || key === 'Z')) { e.preventDefault(); void (e.shiftKey ? opRedo() : opUndo()); return; }
     if (mod && (key === 'y' || key === 'Y')) { e.preventDefault(); void opRedo(); return; }
+    // v0.8.0：Ctrl+C 复制（选区优先，无选区复制当前行）；file:// 下系统默认复制不可靠，走 IPC 通道
+    if (mod && (key === 'c' || key === 'C')) { e.preventDefault(); void copySelectionOrLine(); return; }
     if (mod || e.altKey) return; // 组合键交给全局（Ctrl+S / Ctrl+G / Ctrl+F…）
     // v0.7.0：**首次键入自动进入编辑**（打开即可改，无需先点「✎ 启用编辑」）。本键消费掉
     //（开启是异步 IPC），下一次键入即正常落字；能否编辑仍由主进程 editable 决定（二进制/
@@ -613,9 +732,16 @@ export function createHugeView(host, opts) {
   }
   root.addEventListener('keydown', onKeyDown);
 
-  /** 视口内点击 → 落光标（能拿到 DOM 文本偏移就用真实点击列，否则落行尾） */
+  /** 视口内点击 → 只读态交焦点（建选区靠浏览器默认行为）；编辑态落光标（真实点击列优先，否则行尾） */
   function onRowsMouseDown(e) {
-    if (destroyed || !editable || e.button !== 0) return;
+    if (destroyed || e.button !== 0) return;
+    if (!editable) {
+      // v0.8.0：只读态点击把焦点交给 root（Ctrl+C / 键入即编辑都靠 keydown 到达 root）。
+      // 刻意**不** preventDefault —— 默认行为是从按下点开始建立文本选区，拦掉它
+      // 「选中文字」就没了（与 Ctrl+C 复制闭环直接冲突）。
+      try { root.focus({ preventScroll: true }); } catch { /* 忽略 */ }
+      return;
+    }
     const rowEl = e.target && e.target.closest ? e.target.closest('.huge-line') : null;
     if (!rowEl) return;
     const ln = parseInt(rowEl.dataset.line, 10);
@@ -674,7 +800,7 @@ export function createHugeView(host, opts) {
     }
     editable = true;
     root.classList.add('huge-editable');
-    root.tabIndex = 0;
+    // tabIndex 挂载时已设（v0.8.0），这里只需夺回焦点（用户可能刚点过状态栏按钮）
     try { root.focus({ preventScroll: true }); } catch { /* 忽略 */ }
     try { await syncDocState(); } catch { /* 状态取不到不影响编辑 */ }
     if (!caret) {
@@ -920,8 +1046,10 @@ export function createHugeView(host, opts) {
       if (ro) { try { ro.disconnect(); } catch { /* 忽略 */ } }
       window.removeEventListener('resize', onResize);
       root.removeEventListener('scroll', onScroll);
+      root.removeEventListener('wheel', onWheel);
       root.removeEventListener('keydown', onKeyDown);
       root.removeEventListener('mousedown', onRowsMouseDown);
+      placeholderEl = null;
       rows.innerHTML = '';
       root.innerHTML = '';
       try { root.remove(); } catch { /* 已移除 */ }

@@ -27,18 +27,22 @@ body {
   user-select: none;
 }
 
-/* 允许选择文本的区域（编辑器、预览、搜索结果、输出面板） */
+/* 允许选择文本的区域（编辑器、预览、搜索结果、输出面板、大文件查看器正文） */
 .cm-editor,
 .cm-content,
 .markdown-body,
 .find-results,
 #sidebar-search .gs-results,
 .py-output,
+.huge-view .huge-text,
 .tab-name,
 .name {
   user-select: text;
   -webkit-user-select: text;
 }
+
+/* huge-view root 常驻 tabIndex=0（键入即编辑/复制键盘事件落点），不显示焦点框 */
+.huge-view:focus { outline: none; }
 
 input, textarea { user-select: text; }
 button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，显式补回 */
@@ -119,7 +123,9 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 }
 
 /* ============ 主体布局 ============ */
-#main { flex: 1; display: flex; min-height: 0; }
+/* position:relative = 覆盖式收藏栏（#fav-rail.overlay）的定位锚；栏内既有 absolute 元素
+   （.tabs-menu/.tabs-more 等）都锚在更近的 .pane（relative）上，加此属性不改变它们的定位链 */
+#main { flex: 1; display: flex; min-height: 0; position: relative; }
 
 /* 左侧文件树 */
 #sidebar {
@@ -228,6 +234,57 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 }
 .fav-item:hover .fav-remove { visibility: visible; }
 .fav-item .fav-remove:hover { background: var(--mh-bg-active); color: var(--mh-danger); }
+
+/* ---------- 右侧收藏栏（可隐藏 / 可 pin 常显；#fav-block 从左侧栏原样搬入，ID 全保留） ----------
+   状态机（app.js applyFavRail 落地，设置键 favRailOpen / favRailPinned / favRailWidth）：
+     · .pinned          挤压式常驻：参与 #main 的 flex 行，分隔条 #favrail-divider 拖宽并持久化；
+     · .open 非 .pinned 覆盖式：.overlay 绝对定位浮在编辑区右侧，不占布局；点栏外 / Esc / ✕ 收起；
+     · 两者皆否         .hidden 整体隐藏（通用 .hidden{display:none!important}）。 */
+#fav-rail {
+  /* 窗口过窄时右栏优先收缩（左侧栏 flex:none 不动）：flex-shrink 放开 + min-width 保底 */
+  flex: 0 1 auto;
+  width: 260px; /* 缺省值 = settings favRailWidth 默认 260；运行时由 app.js 按设置写内联 */
+  min-width: 180px;
+  max-width: 480px;
+  display: flex;
+  flex-direction: column;
+  background: var(--mh-bg-panel);
+  min-height: 0;
+}
+#fav-rail.overlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  /* 压在编辑区与标签溢出菜单（z40）之上；让位弹窗（z100）/ 快捷打开（z900）/ 右键菜单（z9999） */
+  z-index: 50;
+  border-left: 1px solid var(--mh-border);
+  box-shadow: -10px 0 28px rgba(16, 42, 84, 0.18);
+}
+.favrail-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px 7px 12px;
+  border-bottom: 1px solid var(--mh-border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mh-text-2);
+  user-select: none;
+}
+.favrail-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.favrail-header .tbtn { flex: none; padding: 2px 7px; }
+#btn-fav-pin.on { color: var(--mh-accent); background: var(--mh-accent-soft); }
+/* 搬入的 #fav-block：占满 rail 剩余高度；列表解除左栏时代的 176px 紧凑限高。
+   折叠语义不变（.fav-block.collapsed .fav-list{display:none} 不设 display 属性即可继续生效） */
+#fav-rail .fav-block { flex: 1; min-height: 0; border-bottom: none; display: flex; flex-direction: column; background: transparent; }
+#fav-rail .fav-list { flex: 1; max-height: none; }
+/* 特效皮肤：与 #sidebar 同款的半透明 + 背模糊（覆盖式浮在内容上尤其需要） */
+[data-theme^="fx-"] #fav-rail {
+  background: color-mix(in srgb, var(--mh-bg-panel) 82%, transparent);
+  backdrop-filter: blur(12px);
+}
 
 .file-tree { flex: 1; overflow: auto; padding: 2px 6px 8px; }
 .tree-empty { color: var(--mh-text-2); font-size: 12.5px; padding: 18px 12px; line-height: 1.7; text-align: center; }
@@ -474,6 +531,22 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 }
 .pane-body.pane-drop-left::before { left: 0; border-left: none; }
 .pane-body.pane-drop-right::after { right: 0; border-right: none; }
+/* 栏内拖拽排序的插入指示线（tabs.js renderPaneTabs 的 dragover 切换这两个类；做法同 .pane-drop-*） */
+.tab.tab-drop-before::before,
+.tab.tab-drop-after::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 0; /* 标签底边与栏底齐平，指示线直通到底更像插入点 */
+  width: 2.5px;
+  z-index: 9;
+  pointer-events: none;
+  background: var(--mh-accent);
+  border-radius: 2px;
+  box-shadow: 0 0 4px color-mix(in oklab, var(--mh-accent) 55%, transparent);
+}
+.tab.tab-drop-before::before { left: -2px; } /* 落在两标签间的 2px 缝隙里 */
+.tab.tab-drop-after::after { right: -2px; }
 /* 两栏之间的分隔条（拖拽改比例；双击等分） */
 .pane-divider {
   flex: none;
@@ -526,6 +599,7 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .tab {
   display: inline-flex;
   align-items: center;
+  position: relative; /* 拖拽排序的插入指示线（.tab-drop-*::before/::after）锚在这里 */
   /* L2（v0.1.44）：对抗 daisyUI .tab 组件类泄漏 —— height 40px / 居中 / 文本居中 / 允许换行
      均由 daisyUI 注入，这里显式压回应用侧语义（styles.css unlayered 后加载，同值覆盖、缺省补全） */
   height: auto;

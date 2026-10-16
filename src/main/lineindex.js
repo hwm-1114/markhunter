@@ -197,16 +197,49 @@ function writeCache(cachePath, payload) {
 }
 
 /** 获取（或构建）行索引。cached=true 表示命中缓存（内存或磁盘），未重新扫描 */
+// v0.8.0 in-flight 合并：同 key 的并发调用共享同一次扫描/侧车读取（4~5GB 冷扫可达数十秒，
+// 索引未就绪时 huge:lines / huge:index / line-offset 并发进来，此前每个调用都各自全量重扫一遍）。
+const inflightBuilds = new Map(); // key -> Promise（构建中的扫描，含 force 另起的）
+
+/** 发起一次真实扫描（调用方已确认缓存未命中）：登记 in-flight，结束后仅摘除自己那一份 */
+function startBuild(key, cachePath, file, st, opts) {
+  const p = (async () => {
+    const r = await scan(file, st.size, opts.onProgress);
+    writeCache(cachePath, {
+      version: CACHE_VERSION,
+      size: st.size,
+      lines: r.lines,
+      longest: r.longest,
+      starts: r.starts,
+      encoding: r.encoding,
+      binary: r.binary,
+      builtAt: Date.now(),
+    });
+    const idx = {
+      lines: r.lines,
+      longest: r.longest,
+      starts: r.starts,
+      encoding: r.encoding,
+      binary: r.binary === true,
+      bytes: st.size,
+    };
+    memPut(key, idx, st, file); // force 重建同样覆盖内存缓存（旧 key 已被新 size/mtime 天然替换）
+    return { ...idx, cached: false, elapsedMs: r.elapsedMs, key };
+  })();
+  inflightBuilds.set(key, p);
+  const cleanup = () => { if (inflightBuilds.get(key) === p) inflightBuilds.delete(key); };
+  p.then(cleanup, cleanup); // 不 finally 返回新 promise：保持 p 本身可被多方 await
+  return p;
+}
+
 async function getIndex(file, opts = {}) {
   const st = await fsp.stat(file);
   if (!st.isFile()) throw new Error('目标不是文件');
   const key = cacheKey(st, file);
+  const cachePath = path.join(indexDir(), key + '.idx');
   if (!opts.force) {
     const mem = memGet(key, st); // 进程内命中：不再读盘、不再 JSON.parse 侧车
     if (mem) return { ...mem, cached: true, elapsedMs: 0, key };
-  }
-  const cachePath = path.join(indexDir(), key + '.idx');
-  if (!opts.force) {
     const hit = readCache(cachePath);
     if (hit && hit.size === st.size) {
       const idx = {
@@ -220,28 +253,17 @@ async function getIndex(file, opts = {}) {
       memPut(key, idx, st, file);
       return { ...idx, cached: true, elapsedMs: 0, key };
     }
+    // in-flight 合并：普通调用可搭 force 的车 —— force 的结果就是最新一次全量扫描，
+    // 语义上满足普通调用（且在 key 相同 = size|mtime 相同的前提下，两次扫描结果本就一致）。
+    const running = inflightBuilds.get(key);
+    if (running) return await running;
+    return await startBuild(key, cachePath, file, st, opts);
   }
-  const r = await scan(file, st.size, opts.onProgress);
-  writeCache(cachePath, {
-    version: CACHE_VERSION,
-    size: st.size,
-    lines: r.lines,
-    longest: r.longest,
-    starts: r.starts,
-    encoding: r.encoding,
-    binary: r.binary,
-    builtAt: Date.now(),
-  });
-  const idx = {
-    lines: r.lines,
-    longest: r.longest,
-    starts: r.starts,
-    encoding: r.encoding,
-    binary: r.binary === true,
-    bytes: st.size,
-  };
-  memPut(key, idx, st, file); // force 重建同样覆盖内存缓存（旧 key 已被新 size/mtime 天然替换）
-  return { ...idx, cached: false, elapsedMs: r.elapsedMs, key };
+  // force（保存后重建）：**不并入**普通 in-flight —— 它的语义就是「重扫并覆盖缓存」，搭旧车
+  // 会拿到它正要淘汰的那份。做法：另起一次扫描并**替换**在途条目，后到的普通调用改搭 force 的车；
+  // 已挂在旧构建上的调用仍拿到旧构建结果（同 key ⇒ 同 size|mtime ⇒ 内容等价，无正确性问题）。
+  // 后进度的 onProgress 只属于发起方：搭车方收不到进度事件（可接受，结果正确即可）。
+  return await startBuild(key, cachePath, file, st, opts);
 }
 
 /** 行号（1 基）→ 行首字节偏移：用稀疏表定位后再向前扫最多 SPARSE 个换行 */
