@@ -179,14 +179,21 @@ function readCache(cachePath) {
   return null;
 }
 
+let tmpSeq = 0; // 侧车临时文件自增后缀
+
 function writeCache(cachePath, payload) {
+  let tmp = null;
   try {
     fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-    // 先写临时文件再 rename：避免半截缓存被下次读到
-    const tmp = cachePath + '.tmp' + process.pid;
+    // 先写临时文件再 rename：避免半截缓存被下次读到；tmp 名带 pid+自增+时间戳，同进程并发写同一 key 不冲突
+    tmp = `${cachePath}.tmp${process.pid}.${tmpSeq++}.${Date.now()}`;
     fs.writeFileSync(tmp, JSON.stringify(payload), 'utf8');
     fs.renameSync(tmp, cachePath);
-  } catch { /* 缓存失败不影响功能 */ }
+    tmp = null; // rename 成功，无需清理
+  } catch {
+    // 缓存失败不影响功能；rename 失败时清掉残留 tmp 后按原容忍语义吞掉
+    if (tmp) { try { fs.unlinkSync(tmp); } catch { /* 清理失败忽略 */ } }
+  }
 }
 
 /** 获取（或构建）行索引。cached=true 表示命中缓存（内存或磁盘），未重新扫描 */
@@ -397,8 +404,8 @@ async function gcIndexDir(protectKey) {
   const live = [];
   const expired = [];
   for (const name of names) {
-    // 只处理侧车与崩溃残留的临时文件（.idx / .idx.tmp<pid>）
-    if (!/\.idx$/.test(name) && !/\.idx\.tmp\d+$/.test(name)) continue;
+    // 只处理侧车与崩溃残留的临时文件（.idx / .idx.tmp<pid>[.<seq>.<ts>]，兼容新旧两种命名）
+    if (!/\.idx$/.test(name) && !/\.idx\.tmp[\d.]+$/.test(name)) continue;
     if (protectKey && name === protectKey + '.idx') continue;
     try {
       const st = await fsp.stat(path.join(dir, name));

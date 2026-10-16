@@ -684,6 +684,21 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   display: flex;
 }
 .preview-host.full { border-left: none; }
+/* 大文档预览闸门横幅（preview.js 的 PREVIEW_AUTO_MAX_BYTES）：超过阈值的文档不随编辑
+   自动重渲，顶部提示条给「刷新」手动入口；与锁横幅同款条状样式。 */
+.preview-gate-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  border-bottom: 1px solid var(--mh-border);
+  background: color-mix(in oklab, #e0a800 18%, var(--mh-bg-panel));
+  color: var(--mh-text);
+}
 /* min-width:0（v0.6.1）：#preview-host 是 flex 容器，flex item 默认 min-width:auto ——
    含原始尺寸大图时 min-content 会被推到图片宽度，把整个正文排版拉宽（860px 限宽失效）。
    显式允许收缩到容器宽：文本保持正常排版，超宽图片溢出为横向滚动（见 img 规则）。 */

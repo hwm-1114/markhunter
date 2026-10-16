@@ -226,7 +226,8 @@ async function boot() {
     const pid = editor.paneIdOf(tab) || editor.getFocusPaneId();
     const pv = previewFor(pid);
     if (editor.paneActiveOf(pid) === tab && isMarkdown(tab.name) && pv.getMode() !== 'edit') {
-      pv.render();
+      // auto 标记：大文档（超过 preview.js 的 PREVIEW_AUTO_MAX_BYTES）不随编辑自动重渲（闸门在 preview.js 内）
+      pv.render({ auto: true });
     }
   }, 250);
   const debouncedFindSearch = debounce(() => {

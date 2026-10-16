@@ -838,7 +838,15 @@ export function createHugeView(host, opts) {
     return true;
   }
 
-  const onResize = () => { if (!destroyed) { applySizer(); renderedRange = null; render(); } };
+  // 尺寸变化走与滚动同口径的 16ms 合并：拖窗口边框期间逐帧触发，逐帧 render 就是逐帧 IPC
+  // （批量取行）。applySizer 是廉价同步操作（只改 sizer 高度）保持即时，render 合并到帧末。
+  const onResize = () => {
+    if (destroyed) return;
+    applySizer();
+    renderedRange = null;
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(render, 16);
+  };
   window.addEventListener('resize', onResize);
   // 宿主尺寸变化（切换标签/面板开合/窗口缩放）后重算视口行数
   const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onResize) : null;

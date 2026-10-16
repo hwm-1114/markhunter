@@ -1,6 +1,6 @@
 # AGENTS.md — MarkHunter 工作区指引
 
-MarkHunter（马克猎手）是 Windows 桌面 Markdown/文本编辑器，Electron 43 + CodeMirror 6 + markdown-it + mermaid + **KaTeX**（v0.6.0 数学公式）+ Tailwind v4/daisyUI 5 主题引擎。中文注释与文档，无独立 lint/typecheck，靠 `npm run smoke`（真实窗口端到端，**235 项**：2026-10-15 起；沿革 **192 → 201 → 208 → 212 → 219 → 223 → 225 → 226 → 231 → 232 → 234 → 235**，明细见 `CHANGELOG.md`）回归；**判定一律用 `node scripts/smoke-verify.js`**，口径见「历史缺陷归档」首条告警。
+MarkHunter（马克猎手）是 Windows 桌面 Markdown/文本编辑器，Electron 43 + CodeMirror 6 + markdown-it + mermaid + **KaTeX**（v0.6.0 数学公式）+ Tailwind v4/daisyUI 5 主题引擎。中文注释与文档，无独立 lint/typecheck，靠 `npm run smoke`（真实窗口端到端，**240 项**：2026-10-16 起；沿革 **192 → 201 → 208 → 212 → 219 → 223 → 225 → 226 → 231 → 232 → 234 → 235 → 240**，明细见 `CHANGELOG.md`）回归；**判定一律用 `node scripts/smoke-verify.js`**，口径见「历史缺陷归档」首条告警。
 
 ## 常用命令
 
@@ -11,7 +11,7 @@ npm run build        # esbuild 打包渲染进程 + mermaid chunk + tailwind.css
 npm run dev:css      # tailwind watch（调主题样式时用）
 npm run smoke        # 冒烟测试（--smoke 模式，仅开发环境；window.__app 测试接口 dev 独有）
                      # ⚠️ **必须前台跑**，且桌面前台不得被全屏游戏/独占全屏程序占住（否则 rapidSaveEcho 会卡死数分钟到永久）
-node scripts/smoke-verify.js %TEMP%\mh-smoke.log --expect 235 --require reopenClosedTab,ctxMenuCommonItems,findCaseWordRegex,findMatchLimit,hugeRecoverPrompt,hugeRecoverReject
+node scripts/smoke-verify.js %TEMP%\mh-smoke.log --expect 240 --require reopenClosedTab,ctxMenuCommonItems,findCaseWordRegex,findMatchLimit,hugeRecoverPrompt,hugeRecoverReject,gsMixedCaseHuge,gsNoNewlineHuge,gsReplaceCaseFold,treeNestedExpand,previewGateLargeDoc
                      # 冒烟日志**唯一判定依据**（容忍 UTF-16 与 ANSI）：结果行数 = --expect N、`| false` 0、`| ERR:` 0、非白名单非-true 值 0
                      # ⚠️ 不要用 `SMOKE_OK` 判定（finally 里无条件打印）；detail 串（无 ERR: 前缀）同样是失败
 node scripts/overlay-test.js        # 大文件 overlay 模型探针（纯 node，期望 OVERLAY_PROBE 14/14 failed=0）

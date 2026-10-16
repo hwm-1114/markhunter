@@ -659,9 +659,17 @@ export function createEditor(callbacks) {
         '文件名（保存到当前文件所在目录）',
         `extract-${stem}-${Math.floor(t.vwin.offset / 1048576)}MB.txt`,
         async (val) => {
-          const p = dirOf(t.path) + '\\' + val;
+          // 名字合法化（与主进程 fs:create 同口径）：拒绝路径分隔符与「..」（否则可含 ..\
+          // 把内容写出目录外），其余 Windows 非法字符替换为 '_'。抛错走 showPrompt 的
+          // alertBox + 弹窗保持打开，与 createEntry 的失败口径一致。
+          const raw = String(val || '').trim();
+          if (!raw || /[\\/]/.test(raw) || raw === '.' || raw === '..') {
+            throw new Error('文件名不合法：不能包含路径分隔符或「..」');
+          }
+          const safe = raw.replace(/[:*?"<>|]/g, '_');
+          const p = dirOf(t.path) + '\\' + safe;
           await window.api.writeFile(p, t.state.doc.toString());
-          toast('已提取：' + val);
+          toast('已提取：' + safe);
           openFile(p);
         }
       );
@@ -1090,7 +1098,7 @@ export function createEditor(callbacks) {
     const newPane = (opts.paneIndex != null && panes[opts.paneIndex]) ? panes[opts.paneIndex] : focusedPane();
     registry.setPaneOf(tab, newPane.id);
     switchTab(tab, { pane: newPane });
-    window.api.watchFile(path, data.mtime); // 监听外部修改
+    window.api.watchFile(path, data.mtime).catch(() => { /* 监听失败不影响打开（与 openHugeTab 的容错口径一致） */ }); // 监听外部修改
     if (onSessionChange) onSessionChange();
     return tab;
   }
@@ -1541,7 +1549,7 @@ export function createEditor(callbacks) {
     // 打开路径的 setState 不视为用户编辑：清脏标记与自动保存定时器（避免刚打开就被自动保存截断内容）
     tab.dirty = false;
     clearTimeout(tab.saveTimer);
-    window.api.watchFile(path, c0.mtime);
+    window.api.watchFile(path, c0.mtime).catch(() => { /* 监听失败不影响打开（与 openHugeTab 的容错口径一致） */ });
     if (onSessionChange) onSessionChange();
     return tab;
   }
@@ -3603,12 +3611,20 @@ export function createEditor(callbacks) {
         return;
       }
       // 有未保存的本地修改：询问是否丢弃并重新加载
-      const { confirmDialog } = await import('./ui.js');
-      const ok = await confirmDialog(
-        `「${tab.name}」已在外部被修改，且当前有未保存的更改。\n确定要重新加载文件（丢弃本地更改）吗？`,
-        '文件已在外部更改'
-      );
-      if (!ok) return;
+      // 弹窗期间置 tab 级去重标志：外部连续改动会连发 file-changed，每个事件都再弹一次确认
+      // 会叠一串弹窗；用户答复后（无论确认/取消）清除，后续外部修改仍可再次询问。
+      if (tab._extConfirming) return;
+      tab._extConfirming = true;
+      try {
+        const { confirmDialog } = await import('./ui.js');
+        const ok = await confirmDialog(
+          `「${tab.name}」已在外部被修改，且当前有未保存的更改。\n确定要重新加载文件（丢弃本地更改）吗？`,
+          '文件已在外部更改'
+        );
+        if (!ok) return;
+      } finally {
+        tab._extConfirming = false;
+      }
     }
     await reloadFromDisk(tab, false);
   });

@@ -23,6 +23,13 @@ md.use(mathPlugin);
 md.renderer.rules.table_open = () => '<div class="table-wrap"><table>';
 md.renderer.rules.table_close = () => '</table></div>';
 
+// ---------- 大文档预览闸门 ----------
+// 超过该尺寸的 Markdown 文档**不随编辑自动重渲**（每次防抖击键都整篇 toString + md.render +
+// innerHTML 全换，大文档会秒级冻结）；预览区顶部改出一次性提示条，含「刷新」按钮手动触发。
+// 手动刷新 / 切标签 / 模式切换（非 auto 的 render 调用）不受限。导出供测试与 app.js 注释引用。
+// 判据用 doc.length（UTF-16 字符数，≈ 字节规模，闸门场景足够精确，免一次 encode 开销）。
+export const PREVIEW_AUTO_MAX_BYTES = 8 * 1024 * 1024;
+
 // ---------- P5：mermaid 惰性加载（chunk 就绪 Promise） ----------
 let mermaidChunkPromise = null;
 function loadMermaid() {
@@ -349,14 +356,46 @@ export function createPreview(getEditor, getTab, getIsDark, opt) {
     reRenderMermaid(); // renderToken 协议自动丢弃过期结果（下拉连点竞态）
   }
 
-  function render() {
+  // ---------- 大文档预览闸门（阈值见模块顶部 PREVIEW_AUTO_MAX_BYTES） ----------
+  /** 一次性提示条（已显示就不重复建/更新；手动渲染或文档缩回阈值内时移除） */
+  let gateEl = null;
+  function removeGate() {
+    if (gateEl) { gateEl.remove(); gateEl = null; }
+  }
+  function showGate(tab) {
+    if (gateEl && gateEl.isConnected) return;
+    removeGate();
+    gateEl = document.createElement('div');
+    gateEl.className = 'preview-gate-banner';
+    const text = document.createElement('span');
+    text.textContent = `文档较大（约 ${Math.round(tab.state.doc.length / 1048576)} MB），预览已暂停自动刷新`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tbtn small';
+    btn.textContent = '刷新';
+    btn.title = '手动渲染一次完整预览';
+    btn.addEventListener('click', () => render()); // 手动触发：非 auto 调用，不受闸门限制
+    gateEl.append(text, btn);
+    previewHost.insertBefore(gateEl, contentEl);
+  }
+
+  /** opts.auto = true 表示「随编辑自动重渲」路径（app.js 的击键防抖）；大文档闸门只拦这条路 */
+  function render(opts) {
     renderCount++;
     const tab = getTab();
     // viewer-lg（>256MB 大文件查看器）：窗口内容不做 markdown 渲染（整窗 toString 亦应避免放大）
     if (!tab || (tab.kind === 'viewer-lg' || tab.kind === 'huge') || !isMarkdown(tab.name)) {
       contentEl.innerHTML = '';
+      removeGate();
       return;
     }
+    // 大文档闸门：仅拦随编辑的自动重渲；手动刷新/切标签/模式切换（非 auto）照常全量渲染，
+    // mermaid / 图片监听 / 代码复制按钮的重扫都跟随这同一次渲染（不单独再扫）。
+    if (opts && opts.auto && tab.state && tab.state.doc.length > PREVIEW_AUTO_MAX_BYTES) {
+      showGate(tab);
+      return;
+    }
+    removeGate();
     // P7：分段模式文档含占位标记（HTML 注释形态），渲染前剥离，预览不可见
     const html = md.render(stripChunkMarkers(tab.state.doc.toString()));
     contentEl.innerHTML = html;

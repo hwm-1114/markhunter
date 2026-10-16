@@ -456,15 +456,17 @@ function registerFileIpc(_getWindow) {
       let passed = 0; // 已越过的换行数
       let offset = 0;
       rs.on('data', (chunk) => {
-        for (let i = 0; i < chunk.length; i++) {
-          if (chunk[i] === 0x0a) {
-            passed++;
-            if (passed >= target) {
-              rs.destroy();
-              resolve(offset + i + 1);
-              return;
-            }
+        let from = 0;
+        for (;;) {
+          const i = chunk.indexOf(0x0a, from); // 原生扫描换行（与 lineindex.js scan 同写法）
+          if (i < 0) break;
+          passed++;
+          if (passed >= target) {
+            rs.destroy();
+            resolve(offset + i + 1);
+            return;
           }
+          from = i + 1;
         }
         offset += chunk.length;
       });

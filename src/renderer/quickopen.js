@@ -128,7 +128,13 @@ export function createQuickOpen({ getRootDir, onOpen }) {
     const dir = getRootDir();
     if (!dir) { files = []; seen = new Set(); ready = true; root = null; errMsg = '请先打开一个工作目录'; render(); return; }
     if (!force && dir === root && ready) return; // 本次会话已就绪（worker 侧也有缓存，重复请求是毫秒级）
-    if (dir !== root) { root = dir; files = []; seen = new Set(); ready = false; truncated = false; errMsg = ''; }
+    if (dir !== root) {
+      root = dir; files = []; seen = new Set(); ready = false; truncated = false; errMsg = '';
+      // 旧目录的加载可能还在途：先 seq++ 作废它的全部回调（完成态/进度都按 mySeq 校验），
+      // 否则旧目录的完成结果会盖掉这里刚重置的新目录清单。
+      seq++;
+      loading = false; // 旧加载的 finally 已被 seq 作废、不会再复位该标志，这里必须交还
+    }
     if (loading) return;
     loading = true;
     renderMeta();

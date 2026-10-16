@@ -158,6 +158,8 @@ export function createDocRegistry() {
   };
   /** 空集合常量（`viewCount`/`hasViews` 查不到时避免每次 new Set） */
   const EMPTY_SET = new Set();
+  /** 路径键规范化：与 tree.js 的 normalizeKey 完全同式（小写 + 正斜杠；两处改动须同步） */
+  const normPathKey = (p) => String(p).replace(/\\/g, '/').toLowerCase();
 
   return {
     // ---------------- 集合（原 `tabs[]` 的全部读写点） ----------------
@@ -168,7 +170,14 @@ export function createDocRegistry() {
     /** 下标（≡ 旧 `tabs.indexOf`）；不存在返回 -1 */
     indexOf: (doc) => docs.indexOf(doc),
     /** 按路径找**第一个**匹配文档（≡ `findTabByPath`；多视图下"第一个"语义在 Phase 1 必须保持） */
-    byPath: (p) => docs.find((d) => d.path === p) || null,
+    byPath: (p) => {
+      // 与 tree.js 的 normalizeKey 同口径（小写 + 正斜杠）：同一文件的不同写法
+      // （大小写 / 正反斜杠）必须命中同一文档，否则会双开双写。
+      // 本模块保持零依赖硬约束，不复用 tree.js 的 import，这里收一份等价逻辑（两处改动须同步）。
+      if (p == null || p === '') return null;
+      const k = normPathKey(p);
+      return docs.find((d) => d.path != null && normPathKey(d.path) === k) || null;
+    },
     /** 对比标签按 diffKey 去重查找（≡ `openDiffTab` 的 `t.kind === 'diff' && t.diffKey === key`） */
     byDiffKey: (k) => docs.find((d) => d.kind === 'diff' && d.diffKey === k) || null,
     /** 追加（≡ 旧 `tabs.push`），返回该文档便于链式使用 */

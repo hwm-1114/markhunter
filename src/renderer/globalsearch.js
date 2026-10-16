@@ -194,19 +194,27 @@ export function createGlobalSearch(getRootDir, onOpenFileAt, onReveal) {
   }
 
   // ---------- 全局批量替换（v0.1.47） ----------
-  /** 大小写不敏感整文替换：返回 [新文本, 替换处数] */
+  /** 正则字面量转义（查询串按字面量匹配，与 find.js 的 escapeRe 同式） */
+  function escapeRe(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /** 大小写不敏感整文替换：返回 [新文本, 替换处数]。
+   *  匹配走 RegExp 的 exec（m.index 是**原串**下标）——不用 toLowerCase().indexOf 取下标：
+   *  变长小写映射（如 İ U+0130，小写成 i + ̇ 两个字符）会让小写串下标与原串错位，
+   *  批量替换把文件写坏（与 find.js :26-28 的修复同口径；'giu' 保留大小写折叠语义）。 */
   function replaceAllInText(text, q, rep) {
-    const lower = text.toLowerCase();
-    const ql = q.toLowerCase();
+    if (!q) return [text, 0];
+    const re = new RegExp(escapeRe(q), 'giu');
     let out = '';
     let i = 0;
     let n = 0;
-    let idx = lower.indexOf(ql);
-    while (idx >= 0) {
-      out += text.slice(i, idx) + rep;
-      i = idx + q.length;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      if (m[0].length === 0) { re.lastIndex += 1; continue; } // 零宽匹配：手动推进，防死循环
+      out += text.slice(i, m.index) + rep;
+      i = m.index + m[0].length;
       n++;
-      idx = lower.indexOf(ql, i);
     }
     out += text.slice(i);
     return [out, n];

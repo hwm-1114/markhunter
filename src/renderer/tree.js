@@ -230,7 +230,38 @@ export function createTree() {
       container.appendChild(rootRow.children);
       loads.push(expandNode(dir, rootRow));
     }
-    return Promise.all(loads).then(() => renderExternal());
+    // 首层渲染完成后异步补载 expanded 里的嵌套目录（不阻塞首层；失败静默）
+    return Promise.all(loads).then(() => renderExternal()).then(() => { restoreExpandedDirs(); });
+  }
+
+  // 全量 render 只重建了根的一层子节点（expandNode 只 loadChildren 根目录）：expanded 集合里
+  // 的嵌套目录在新 DOM 里会呈现「已展开但内容为空」。这里按 expanded 把已渲染的目录链逐级补载
+  // —— loadChildren 自带并发去重（loadingDirs），读失败在其内部落错误行，这里整体再兜一层静默。
+  let restoreSeq = 0;
+  function restoreExpandedDirs() {
+    const seq = ++restoreSeq;
+    const expandedKeys = new Set();
+    for (const p of expanded) expandedKeys.add(normalizeKey(p));
+    const visited = new Set();
+    for (const r of roots) visited.add(normalizeKey(r)); // 根目录在 render 里已强制加载，跳过
+    (async () => {
+      for (;;) {
+        if (seq !== restoreSeq) return; // 已有更新的 render：放弃本次补载
+        const pending = [];
+        for (const [p, entry] of nodeMap) {
+          if (!entry.isDir) continue;
+          const key = normalizeKey(p);
+          if (visited.has(key) || !expandedKeys.has(key)) continue;
+          if (isSyntheticKey(p)) continue; // 「外部文件」合成行的链由 renderExternal 自己维护
+          visited.add(key);
+          if (entry.children.childElementCount > 0) continue; // 已加载
+          pending.push(p);
+        }
+        if (!pending.length) return;
+        // 并发补载一层；加载出来的更深层目录若也在 expanded，下一轮循环继续补
+        await Promise.all(pending.map((p) => loadChildren(p, false).catch(() => { /* 失败静默 */ })));
+      }
+    })().catch(() => { /* 失败静默：树主体已渲染，补载失败不打扰用户 */ });
   }
 
   function makeRow(node, opts = {}) {
@@ -929,7 +960,8 @@ export function createTree() {
     const targetKey = normalizeKey(p).replace(/\/+$/, '');
     for (const r of roots) {
       const rootKey = normalizeKey(r).replace(/\/+$/, '');
-      if (targetKey === rootKey || !targetKey.startsWith(rootKey)) continue;
+      if (targetKey === rootKey) return true; // 根目录自身也算内部（此前 continue 误判为外部）
+      if (!targetKey.startsWith(rootKey)) continue;
       if (targetKey.slice(rootKey.length).startsWith('/')) return true; // 仅接受根内子路径（防 F:/ab 前缀误匹配 F:/a）
     }
     return false;

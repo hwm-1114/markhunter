@@ -661,8 +661,12 @@ function createDoc(opts = {}) {
   async function blockText(b, fh) {
     const blk = st.blocks[b];
     const buf = await readBlockBytes(b, 0, blk.bytes, fh);
-    const text = buf.toString('utf8');
-    if (!Buffer.from(text, 'utf8').equals(buf)) {
+    // fatal 解码一次完成合法性自检（替代 toString 后整块重编码比对）；
+    // ignoreBOM:true 不可省：缺省会吃掉文件头 BOM，破坏字节往返保真
+    let text;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf);
+    } catch {
       throw new Error(`第 ${b} 块含非 UTF-8 字节（文件可能不是 UTF-8），暂不支持编辑`);
     }
     const n = splitBlockText(text, blk.endsNL).length;

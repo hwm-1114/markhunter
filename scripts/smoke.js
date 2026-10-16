@@ -8118,6 +8118,270 @@ async function runSmoke(win) {
         }
       }
 
+      // ==========================================================================
+      // v0.7.2 修复回归批（5 条）—— 位置：Phase 5a 批之后、E2E_RESULTS 之前，真·append（未改动任何既有用例）。
+      //   对应修复：① search-worker 字节快路径大小写折叠（全小写/全大写/混合查询都要命中全部大小写形态内容）
+      //   ② 回退路径无换行巨文件 strBuf 有界 + 块级可取消 ③ 全局替换变长小写映射下标错位（数据损坏类）
+      //   ④ 树全量 render 后嵌套已展开目录异步补载 ⑤ 大文档预览自动重渲闸门（>8MB 不随击键整渲，手动刷新）。
+      // 口径同前批：渲染端可观测事实 + 主进程 fs 真读；每个合取项单独命名进 detail；夹具自建自清。
+      // 坑①：所有 p7Eval 模板串内部只用单引号，绝不出现裸反引号与意外模板占位符。
+      // ==========================================================================
+      {
+        const P7_MIXED = path.join(TEST_ROOT, 'p7-huge-mixed.txt');      // >10MB：三种大小写形态各占一行
+        const P7_ONELINE = path.join(TEST_ROOT, 'p7-huge-oneline.txt');  // >10MB 无换行单行，关键词在尾部
+        const P7_REPLACE = path.join(TEST_ROOT, 'p7-replace.md');
+        const P7_TREE = path.join(TEST_ROOT, 'p7-tree');
+        const P7_TREE_A = path.join(P7_TREE, 'a');
+        const P7_TREE_B = path.join(P7_TREE_A, 'b');
+        const P7_TREE_C = path.join(P7_TREE_B, 'c');
+        const P7_TREE_DEEP = path.join(P7_TREE_C, 'deep.md');
+        const P7_PREV = path.join(TEST_ROOT, 'p7-preview-big.md');       // >8MB：触发预览闸门
+        // 混合大小写夹具：20 万行 ≈ 10.6MB（> search-worker.js 的 MAX_SEARCH_FILE_MB=10 流式门槛）
+        const P7_MIXED_LINES = [1234, 100000, 199999];
+        {
+          const filler = 'p7 filler line abcdefghijklmnopqrstuvwxyz 0123456789';
+          const lines = new Array(200000).fill(filler);
+          lines[P7_MIXED_LINES[0] - 1] = 'p7mix readme tail';
+          lines[P7_MIXED_LINES[1] - 1] = 'p7mix Readme tail';
+          lines[P7_MIXED_LINES[2] - 1] = 'p7mix README tail';
+          fs.writeFileSync(P7_MIXED, lines.join('\n') + '\n', 'utf8');
+        }
+        // 无换行单行夹具：11MB + 尾部中文关键词（非 ASCII 查询强制走回退路径）
+        const P7_KW = '关键词p7';
+        fs.writeFileSync(P7_ONELINE, 'x'.repeat(11 * 1024 * 1024) + P7_KW + 'y'.repeat(1024), 'utf8');
+        // 全局替换夹具：İ（U+0130，小写映射成 2 字符）站在匹配点前面 —— 旧实现下标错位会写坏文件
+        const P7_REP_ORIG = 'xİy p7rep z p7rep İw\n第二行 p7rep\n';
+        const P7_REP_WANT = 'xİy MH z MH İw\n第二行 MH\n';
+        fs.writeFileSync(P7_REPLACE, P7_REP_ORIG, 'utf8');
+        // 树夹具：p7-tree/a/b/c/deep.md 三层嵌套
+        fs.mkdirSync(P7_TREE_C, { recursive: true });
+        fs.writeFileSync(P7_TREE_DEEP, '# p7 deep\n', 'utf8');
+        // 预览闸门夹具：>8MB markdown（preview.js PREVIEW_AUTO_MAX_BYTES = 8MB）
+        {
+          const block = 'p7 preview filler line abcdefghijklmnopqrstuvwxyz 0123456789 abcdefghij\n';
+          const parts = ['# p7previewhead\n\n'];
+          for (let i = 0; i < 120000; i++) parts.push(block); // ≈ 9.5MB
+          fs.writeFileSync(P7_PREV, parts.join(''), 'utf8');
+        }
+        const P7_MIXED_BYTES = fs.statSync(P7_MIXED).size;
+        const P7_ONELINE_BYTES = fs.statSync(P7_ONELINE).size;
+        const P7_PREV_BYTES = fs.statSync(P7_PREV).size;
+        const P7_STREAM_MIN = 10 * 1024 * 1024;   // search-worker.js MAX_SEARCH_FILE_MB
+        const P7_GATE_MIN = 8 * 1024 * 1024;      // preview.js PREVIEW_AUTO_MAX_BYTES
+
+        const p7Eval = (code) => win.webContents.executeJavaScript(code);
+        const p7Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const p7J = (v) => JSON.stringify(v === undefined ? null : v);
+        const p7Case = async (name, fn) => {
+          let r;
+          try {
+            r = await fn();
+          } catch (err) {
+            r = { ok: false, detail: 'ERR: ' + (err && err.stack ? err.stack.split('\n').slice(0, 3).join(' // ') : String(err)), evidence: '' };
+          }
+          results.push([name, r && r.ok === true ? true : ((r && r.detail) || 'false'), (r && r.evidence) || '']);
+        };
+        const p7Fail = (conj, evidence) => ({
+          ok: Object.keys(conj).every((k) => conj[k] === true),
+          detail: Object.keys(conj).map((k) => k + '=' + conj[k]).join(','),
+          evidence: evidence || '',
+        });
+        const p7Wait = async (code, pred, ms = 10000, step = 200) => {
+          const t0 = Date.now();
+          let v = null;
+          for (;;) {
+            v = await p7Eval(code).catch(() => null);
+            if (v !== null && pred(v)) return v;
+            if (Date.now() - t0 > ms) return v;
+            await p7Sleep(step);
+          }
+        };
+        const p7Reset = async () => {
+          await p7Eval(`(async () => { await window.__app.openDirFromPath(${p7J(TEST_ROOT)}); })()`).catch(() => {});
+          await p7Sleep(120);
+          await p7Eval(`(() => {
+            const e = window.__app.editor;
+            if (window.__app.quickOpen) window.__app.quickOpen.close();
+            document.querySelectorAll('.tabs-menu').forEach((m) => m.classList.add('hidden'));
+            const hm = document.getElementById('ctx-menu'); if (hm) hm.classList.add('hidden');
+            e.hideTabsHud();
+            if (e.getPaneCount() > 1) e.mergePanes();
+            e.closeAll();
+            e.clearClosedStack();
+            return e.getPaneCount();
+          })()`).catch(() => -1);
+          await p7Sleep(200);
+        };
+        // 树行定位/展开的注入助手（行与其子容器是兄弟节点，子容器经 nextElementSibling 取）
+        const P7_TREE_HELPERS = `
+          const norm7 = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+          const all7 = () => Array.from(document.querySelectorAll('#file-tree .tree-node'));
+          const rowOf7 = (p) => all7().find((n) => norm7(n.dataset.path) === norm7(p));
+          const kids7 = (row) => { const box = row && row.nextElementSibling; return box && box.classList && box.classList.contains('tree-children') ? box : null; };
+          const open7 = async (p) => {
+            let row = rowOf7(p);
+            if (!row) return { ok: false, p: p, missing: true };
+            let box = kids7(row);
+            if (!(box && box.style.display !== 'none' && box.querySelectorAll('.tree-node').length > 0)) row.click();
+            for (let i = 0; i < 40; i++) {
+              await new Promise((r2) => setTimeout(r2, 150));
+              row = rowOf7(p);
+              box = kids7(row);
+              if (box && box.style.display !== 'none' && box.querySelectorAll('.tree-node').length > 0) return { ok: true };
+            }
+            return { ok: false, p: p, timeout: true };
+          };
+        `;
+
+        try {
+          // ==================== 1. gsMixedCaseHuge：>10MB 文件大小写折叠搜索（快路径回归） ====================
+          await p7Case('gsMixedCaseHuge', async () => {
+            const perQ = {};
+            for (const q of ['readme', 'README', 'Readme']) {
+              const hits = await p7Eval(`(async () => {
+                const rs = await window.api.globalSearch(${p7J(TEST_ROOT)}, ${p7J(q)});
+                const norm = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+                return rs.filter((x) => norm(x.file).endsWith('p7-huge-mixed.txt')).map((x) => ({ line: x.line, kind: x.kind || '' }));
+              })()`);
+              const lines = (hits || []).map((h) => h.line).sort((a, b) => a - b);
+              perQ[q] = { n: lines.length, lines: lines.join(','), contentKind: (hits || []).every((h) => h.kind === '') };
+            }
+            const wantLines = P7_MIXED_LINES.slice().sort((a, b) => a - b).join(',');
+            const okQ = (q) => perQ[q] && perQ[q].n === 3 && perQ[q].lines === wantLines && perQ[q].contentKind;
+            const conj = {
+              'fixture-over-10mb-stream-path': P7_MIXED_BYTES > P7_STREAM_MIN,
+              'query-lowercase-hits-all-case-forms': okQ('readme'),
+              'query-uppercase-hits-all-case-forms': okQ('README'),
+              'query-mixedcase-hits-all-case-forms': okQ('Readme'),
+            };
+            return p7Fail(conj, 'bytes=' + P7_MIXED_BYTES + ' want=' + wantLines + ' perQ=' + p7J(perQ));
+          });
+
+          // ==================== 2. gsNoNewlineHuge：回退路径无换行巨文件有界且命中 ====================
+          await p7Case('gsNoNewlineHuge', async () => {
+            const t0 = Date.now();
+            const hits = await p7Eval(`(async () => {
+              const rs = await window.api.globalSearch(${p7J(TEST_ROOT)}, ${p7J(P7_KW)});
+              const norm = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+              return rs.filter((x) => norm(x.file).endsWith('p7-huge-oneline.txt')).map((x) => ({ line: x.line, len: x.text ? x.text.length : -1 }));
+            })()`);
+            const ms = Date.now() - t0;
+            const hit = hits && hits[0];
+            const conj = {
+              'fixture-over-10mb-stream-path': P7_ONELINE_BYTES > P7_STREAM_MIN,
+              'exactly-one-hit': !!(hits && hits.length === 1),
+              'line-is-1': !!(hit && hit.line === 1),
+              'text-truncated-le-1000': !!(hit && hit.len >= 0 && hit.len <= 1000),
+            };
+            return p7Fail(conj, 'bytes=' + P7_ONELINE_BYTES + ' ms=' + ms + ' hits=' + p7J(hits));
+          });
+
+          // ==================== 3. gsReplaceCaseFold：全局替换遇变长小写映射不写坏文件 ====================
+          await p7Case('gsReplaceCaseFold', async () => {
+            const r = await p7Eval(`(async () => {
+              const gs = window.__app.globalSearch;
+              document.getElementById('gs-input').value = 'p7rep';
+              await gs.run();
+              document.getElementById('gs-replace-input').value = 'MH';
+              const ok = await gs.replaceAll(true);
+              const back = await window.api.readFile(${p7J(P7_REPLACE)});
+              return { ok: ok === true, content: back.content };
+            })()`);
+            const conj = {
+              'replace-returns-true': !!(r && r.ok === true),
+              'content-exact-after-replace': !!(r && r.content === P7_REP_WANT),
+              'replaced-3-sites': !!(r && typeof r.content === 'string' && r.content.split('MH').length - 1 === 3),
+              'no-residual-query': !!(r && typeof r.content === 'string' && r.content.indexOf('p7rep') < 0),
+            };
+            return p7Fail(conj, 'want=' + p7J(P7_REP_WANT) + ' got=' + p7J(r));
+          });
+
+          // ==================== 4. treeNestedExpand：全量 render 后嵌套已展开目录自动补载 ====================
+          await p7Case('treeNestedExpand', async () => {
+            await p7Eval(`(async () => { await window.__app.tree.setRoot(${p7J(TEST_ROOT)}); return true; })()`);
+            await p7Sleep(500);
+            const opened = await p7Eval(`(async () => {
+              ${P7_TREE_HELPERS}
+              const out = {};
+              const chain = ${p7J([P7_TREE, P7_TREE_A, P7_TREE_B, P7_TREE_C])};
+              for (const p of chain) {
+                const r = await open7(p);
+                out[p] = r.ok === true;
+                if (!r.ok) return out;
+              }
+              out.deepVisible = !!rowOf7(${p7J(P7_TREE_DEEP)});
+              return out;
+            })()`);
+            // 全量 render（根刷新路径）：expanded 集合保留但节点全部重建 —— 修复前嵌套目录「展开却为空」
+            await p7Eval(`(async () => { await window.__app.tree.refreshNode(${p7J(TEST_ROOT)}, true); return true; })()`);
+            const after = await p7Wait(`(() => {
+              ${P7_TREE_HELPERS}
+              const chain = ${p7J([P7_TREE_A, P7_TREE_B, P7_TREE_C])}.map((p) => {
+                const row = rowOf7(p);
+                const box = kids7(row);
+                return !!(row && box && box.style.display !== 'none' && box.querySelectorAll('.tree-node').length > 0);
+              });
+              return { deep: !!rowOf7(${p7J(P7_TREE_DEEP)}), chain: chain };
+            })()`, (v) => v && v.deep === true && v.chain.every((x) => x === true), 9000, 250);
+            const conj = {
+              'expand-chain-before-render': !!(opened && opened[P7_TREE] === true && opened[P7_TREE_A] === true && opened[P7_TREE_B] === true && opened[P7_TREE_C] === true),
+              'deep-visible-before-render': !!(opened && opened.deepVisible === true),
+              'deep-reloaded-after-full-render': !!(after && after.deep === true),
+              'nested-dirs-still-expanded-loaded': !!(after && Array.isArray(after.chain) && after.chain.every((x) => x === true)),
+            };
+            return p7Fail(conj, 'opened=' + p7J(opened) + ' after=' + p7J(after));
+          });
+
+          // ==================== 5. previewGateLargeDoc：>8MB 文档击键不整渲，手动刷新恢复 ====================
+          await p7Case('previewGateLargeDoc', async () => {
+            await p7Reset();
+            await p7Eval(`(async () => { await window.__app.editor.openFile(${p7J(P7_PREV)}); return true; })()`);
+            await p7Sleep(1500);
+            // 分段标签懒加载：先 ensureFullyLoaded 再读 doc.length（否则闸门阈值拿到的是部分长度，
+            // 且首轮 auto 渲染会整渲未加载文档 —— 实测 len 仅 ~2MB 导致用例语义跑偏）
+            const st0 = await p7Eval(`(async () => { const e = window.__app.editor; const t = e.getActiveTab();
+              if (t) await e.ensureFullyLoaded(t);
+              return { kind: t && (t.kind || 'normal'), len: t && t.state ? t.state.doc.length : 0 }; })()`);
+            // 初始整渲（applyMode 走非 auto 路径，不受闸门限制）
+            await p7Eval(`(() => { window.__app.preview.setMode('split'); window.__app.preview.applyMode(); return true; })()`);
+            const initial = await p7Wait(`(() => { const c = document.querySelector('#preview-content');
+              return { has: !!(c && c.textContent.indexOf('p7previewhead') >= 0) }; })()`, (v) => v && v.has === true, 20000, 300);
+            // 编辑 → onDocChanged → 250ms 防抖 → render({auto:true}) → 闸门拦下
+            await p7Eval(`(() => { const e = window.__app.editor; const v = e.getView();
+              v.dispatch({ changes: { from: 0, insert: 'P7EDITMARK ' } }); return true; })()`);
+            const gated = await p7Wait(`(() => { const b = document.querySelector('.preview-gate-banner'); const c = document.querySelector('#preview-content');
+              return { banner: !!b, marker: !!(c && c.textContent.indexOf('P7EDITMARK') >= 0) }; })()`, (v) => v && v.banner === true, 6000, 200);
+            // 手动刷新 → 非 auto → 整渲恢复，横幅移除
+            await p7Eval(`(() => { const b = document.querySelector('.preview-gate-banner button'); if (b) b.click(); return !!b; })()`);
+            const refreshed = await p7Wait(`(() => { const b = document.querySelector('.preview-gate-banner'); const c = document.querySelector('#preview-content');
+              return { banner: !!b, marker: !!(c && c.textContent.indexOf('P7EDITMARK') >= 0) }; })()`, (v) => v && v.marker === true, 20000, 300);
+            const conj = {
+              'fixture-over-8mb-gate-threshold': P7_PREV_BYTES > P7_GATE_MIN && !!(st0 && st0.len > P7_GATE_MIN),
+              'initial-full-render': !!(initial && initial.has === true),
+              'auto-render-gated-banner-shown': !!(gated && gated.banner === true),
+              'auto-render-gated-content-stale': !!(gated && gated.marker === false),
+              'manual-refresh-renders-marker': !!(refreshed && refreshed.marker === true),
+              'banner-removed-after-manual': !!(refreshed && refreshed.banner === false),
+            };
+            return p7Fail(conj, 'bytes=' + P7_PREV_BYTES + ' st0=' + p7J(st0) + ' gated=' + p7J(gated) + ' refreshed=' + p7J(refreshed));
+          });
+        } finally {
+          // 清场：恢复编辑模式、关标签、清重开栈、清全局搜索框、重申工作目录、删夹具
+          try { await p7Eval(`(async () => {
+            try { window.__app.preview.setMode('edit'); window.__app.preview.applyMode(); } catch (e) {}
+            try { const e2 = window.__app.editor; if (e2.getPaneCount() > 1) e2.mergePanes(); e2.closeAll(); e2.clearClosedStack(); } catch (e) {}
+            try { document.getElementById('gs-input').value = ''; document.getElementById('gs-replace-input').value = ''; } catch (e) {}
+            try { await window.__app.openDirFromPath(${p7J(TEST_ROOT)}); } catch (e) {}
+            return true;
+          })()`); } catch { /* 忽略 */ }
+          try { await p7Sleep(300); } catch { /* 忽略 */ }
+          for (const f of [P7_MIXED, P7_ONELINE, P7_REPLACE, P7_PREV]) {
+            try { fs.rmSync(f, { force: true }); } catch { /* 占用则忽略 */ }
+          }
+          try { fs.rmSync(P7_TREE, { recursive: true, force: true }); } catch { /* 占用则忽略 */ }
+        }
+      }
+
       console.log('E2E_RESULTS');
       for (const r of results) {
         console.log('  -', r.join(' | '));

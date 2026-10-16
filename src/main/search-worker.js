@@ -38,49 +38,99 @@ const MAX_STREAM_FILE_MB = 5120;    // 1B-4：大文件流式扫描上限（v0.7
 const PROGRESS_EVERY = 25;          // 每扫描 25 个文件回传一次进度（1GB 工程 ≈ 数千文件 → 数百条进度）
 
 const ASCII_ONLY = /^[\x20-\x7e]+$/; // 纯可打印 ASCII 查询 → 走原生字节匹配快路径
+const FALLBACK_BUF_MAX = 1024 * 1024;  // 回退路径 strBuf 截断消费阈值（无换行巨文件防无界增长）
+const FALLBACK_BUF_KEEP = 256 * 1024;  // 截断后保留的尾部：远大于 1000 字符显示截断与查询长度，跨段命中不丢
 
-/** 大小写不敏感的原生字节匹配：返回 chunk 内命中偏移（升序），每个 needle 最多收集 cap 个。
+/** ASCII 字母字节判定（大小写折叠只对字母生效，符号/数字必须精确匹配） */
+function isAsciiLetter(b) {
+  return (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a);
+}
+
+// 英文文本小写字母频率（约 %，a-z 顺序）：锚点选 needle 中最低频的字节，非字母记 0
+// （非字母在文本里远比字母稀疏，且精确匹配只需单游标单遍扫描）
+const LETTER_FREQ = [8.2, 1.5, 2.8, 4.3, 12.7, 2.2, 2.0, 6.1, 7.0, 0.15, 0.8, 4.0, 2.4,
+  6.7, 7.5, 1.9, 0.1, 6.0, 6.3, 9.1, 2.8, 1.0, 2.4, 0.15, 2.0, 0.07];
+
+/** 大小写不敏感的原生字节匹配：返回 chunk 内命中偏移（升序），最多收集 cap 个。
+ *  needle 中的字母字节同时接受两种大小写（历史教训：小写+大写两个 needle 各扫一遍的方案
+ *  漏配内容里的一切混合形态，如查询 readme 漏 Readme/ReAdMe），非字母字节精确匹配。
+ *  锚点 = needle 中最低频的字节（LETTER_FREQ，非字母优先）：字母则小写/大写两个变体各持
+ *  一个游标，单调前进、整块只扫一遍，每次取更近候选（逐候选各扫一遍会在锚点变体稀疏时
+ *  退化成 O(n²)），候选位置逐字节折叠校验（isLetterPos 预标记，无函数调用）；
+ *  needle 全为非字母时退化为精确匹配；长度 1 时锚点即命中。
  *  cap 的意义：只需全局前 maxResults 条结果，密集查询（如单空格）若全量收集会吃满内存与排序时间。
  *  ASCII 查询在 UTF-8 与 GBK 下字节表示一致，故两种编码共用同一快路径。 */
-function nativeMatches(chunk, needles, cap) {
+function nativeMatchesCI(chunk, needle, cap) {
   const out = [];
-  for (const nd of needles) {
-    let from = 0;
-    let taken = 0;
-    for (;;) {
-      const i = chunk.indexOf(nd, from);
-      if (i < 0) break;
-      out.push(i);
+  const len = needle.length;
+  // 预计算：字母位置标记（折叠校验用）+ 锚点位置（最低频字节）
+  const isLetterPos = new Uint8Array(len);
+  let anchor = 0;
+  let best = Infinity;
+  for (let j = 0; j < len; j++) {
+    const n = needle[j];
+    let f = 0;
+    if (isAsciiLetter(n)) {
+      isLetterPos[j] = 1;
+      f = LETTER_FREQ[(n | 0x20) - 0x61];
+    }
+    if (f < best) { best = f; anchor = j; }
+  }
+  const n0 = needle[anchor];
+  const letter0 = isLetterPos[anchor] === 1;
+  const a0 = letter0 ? n0 | 0x20 : n0;          // 锚点小写形态
+  const a1 = letter0 ? (n0 | 0x20) ^ 0x20 : n0; // 锚点大写形态（锚点非字母时不启用）
+  // 候选锚点位置 p 的合法区间：匹配起点 p-anchor ≥ 0 且 needle 完整落在 chunk 内
+  // （块尾不完整候选由调用方的 tail 拼接负责）
+  const pMax = chunk.length - len + anchor;
+  let i0 = chunk.indexOf(a0, anchor);
+  let i1 = letter0 ? chunk.indexOf(a1, anchor) : -1;
+  let taken = 0;
+  for (;;) {
+    const p = i0 < 0 ? i1 : (i1 < 0 ? i0 : Math.min(i0, i1));
+    if (p < 0 || p > pMax) break;
+    // 推进被消费一侧的游标（a0 ≠ a1，同一位置不可能同时命中两侧；步进 1 = 允许重叠命中）
+    if (p === i0) i0 = chunk.indexOf(a0, p + 1);
+    if (letter0 && p === i1) i1 = chunk.indexOf(a1, p + 1);
+    const s = p - anchor;
+    let ok = true;
+    for (let j = 0; j < len; j++) {
+      const c = chunk[s + j];
+      const n = needle[j];
+      if (c === n) continue;
+      if (!isLetterPos[j] || (c ^ 0x20) !== n) { ok = false; break; } // 字母接受另一种大小写
+    }
+    if (ok) {
+      out.push(s);
       taken++;
       if (taken >= cap) break;
-      from = i + 1; // 允许重叠命中（与逐行 indexOf 语义一致）
     }
   }
-  out.sort((a, b) => a - b);
   return out;
 }
 
 /** 大文件流式扫描（>10MB，v0.4.0 快路径）：原生 Buffer.indexOf 直接匹配原始字节。
- *  - 快路径（查询串为纯 ASCII）：8MB 块上原生匹配，行号由块内换行位置二分得到，
- *    兼容 UTF-8 / GBK（ASCII 字节两者一致）；大小写不敏感 = 小写/大写两个 needle 各扫一遍再归并。
+ *  - 快路径（查询串为纯 ASCII）：8MB 块上大小写不敏感字节匹配（nativeMatchesCI），
+ *    行号由块内换行位置二分得到，兼容 UTF-8 / GBK（ASCII 字节两者一致）。
  *  - 回退路径（含非 ASCII，如中文关键词）：仍走增量解码 + 逐行匹配（语义与 v0.2.1 一致）。
  *  返回是否达到 maxResults。 */
 async function scanStream(file, rawQuery, q, results, maxResults, isCancelled) {
-  const needles = ASCII_ONLY.test(String(rawQuery || ''))
-    ? [...new Set([rawQuery.toLowerCase(), rawQuery.toUpperCase()])].filter(Boolean).map((s) => Buffer.from(s, 'latin1'))
-    : null;
+  const rq = String(rawQuery || '');
+  const needle = ASCII_ONLY.test(rq) ? Buffer.from(rq, 'latin1') : null;
 
   let enc = null;
   let dec = null;
+  let lineDec = null;     // 快路径命中行解码复用（非 stream 模式无状态；stream 解码器 dec 不可复用）
   let strBuf = '';        // 回退路径：解码后的字符串缓冲
   let ln = 0;             // 已消费的完整行数（全局）
   let check = 0;
   const CHUNK = 8 * 1024 * 1024;
   const stream = fs.createReadStream(file, { highWaterMark: CHUNK });
   let tail = Buffer.alloc(0); // 跨块命中：保留上一块尾部 needle.length-1 字节
-  const maxNeedle = needles ? Math.max(...needles.map((b) => b.length)) : 0;
+  const maxNeedle = needle ? needle.length : 0;
   try {
     for await (const chunk of stream) {
+      if (isCancelled()) return true; // 块级取消：无换行巨文件（回退路径不进行循环）也能随时退出
       if (!enc) {
         // 首块探测：截去尾部 4 字节（避免块边界截断多字节字符导致误判）
         const probe = chunk.subarray(0, Math.max(0, chunk.length - 4));
@@ -91,20 +141,21 @@ async function scanStream(file, rawQuery, q, results, maxResults, isCancelled) {
           enc = 'gbk'; // Windows 环境大文件中文编码次选
         }
         dec = new TextDecoder(enc, { stream: true });
+        lineDec = new TextDecoder(enc);
       }
 
-      if (needles) {
-        // ---------- 快路径：字节匹配 ----------
+      if (needle) {
+        // ---------- 快路径：字节匹配（大小写不敏感） ----------
         const stitched = tail.length ? Buffer.concat([tail, chunk]) : chunk;
-        const newStart = tail.length; // 只报告「起点落在本块」的命中，避免与上一块重复
-        const hits = nativeMatches(stitched, needles, Math.max(1, maxResults - results.length));
+        const newStart = tail.length; // 去重口径：整体落在 tail 内的命中上一块已报告（跨块命中见下方过滤）
+        const hits = nativeMatchesCI(stitched, needle, Math.max(1, maxResults - results.length));
         if (hits.length) {
           // 块内换行位置（仅本块新增部分参与行号累加，tail 的换行已在上一块计入 ln）
           const nlPos = [];
           let p = stitched.indexOf(0x0a, newStart);
           while (p >= 0) { nlPos.push(p); p = stitched.indexOf(0x0a, p + 1); }
           for (const hit of hits) {
-            if (hit < newStart) continue; // 起点在 tail 内：上一块已报告
+            if (hit + needle.length <= newStart) continue; // 整体落在 tail 内：上一块已报告；起点在 tail 但越过块尾的跨块命中上一块看不到，必须在本块报告
             // 行号 = 已消费行数 + 本块内该命中之前的换行数 + 1
             let lo = 0;
             let hi = nlPos.length;
@@ -117,7 +168,7 @@ async function scanStream(file, rawQuery, q, results, maxResults, isCancelled) {
             if (le < 0) le = stitched.length;
             const rawLine = stitched.subarray(ls, le);
             let text;
-            try { text = new TextDecoder(enc).decode(rawLine); } catch { text = rawLine.toString('latin1'); }
+            try { text = lineDec.decode(rawLine); } catch { text = rawLine.toString('latin1'); }
             text = text.replace(/\r$/, '');
             const mi = text.toLowerCase().indexOf(q);
             results.push({ file, line: lineNo, text: text.length > 1000 ? text.slice(0, 1000) : text, matchIndex: mi < 0 ? 0 : mi });
@@ -147,6 +198,21 @@ async function scanStream(file, rawQuery, q, results, maxResults, isCancelled) {
         const hit = line.toLowerCase().indexOf(q);
         if (hit >= 0) {
           results.push({ file, line: ln, text: line.length > 1000 ? line.slice(0, 1000) : line, matchIndex: hit });
+          if (results.length >= maxResults) return true;
+        }
+      }
+      // 无换行巨文件：strBuf 无界增长会撞 V8 字符串上限。超阈值时把头部按「截断行」照常
+      // 匹配一次后丢弃，只保留尾部继续拼接（多带 q.length-1 字符：跨切点的命中完整可见，
+      // 起点落在切点之后的留给保留段，避免重复报告）
+      if (strBuf.length > FALLBACK_BUF_MAX) {
+        const cut = strBuf.length - FALLBACK_BUF_KEEP;
+        const head = strBuf.slice(0, cut + q.length - 1);
+        strBuf = strBuf.slice(cut);
+        const hit = head.toLowerCase().indexOf(q);
+        if (hit >= 0 && hit < cut) {
+          const text = head.length > 1000 ? head.slice(0, 1000) : head;
+          const mi = text.toLowerCase().indexOf(q);
+          results.push({ file, line: ln + 1, text, matchIndex: mi < 0 ? 0 : mi });
           if (results.length >= maxResults) return true;
         }
       }
