@@ -132,6 +132,20 @@ function nativeMatchesCI(chunk, needle, cap) {
   return out;
 }
 
+/** 编码探测：以「块内最后一个换行」为界做严格 UTF-8 校验（多字节字符不会跨换行，天然安全）。
+ *  旧写法固定截掉尾部 4 字节：若截点正好落在文件末尾/块边界的多字节字符中间，会把 UTF-8 误判成
+ *  GBK（实测：中文 + CRLF + 末尾无换行的文件整份搜索 0 命中）。无换行时回退「截 4 字节」老策略。 */
+function probeEncoding(buf) {
+  const nl = buf.lastIndexOf(10);
+  const end = nl > 0 ? nl : Math.max(0, buf.length - 4);
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, end));
+    return 'utf-8';
+  } catch {
+    return 'gbk'; // Windows 环境大文件中文编码次选
+  }
+}
+
 /** 大文件流式扫描（>10MB，v0.4.0 快路径）：原生 Buffer.indexOf 直接匹配原始字节。
  *  - 快路径（查询串为纯 ASCII）：8MB 块上大小写不敏感字节匹配（nativeMatchesCI），
  *    行号由块内换行位置二分得到，兼容 UTF-8 / GBK（ASCII 字节两者一致）。
@@ -140,6 +154,9 @@ function nativeMatchesCI(chunk, needle, cap) {
 async function scanStream(file, rawQuery, q, results, maxResults, isCancelled) {
   const rq = String(rawQuery || '');
   const needle = ASCII_ONLY.test(rq) ? Buffer.from(rq, 'latin1') : null;
+  // 回退路径是否需要每行大小写折叠：q 已小写；若 q 不含「有大小写映射」的字符（纯中文/数字/符号），
+  // toUpperCase 不变 → 折叠不影响匹配，可直接 indexOf（省掉每行 toLowerCase 的整串分配）。
+  const needFold = q !== q.toUpperCase();
 
   let enc = null;
   let dec = null;
@@ -155,14 +172,8 @@ async function scanStream(file, rawQuery, q, results, maxResults, isCancelled) {
     for await (const chunk of stream) {
       if (isCancelled()) return true; // 块级取消：无换行巨文件（回退路径不进行循环）也能随时退出
       if (!enc) {
-        // 首块探测：截去尾部 4 字节（避免块边界截断多字节字符导致误判）
-        const probe = chunk.subarray(0, Math.max(0, chunk.length - 4));
-        try {
-          new TextDecoder('utf-8', { fatal: true }).decode(probe);
-          enc = 'utf-8';
-        } catch {
-          enc = 'gbk'; // Windows 环境大文件中文编码次选
-        }
+        // 首块探测：以最后一个换行为界（见 probeEncoding 注释）
+        enc = probeEncoding(chunk);
         dec = new TextDecoder(enc, { stream: true });
         lineDec = new TextDecoder(enc);
       }
@@ -209,16 +220,20 @@ async function scanStream(file, rawQuery, q, results, maxResults, isCancelled) {
 
       // ---------- 回退路径：增量解码 + 逐行匹配（语义同 v0.2.1） ----------
       strBuf += dec.decode(chunk, { stream: true });
-      let idx;
-      while ((idx = strBuf.indexOf('\n')) >= 0) {
-        const line = strBuf.slice(0, idx).replace(/\r$/, '');
-        strBuf = strBuf.slice(idx + 1);
+      // v0.9.1 提速：① 逐行 `slice` 改成一次 `split('\n')`（旧写法每行把剩余串整体切片，
+      // 长行文件上产生大量中间字符串）；② 查询串不含**有大小写映射**的字符时（纯中文/数字/符号）
+      // 跳过每行 toLowerCase —— `line.toLowerCase().indexOf(q)` 在 q 无大小写时等价于 `line.indexOf(q)`。
+      const segs = strBuf.split('\n');
+      strBuf = segs.pop() || ''; // 末段可能是不完整行，留到下一块
+      for (let i = 0; i < segs.length; i++) {
+        const seg = segs[i];
+        const line = seg.endsWith('\r') ? seg.slice(0, -1) : seg;
         ln++;
         if (++check >= 50000) {
           check = 0;
           if (isCancelled()) return true;
         }
-        const hit = line.toLowerCase().indexOf(q);
+        const hit = (needFold ? line.toLowerCase() : line).indexOf(q);
         if (hit >= 0) {
           results.push({ file, line: ln, text: line.length > 1000 ? line.slice(0, 1000) : line, matchIndex: hit });
           if (results.length >= maxResults) return true;
@@ -231,10 +246,10 @@ async function scanStream(file, rawQuery, q, results, maxResults, isCancelled) {
         const cut = strBuf.length - FALLBACK_BUF_KEEP;
         const head = strBuf.slice(0, cut + q.length - 1);
         strBuf = strBuf.slice(cut);
-        const hit = head.toLowerCase().indexOf(q);
+        const hit = (needFold ? head.toLowerCase() : head).indexOf(q);
         if (hit >= 0 && hit < cut) {
           const text = head.length > 1000 ? head.slice(0, 1000) : head;
-          const mi = text.toLowerCase().indexOf(q);
+          const mi = (needFold ? text.toLowerCase() : text).indexOf(q);
           results.push({ file, line: ln + 1, text, matchIndex: mi < 0 ? 0 : mi });
           if (results.length >= maxResults) return true;
         }
@@ -242,7 +257,7 @@ async function scanStream(file, rawQuery, q, results, maxResults, isCancelled) {
     }
     if (strBuf.length) {
       ln++;
-      const hit = strBuf.toLowerCase().indexOf(q);
+      const hit = (needFold ? strBuf.toLowerCase() : strBuf).indexOf(q);
       if (hit >= 0) {
         results.push({ file, line: ln, text: strBuf.length > 1000 ? strBuf.slice(0, 1000) : strBuf, matchIndex: hit });
       }
@@ -437,6 +452,183 @@ async function scanStreamParallel(file, rawQuery, q, results, maxResults, isCanc
   }
 }
 
+// ===================== v0.9.1：非 ASCII（中文）查询同样多线程分片 =====================
+// 与上面的字节分片不同：这里按**行边界**切片（每片起点/终点都用「start 之后第一个换行」对齐），
+// 因此不存在跨片命中/跨片行号歧义，也不需要 needle-1 重叠；代价是每片先做一次 ≤64KB 的对齐探测。
+// 编码统一由协调方读文件头探测（与串行回退同口径：严格 UTF-8 → GBK），避免各片各自猜出不同编码。
+// 语义与串行回退一致：**每行最多一条命中**（首个出现位置），行文本截断 1000 字符，行号 1 基。
+function shardDecodeMain() {
+  const { parentPort, workerData } = require('worker_threads');
+  const fs = require('fs');
+  const wd = workerData; // { file, size, start, end, q, fold, cap, enc }
+  const CHUNK = 8 * 1024 * 1024;
+  const ALIGN = 64 * 1024;
+  const MAX_LINE_BUF = 64 * 1024 * 1024; // 单行超长保护（保护阈值 + 保留尾部续拼，与串行回退同思路）
+  const KEEP = 1024 * 1024;
+  const t0 = Date.now();
+  const probe = Buffer.allocUnsafe(ALIGN);
+  let fd = null;
+  /** 返回 pos 之后第一个换行符的下一个字节（行首）；pos<=0 → 0；找不到 → size */
+  const alignFrom = (pos) => {
+    if (pos <= 0) return 0;
+    let p = pos;
+    while (p < wd.size) {
+      const got = fs.readSync(fd, probe, 0, probe.length, p);
+      if (!got) return wd.size;
+      const i = probe.subarray(0, got).indexOf(10);
+      if (i >= 0) return p + i + 1;
+      p += got;
+    }
+    return wd.size;
+  };
+  try {
+    fd = fs.openSync(wd.file, 'r');
+    const A = alignFrom(wd.start);
+    const B = wd.end >= wd.size ? wd.size : alignFrom(wd.end);
+    const hits = [];
+    let nl = 0;
+    if (A < B) {
+      const dec = new TextDecoder(wd.enc, { stream: true });
+      const buf = Buffer.allocUnsafe(CHUNK);
+      let carry = '';
+      let pos = A;
+      while (pos < B && hits.length < wd.cap) {
+        const want = Math.min(CHUNK, B - pos);
+        const got = fs.readSync(fd, buf, 0, want, pos);
+        if (!got) break;
+        pos += got;
+        carry += dec.decode(buf.subarray(0, got), { stream: true });
+        const segs = carry.split('\n');
+        carry = segs.pop() || '';
+        for (let i = 0; i < segs.length; i++) {
+          const seg = segs[i];
+          const line = seg.endsWith('\r') ? seg.slice(0, -1) : seg;
+          nl++;
+          const hit = (wd.fold ? line.toLowerCase() : line).indexOf(wd.q);
+          if (hit >= 0) {
+            hits.push({ line0: nl - 1, text: line.length > 1000 ? line.slice(0, 1000) : line, matchIndex: hit });
+            if (hits.length >= wd.cap) break;
+          }
+        }
+        // 无换行超长行：与串行回退同口径，把头部当「截断行」报一次（行号不前进），只保留尾部续拼
+        if (carry.length > MAX_LINE_BUF) {
+          const cut = carry.length - KEEP;
+          const head = carry.slice(0, cut + wd.q.length - 1);
+          carry = carry.slice(cut);
+          const hit = (wd.fold ? head.toLowerCase() : head).indexOf(wd.q);
+          if (hit >= 0) {
+            hits.push({ line0: nl, text: head.length > 1000 ? head.slice(0, 1000) : head, matchIndex: hit });
+            if (hits.length >= wd.cap) break;
+          }
+        }
+      }
+      carry += dec.decode(); // 冲掉流式解码器里可能残留的多字节
+      if (carry.length) {    // 仅最后一片走到这里（无换行结尾的尾行）
+        nl++;
+        const hit = (wd.fold ? carry.toLowerCase() : carry).indexOf(wd.q);
+        if (hit >= 0) hits.push({ line0: nl - 1, text: carry.length > 1000 ? carry.slice(0, 1000) : carry, matchIndex: hit });
+      }
+    }
+    parentPort.postMessage({ ok: true, hits, nl, start: wd.start, a: A, b: B, ms: Date.now() - t0 });
+  } catch (e) {
+    parentPort.postMessage({ ok: false, error: String((e && e.message) || e) });
+  } finally {
+    try { if (fd != null) fs.closeSync(fd); } catch { /* 忽略 */ }
+  }
+}
+
+const SHARD_DECODE_SRC = (() => {
+  let cached = null;
+  return () => {
+    if (cached) return cached;
+    cached = [
+      'const { parentPort, workerData } = require("worker_threads");',
+      'const fs = require("fs");',
+      shardDecodeMain.toString(),
+      'shardDecodeMain();',
+    ].join('\n');
+    return cached;
+  };
+})();
+
+/** 非 ASCII 查询的分片扫描。返回 { ok:true, full } 或 { ok:false, reason } */
+async function scanStreamParallelDecoded(file, rawQuery, q, results, maxResults, isCancelled) {
+  const st = await fsp.stat(file);
+  const size = st.size;
+  const cap = Math.max(1, maxResults - results.length);
+  const cores = os.availableParallelism ? os.availableParallelism() : os.cpus().length;
+  const want = parseInt(process.env.MH_SEARCH_SHARDS, 10);
+  const n = Number.isFinite(want) && want > 0 ? Math.min(want, SHARD_MAX) : Math.max(2, Math.min(SHARD_MAX, Math.max(2, cores - 1)));
+  // 统一编码探测（与串行回退同口径：取文件头 8MB，以最后一个换行为界做严格 UTF-8 校验）
+  let enc = 'utf-8';
+  try {
+    const fh = await fsp.open(file, 'r');
+    let head;
+    try {
+      head = Buffer.allocUnsafe(Math.min(size, 8 * 1024 * 1024));
+      const { bytesRead } = await fh.read(head, 0, head.length, 0);
+      head = head.subarray(0, bytesRead);
+    } finally { await fh.close(); }
+    enc = probeEncoding(head);
+  } catch { /* 读不到头就按 utf-8 试 */ }
+  const fold = q !== q.toUpperCase();
+  const per = Math.ceil(size / n);
+  const ranges = [];
+  for (let i = 0; i < n; i++) {
+    const s = i * per;
+    const e = Math.min(size, s + per);
+    if (s < e) ranges.push({ start: s, end: e });
+  }
+  const workers = [];
+  let cancelledNow = false;
+  const runShard = (payload) => new Promise((resolve) => {
+    let w = null;
+    try { w = new Worker(SHARD_DECODE_SRC(), { eval: true, workerData: payload }); }
+    catch (e) { resolve({ ok: false, error: 'worker 启动失败：' + ((e && e.message) || e) }); return; }
+    workers.push(w);
+    let settled = false;
+    const fin = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+      try { w.terminate(); } catch { /* 已退出 */ }
+    };
+    w.once('message', (m) => fin(m && typeof m === 'object' ? m : { ok: false, error: '分片无响应' }));
+    w.once('error', (e) => fin({ ok: false, error: String((e && e.message) || e) }));
+    w.once('exit', (c) => fin({ ok: false, error: '分片线程退出码 ' + c }));
+  });
+  const timer = setInterval(() => {
+    if (!isCancelled()) return;
+    cancelledNow = true;
+    for (const w of workers) { try { w.terminate(); } catch { /* 忽略 */ } }
+  }, 100);
+  try {
+    const parts = await Promise.all(ranges.map((r) => runShard({
+      file, size, start: r.start, end: r.end, q, fold, cap, enc,
+    })));
+    if (process.env.MH_SEARCH_DEBUG) {
+      console.error('[search] 解码分片耗时(ms)=', parts.map((p) => (p && p.ms) || -1).join(','), 'enc=' + enc);
+    }
+    if (cancelledNow || isCancelled()) return { ok: false, reason: 'cancelled' };
+    for (const p of parts) {
+      if (!p || p.ok !== true) return { ok: false, reason: (p && p.error) || '分片失败' };
+    }
+    // 分片区间按行边界首尾相接：行数前缀和直接还原全局行号（无需按偏移排序）
+    let base = 1;
+    for (const p of parts) {
+      for (const h of p.hits) {
+        results.push({ file, line: base + h.line0, text: h.text, matchIndex: h.matchIndex });
+        if (results.length >= maxResults) return { ok: true, full: true };
+      }
+      base += p.nl;
+    }
+    return { ok: true, full: false };
+  } finally {
+    clearInterval(timer);
+    for (const w of workers) { try { w.terminate(); } catch { /* 忽略 */ } }
+  }
+}
+
 // ---------- 0.5.0 Phase 5a A1：快速打开的文件清单（缓存 + 增量下发） ----------
 // 目标：Ctrl+P 首次呼出**不等整目录扫完**（冒烟/真实工程里 node_modules 级别的目录首扫可达数秒），
 // 因此清单按 200 个/批流式回传，渲染端拿到一批就能先匹配；同时按目录缓存整份清单，
@@ -559,10 +751,13 @@ async function runSearch(id, dir, query, maxResults) {
     if (st.size > MAX_SEARCH_FILE_MB * 1024 * 1024) {
       // 1B-4：大文件走流式扫描（v0.9.0 上限 20GB），不再整体跳过
       if (st.size > MAX_STREAM_FILE_MB * 1024 * 1024) continue;
-      // v0.9.0：GB 级纯 ASCII 查询优先多线程分片（5GB 单线程 20s → 多核 ~1s 量级）；
-      // 非 ASCII（中文关键词）仍走增量解码回退路径；分片任何异常自动回退串行。
-      if (st.size > SHARD_MIN_BYTES && ASCII_ONLY.test(String(query))) {
-        const pr = await scanStreamParallel(file, query, q, results, maxResults, isCancelled);
+      // v0.9.0：GB 级查询优先多线程分片（5GB 单线程 20s → 多核 ~1s 量级）。
+      // v0.9.1：非 ASCII（中文关键词）也走分片 —— 按行边界切片 + 解码后逐行匹配，语义与串行回退一致。
+      // 分片任何异常都自动回退串行扫描。
+      if (st.size > SHARD_MIN_BYTES) {
+        const pr = ASCII_ONLY.test(String(query))
+          ? await scanStreamParallel(file, query, q, results, maxResults, isCancelled)
+          : await scanStreamParallelDecoded(file, query, q, results, maxResults, isCancelled);
         if (isCancelled()) return { cancelled: true };
         if (pr.ok) {
           if (pr.full) return { results };
@@ -636,6 +831,7 @@ if (process.parentPort && typeof process.parentPort.on === 'function') {
 module.exports = {
   scanStream,
   scanStreamParallel,
+  scanStreamParallelDecoded,
   nativeMatchesCI,
   runSearch,
   MAX_STREAM_FILE_MB,

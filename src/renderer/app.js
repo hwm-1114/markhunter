@@ -1184,7 +1184,7 @@ async function boot() {
     sizeInput.value = s.maxFileSizeMB;
     const sizeHint = document.createElement('div');
     sizeHint.className = 'hint';
-      sizeHint.textContent = `可调整范围 1 ~ ${MAX_SIZE_MB} MB（超过上限拒绝打开）。≤4MB 普通编辑器；>4MB 分段加载；>256MB 虚拟滚动查看器（连续滚动直达任意位置，打开即编辑、Ctrl+G 跳行号、Ctrl+S 保存；首屏不等全量行索引）`;
+      sizeHint.textContent = `可调整范围 1 ~ ${MAX_SIZE_MB} MB（默认 10240 = 10GB；超过上限拒绝打开）。≤4MB 普通编辑器；>4MB 分段加载；>256MB 虚拟滚动查看器（连续滚动直达任意位置，打开即编辑、Ctrl+G 跳行号、Ctrl+S 保存；首屏不等全量行索引、支持自动换行）`;
     sizeField.append(sizeLabel, sizeInput, sizeHint);
 
     // 自动保存间隔

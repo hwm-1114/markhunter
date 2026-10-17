@@ -437,15 +437,17 @@ function makeHandlers(io, opts = {}) {
   //     那条路读的是原文件、看不见 overlay 覆盖，行号也是原文件的）
   async function lines(ctx, arg = {}) {
     const h = requireHandle(reg, ctx, arg);
-    return await withDocLock(reg, h.docId, async () => {
-      const r = await h.doc.readLines(arg.from, arg.count);
-      return Object.assign({ ok: true }, r, {
-        dirty: h.doc.isDirty(),
-        dirtyCount: h.doc.dirtyCount(),
-        totalLines: h.doc.lines(),
-        totalBytes: h.doc.bytes(),
-      });
+    const pack = (r) => Object.assign({ ok: true }, r, {
+      dirty: h.doc.isDirty(),
+      dirtyCount: h.doc.dirtyCount(),
+      totalLines: h.doc.lines(),
+      totalBytes: h.doc.bytes(),
     });
+    // v0.9.1：**保存期间读取不排队**（保存 5GB 要 5–10s，旧实现把视口取行也锁在保存后面，
+    // 拖动/滚轮整段时间冻结）。保存只读文档状态、不写块表；读路径（readLines）本身只读，
+    // 期间并发读到的就是"正在写出的那份内容"，语义一致。写通道仍然全程串行。
+    if (reg.pending.has(h.docId)) return pack(await h.doc.readLines(arg.from, arg.count));
+    return await withDocLock(reg, h.docId, async () => pack(await h.doc.readLines(arg.from, arg.count)));
   }
 
   // (5) huge:doc-line —— 单行**完整**文本（不受 40000 字符截断；不含行尾换行，\r 保留）

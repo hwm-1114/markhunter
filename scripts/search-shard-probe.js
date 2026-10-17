@@ -35,10 +35,10 @@ function writeLines(file, lines) {
   fs.writeFileSync(file, lines.join('\n') + '\n', 'utf8');
 }
 
-async function serialScan(file, query) {
+async function serialScan(file, query, maxResults = 10000) {
   const results = [];
   const q = String(query).toLowerCase();
-  const full = await sw.scanStream(file, query, q, results, 10000, () => false);
+  const full = await sw.scanStream(file, query, q, results, maxResults, () => false);
   return { results, full };
 }
 
@@ -106,7 +106,82 @@ async function parallelScan(file, query) {
       'hits=' + par.results.length + ' line=' + (par.results[0] && par.results[0].line) + ' text=' + (par.results[0] && par.results[0].text.length));
   }
 
-  // ---------- 4. 非 ASCII 查询：分片不参与，串行回退路径命中 ----------
+  // ---------- 4. 非 ASCII 查询：分片解码路径（v0.9.1）与串行逐行结果一致 ----------
+  {
+    const lines = [];
+    for (let i = 1; i <= 200000; i++) lines.push(i === 123457 ? 'line ' + i + ' 中文关键词 here' : 'line ' + i + ' filler');
+    const file = path.join(tmpDir, 'cjk.txt');
+    writeLines(file, lines);
+    const ser = await serialScan(file, '中文关键词');
+    ok('cjk.serial-hit', ser.results.length === 1 && ser.results[0].line === 123457,
+      'hits=' + ser.results.length + ' line=' + (ser.results[0] && ser.results[0].line));
+    // 分片解码（该文件 < SHARD_MIN_BYTES，但函数本身不设阈值，可直接测）
+    const dec = [];
+    const dr = await sw.scanStreamParallelDecoded(file, '中文关键词', '中文关键词', dec, 10000, () => false);
+    ok('cjk.shard-eq-serial', dr.ok === true && JSON.stringify(dec) === JSON.stringify(ser.results),
+      'shard=' + JSON.stringify(dec) + ' serial=' + JSON.stringify(ser.results));
+  }
+
+  // ---------- 4b. UTF-8 中文 + 行边界跨越 + 混合大小写 + CRLF + 无尾换行 ----------
+  {
+    const lines = [];
+    for (let i = 1; i <= 90000; i++) {
+      if (i % 30000 === 0) lines.push('第 ' + i + ' 行 ReadMe中文出现一次');
+      else lines.push('第 ' + i + ' 行 填充内容 füllüre');
+    }
+    const file = path.join(tmpDir, 'cjk-mixed.txt');
+    fs.writeFileSync(file, lines.join('\r\n')); // CRLF + 末尾无换行
+    for (const q of ['中文', 'readme中文', '填充内容']) {
+      const ser = await serialScan(file, q);
+      const dec = [];
+      const dr = await sw.scanStreamParallelDecoded(file, q, String(q).toLowerCase(), dec, 10000, () => false);
+      const norm = (arr) => arr.map((r) => r.line + ':' + r.text + ':' + r.matchIndex).join('|');
+      ok('cjkMixed.' + q + '.eq', dr.ok === true && norm(dec) === norm(ser.results),
+        'shard=' + dec.length + ' serial=' + ser.results.length);
+    }
+  }
+
+  // ---------- 4c. GBK 中文 + 分片解码（编码由协调方探测） ----------
+  {
+    // “中文测试” 的 GBK 字节
+    const gbk = Buffer.from([0xd6, 0xd0, 0xce, 0xc4, 0xb2, 0xe2, 0xca, 0xd4]);
+    const parts = [];
+    for (let i = 1; i <= 80000; i++) {
+      if (i === 45678) parts.push(Buffer.concat([Buffer.from('line ' + i + ' '), gbk, Buffer.from(' key')]));
+      else parts.push(Buffer.from('line ' + i + ' filler ascii only'));
+    }
+    const file = path.join(tmpDir, 'cjk-gbk.txt');
+    fs.writeFileSync(file, Buffer.concat(parts.flatMap((b, i) => (i === parts.length - 1 ? [b] : [b, Buffer.from('\n')]))));
+    const ser = await serialScan(file, '中文测试');
+    const dec = [];
+    const dr = await sw.scanStreamParallelDecoded(file, '中文测试', '中文测试', dec, 10000, () => false);
+    ok('cjkGbk.shard-eq-serial', dr.ok === true && JSON.stringify(dec) === JSON.stringify(ser.results) && dec.length === 1 && dec[0].line === 45678,
+      'shard=' + JSON.stringify(dec) + ' serial=' + JSON.stringify(ser.results));
+  }
+
+  // ---------- 4d. 分片边界恰好落在超长行内部：行归属与行号必须一致 ----------
+  {
+    const n = Math.max(2, Math.min(8, Math.max(2, (os.availableParallelism ? os.availableParallelism() : os.cpus().length) - 1)));
+    const LINE = 300; // 长行，保证片边界落在行中
+    const totalLines = 60000;
+    const per = Math.ceil(totalLines * (LINE + 1) / n);
+    const lines = [];
+    for (let i = 1; i <= totalLines; i++) {
+      // 让每一行都含 needle，便于验证"每行最多一条 + 行号连续不重不漏"
+      lines.push(('行' + i + ' 关键词').padEnd(LINE - 1, 'x'));
+    }
+    const file = path.join(tmpDir, 'cjk-boundary.txt');
+    fs.writeFileSync(file, lines.join('\n') + '\n', 'utf8');
+    const ser = await serialScan(file, '关键词', 1000000);
+    const dec = [];
+    const dr = await sw.scanStreamParallelDecoded(file, '关键词', '关键词', dec, 1000000, () => false);
+    const serLines = ser.results.map((r) => r.line).join(',');
+    const decLines = dec.map((r) => r.line).join(',');
+    ok('cjkBoundary.eq', dr.ok === true && decLines === serLines && dec.length === totalLines,
+      'shard=' + dec.length + ' serial=' + ser.results.length + ' per=' + per + ' shards=' + n);
+  }
+
+  // ---------- 5. 非 ASCII 查询：分片不参与，串行回退路径命中 ----------
   {
     const lines = [];
     for (let i = 1; i <= 200000; i++) lines.push(i === 123457 ? 'line ' + i + ' 中文关键词 here' : 'line ' + i + ' filler');

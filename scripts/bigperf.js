@@ -269,6 +269,14 @@ async function run(win) {
         push(F.name + '.search', searchOk ? search.ms + 'ms' : 'FAIL',
           'hits=' + (search && search.n) + ' firstLine=' + (search && search.first && search.first.line) + '/' + F.needleLine);
 
+        // ---------- 5b. 中文关键词（非 ASCII → 解码分片路径，v0.9.1） ----------
+        const cjk = await ev(`(async () => {
+          const t0 = performance.now();
+          const res = await window.api.globalSearch(${J(F.dir)}, '不存在的关键词');
+          return { ms: Math.round(performance.now() - t0), n: res ? res.length : -1 };
+        })()`);
+        push(F.name + '.searchCJK', cjk && cjk.ms > 0 && cjk.ms < 8000 ? cjk.ms + 'ms' : 'FAIL', 'hits=' + (cjk && cjk.n) + '（0 命中为预期，夹具为纯 ASCII；只计时解码扫描）');
+
         // ---------- 6. 选中 + Ctrl+C（主进程读回剪贴板；选中 SECTION 行，内容唯一可断言） ----------
         const sel = await ev(`(async () => {
           ${PAGE_UTILS}
@@ -351,22 +359,46 @@ async function run(win) {
         push(F.name + '.edit', edit && edit.ok && keyOk ? 'true' : 'FAIL',
           'docOpen=' + (edit && edit.openMs) + 'ms keyAvg=' + keyAvg + 'ms keyMax=' + keyMax + 'ms undoAvg=' + undoAvg + 'ms dirty=' + (edit && edit.dirty) + (edit && edit.reason ? ' reason=' + edit.reason : ''));
 
-        // ---------- 8. 保存（另存为临时文件，夹具零改动）+ 保存耗时 ----------
+        // ---------- 8. 保存（另存为临时文件，夹具零改动）+ **保存期间仍可滚动**（v0.9.1） ----------
         const tmp = path.join(F.dir, '.perf-save-' + Date.now() + '.tmp');
         const baseSize = fs.statSync(F.file).size;
         const save = await ev(`(async () => {
           ${PAGE_UTILS}
           const st = __st();
           if (!st || st.docId == null) return { ok: false, why: 'no doc' };
+          const hv = __hv();
+          const r = __root();
           const t0 = performance.now();
-          try {
-            const r = await window.api.hugeDocSave({ docId: st.docId, target: ${J(tmp)} });
-            return { ok: !!(r && r.ok), ms: Math.round(performance.now() - t0), size: r && r.size, skipped: r && r.skipped, err: null };
-          } catch (e) { return { ok: false, ms: Math.round(performance.now() - t0), err: String(e && e.message || e) }; }
+          // 不 await：保存照样在跑，期间做 8 次跳转/滚动，量「视口取行是否被保存锁排队」
+          const p = window.api.hugeDocSave({ docId: st.docId, target: ${J(tmp)} })
+            .then((x) => ({ ok: !!(x && x.ok), r: x }))
+            .catch((e) => ({ ok: false, err: String((e && e.message) || e) }));
+          const jumps = [];
+          const n = (st.lines || 1);
+          for (let i = 0; i < 8; i++) {
+            const line = Math.max(1, Math.round(n * (0.2 + (i % 4) * 0.15)));
+            const tj = performance.now();
+            await hv.gotoLine(line);
+            jumps.push(Math.round(performance.now() - tj));
+            await __sleep(40);
+          }
+          const out = await p;
+          return {
+            ok: out.ok, err: out.err, size: out.r && out.r.size, skipped: out.r && out.r.skipped,
+            ms: Math.round(performance.now() - t0), jumps,
+            jumpAvg: Math.round(jumps.reduce((a, b) => a + b, 0) / jumps.length),
+            jumpMax: Math.max.apply(null, jumps),
+            renders: __st().perf.renders, maxRender: __st().perf.maxRenderMs,
+          };
         })()`);
         const tmpSize = fs.existsSync(tmp) ? fs.statSync(tmp).size : -1;
         push(F.name + '.save', save && save.ok && save.skipped !== true && tmpSize > baseSize ? save.ms + 'ms' : 'FAIL',
-          'tmpSize=' + tmpSize + ' base=' + baseSize + ' (+1 行内字符) skipped=' + J(save && save.skipped) + ' err=' + J(save && save.err));
+          'tmpSize=' + tmpSize + ' base=' + baseSize + ' (+1 行内字符) skipped=' + J(save && save.skipped) + ' err=' + J(save && save.err) +
+          ' | 保存期间跳转 avg=' + (save && save.jumpAvg) + 'ms max=' + (save && save.jumpMax) + 'ms renders=' + (save && save.renders));
+        // 保存期间视口读取不再排队：单次跳转必须远小于保存总耗时（旧实现会等到保存结束才返回）
+        const saveScrollOk = !!(save && save.ok && save.jumpMax != null && save.jumpMax < Math.max(400, save.ms / 3));
+        push(F.name + '.saveScroll', saveScrollOk ? 'true' : 'FAIL',
+          'jumpAvg=' + (save && save.jumpAvg) + 'ms jumpMax=' + (save && save.jumpMax) + 'ms saveMs=' + (save && save.ms) + 'ms');
 
         // ---------- 9. 关标签（清场；先关再删另存文件，避免视图仍指向已删除目标） ----------
         await ev(`(async () => { ${PAGE_UTILS} window.__app.editor.closeAll(); await __sleep(600); return true; })()`);

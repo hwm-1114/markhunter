@@ -56,7 +56,9 @@ const DARK_THEMES = [
 
 const DEFAULTS = {
   pythonPath: '',        // 自定义 Python 解释器路径，空 = 自动检测
-  maxFileSizeMB: 50,     // 大文件上限（MB）
+  // 大文件上限（MB）：默认 10GB（用户决策 2026-10-18：5GB/10GB 文件开箱即开，不再需要先去设置里调）。
+  // 可调范围 1~20480（设置页 clamp），超过上限的文件在 openFile 统一拒绝并弹「文件过大，未打开」。
+  maxFileSizeMB: 10240,
   autoSaveDelay: 800,    // 自动保存防抖（ms）
   wordWrap: true,        // 自动换行
   scrollbarWidth: 10,    // 滚动条滑块宽度（px）
