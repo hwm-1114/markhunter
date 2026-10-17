@@ -135,7 +135,9 @@ cd markhunter
 npm install       # 安装依赖（Electron 走 npmmirror 镜像）
 npm start         # 启动应用
 npm run build     # esbuild 打包渲染进程（改渲染端源码后必须执行）
-npm run smoke     # 端到端冒烟测试（226 项，真实窗口自动化验证；判定用 node scripts/smoke-verify.js）
+npm run smoke     # 端到端冒烟测试（244 项，真实窗口自动化验证；判定用 node scripts/smoke-verify.js）
+npm run bigprobe  # 真实 GB 级大文件实测探针（夹具 F:\mh-bigtest\，缺失自动 SKIP）
+npm run bigperf   # 5GB/10GB 全链路计时探针（夹具由 node scripts/mkbigfile.js 生成；判定 BIGPERF_DONE fails=0）
 npm run release   # 本地打包 NSIS 安装包
 ```
 
