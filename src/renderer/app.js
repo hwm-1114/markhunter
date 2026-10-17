@@ -241,6 +241,18 @@ async function boot() {
     getWordWrap: () => state.settings.wordWrap,
     getIndentSize: () => state.settings.indentSize,
     getMaxFileSizeMB: () => state.settings.maxFileSizeMB, // v0.4.0：打开上限在 openFile 统一把关
+    // v0.9.0：大文件状态条的「↵ 自动换行」= 应用级 wordWrap —— 与设置面板同一份状态：
+    //  ① 立即更新 state（下次开 huge 标签按新值初始化）；② 同步 CM 与其它已开的大文件视图
+    //  （editor.setWordWrap 内部会回推 huge，故这里只写状态 + 落盘）；③ 落盘（失败仅告警不打断）。
+    onWordWrapChange: (on) => {
+      const v = on === true;
+      if (state.settings.wordWrap === v) return;
+      state.settings.wordWrap = v;
+      editor.setWordWrap(v);
+      window.api.setSettings({ wordWrap: v }).then((s) => {
+        if (s && typeof s === 'object') state.settings = s;
+      }).catch(() => { /* 落盘失败：本次会话内仍按 v 生效，下次启动回旧值 */ });
+    },
     onSaveStatus: (msg) => {
       $('#save-status').textContent = msg;
     },
@@ -355,7 +367,7 @@ async function boot() {
                 divider: q.divider,
                 imageHost: q.imageHost,
                 diffHost: q.diffHost,
-                viewerBar: q.viewerBar,
+                viewerBar: null, // v0.9.0：大文件查看器悬浮操作条已删除（保留键位兼容 preview 实例签名）
                 zoomBadge: q.zoomBadge,
               }
             : null;
@@ -1159,8 +1171,8 @@ async function boot() {
     });
     pyField.append(pyLabel, pyRow, pyHint);
 
-    // 大文件上限（1 ~ 5120 MB = 5GB；v0.7.0 起上限提至 5GB：>1GB 虚拟滚动查看器打开即编辑）
-    const MAX_SIZE_MB = 5120;
+    // 大文件上限（1 ~ 20480 MB = 20GB；v0.9.0 起 5GB → 20GB：10GB 级文件也能打开/编辑/搜索）
+    const MAX_SIZE_MB = 20480;
     const sizeField = document.createElement('div');
     sizeField.className = 'field';
     const sizeLabel = document.createElement('label');
@@ -1172,7 +1184,7 @@ async function boot() {
     sizeInput.value = s.maxFileSizeMB;
     const sizeHint = document.createElement('div');
     sizeHint.className = 'hint';
-      sizeHint.textContent = `可调整范围 1 ~ ${MAX_SIZE_MB} MB（超过上限拒绝打开）。≤256MB 直接编辑（>64MB 保存走流式写）；>256MB 以只读查看器打开（可切换区域编辑）；>1GB 虚拟滚动查看器（连续滚动直达任意位置，打开即编辑、Ctrl+G 跳行号、Ctrl+S 保存）`;
+      sizeHint.textContent = `可调整范围 1 ~ ${MAX_SIZE_MB} MB（超过上限拒绝打开）。≤4MB 普通编辑器；>4MB 分段加载；>256MB 虚拟滚动查看器（连续滚动直达任意位置，打开即编辑、Ctrl+G 跳行号、Ctrl+S 保存；首屏不等全量行索引）`;
     sizeField.append(sizeLabel, sizeInput, sizeHint);
 
     // 自动保存间隔
@@ -1275,7 +1287,7 @@ async function boot() {
             const patch = {
               theme: themeSelect.value,
               pythonPath: pyInput.value.trim(),
-              maxFileSizeMB: Math.min(5120, Math.max(1, parseInt(sizeInput.value, 10) || 50)),
+              maxFileSizeMB: Math.min(20480, Math.max(1, parseInt(sizeInput.value, 10) || 50)),
               autoSaveDelay: Math.max(100, parseInt(saveInput.value, 10) || 800),
               scrollbarWidth: Math.min(40, Math.max(6, parseInt(sbInput.value, 10) || 10)),
               indentSize: Math.min(8, Math.max(1, parseInt(indentInput.value, 10) || 4)),

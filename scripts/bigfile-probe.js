@@ -106,7 +106,7 @@ async function run(win) {
           }
         } else {
 
-        // 2. 冷打开不假死：索引未就绪时有占位行、滚动条可拖动（隔离 profile → 侧车冷，必走全量扫）
+        // 2. 冷打开不假死：索引未就绪时**有内容**（v0.9.0：渐进索引直接出字）或有占位行，滚动条可拖动
         const cold = await ev(`(() => {
           const root = document.querySelector('.huge-view');
           if (!root) return { root: false };
@@ -114,10 +114,12 @@ async function run(win) {
           const sizer = root.querySelector('.huge-sizer');
           const st = ${ST};
           root.scrollTop = 1234567;
-          return { placeholder: !!(rows && rows.querySelector('.huge-placeholder')), indexed: !!(st && st.indexed),
+          return { placeholder: !!(rows && rows.querySelector('.huge-placeholder')),
+            realRows: rows ? rows.querySelectorAll('.huge-line:not(.huge-placeholder) .huge-text').length : 0,
+            indexed: !!(st && st.indexed),
             sizerH: sizer ? sizer.offsetHeight : 0, scrollLive: root.scrollTop > 0 };
         })()`);
-        push('coldOpenPlaceholder', !!(cold && (cold.placeholder || cold.indexed) && cold.sizerH > 0 && cold.scrollLive), J(cold));
+        push('coldOpenPlaceholder', !!(cold && (cold.placeholder || cold.realRows > 0 || cold.indexed) && cold.sizerH > 0 && cold.scrollLive), J(cold));
 
         // 3. 索引就绪（冷扫 4.5GB，宽限 240s）
         const idxT0 = Date.now();

@@ -17,7 +17,7 @@
 //
 // ── 明显**不**属于这里的状态（硬清单，逐条对应清单文档 §5.3）────────────────────────
 //  · `EditorView` 实例（tabs.js:257）—— 与 DOM 强绑定，一个视图一份；注册表的键是**文档**不是视图
-//  · `#editor-host` / `#image-host` / `#diff-host` / `#viewer-bar` 等 DOM 引用 —— Phase 2 要按 pane 复制
+//  · `#editor-host` / `#image-host` / `#diff-host` 等 DOM 引用 —— Phase 2 要按 pane 复制
 //  · hugeview 的 DOM 与实例（`tab.huge` / `tab.hugeEl`）—— DOM 生命周期归视图；overlay 文档才是文档级
 //  · 4 个 `Compartment`（tabs.js:121-124）—— 被 `EditorState` 持有，多视图后要逐 view reconfigure
 //  · `saveQueue`（tabs.js:1410）—— **应用级**串行链，跨文档共享；进注册表会变成"每文档一条队列"

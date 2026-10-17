@@ -154,7 +154,7 @@ const lightTheme = EditorView.theme({
 export function createEditor(callbacks) {
   /** 栏容器（0.5.0 Phase 2 起，index.html 里只剩这一个挂载点，各栏 DOM 由 buildPaneDom 模板生成） */
   const panesRoot = document.getElementById('editor-panes');
-  const { onDocChanged, onTabSwitch, onTabLeave, onRequestClose, getWordWrap, onSaveStatus, onSessionChange, getIndentSize, getMaxFileSizeMB, onCursorMove } = callbacks;
+  const { onDocChanged, onTabSwitch, onTabLeave, onRequestClose, getWordWrap, onWordWrapChange, onSaveStatus, onSessionChange, getIndentSize, getMaxFileSizeMB, onCursorMove } = callbacks;
 
   // 文档集合与活动指针由 docmodel.js 的注册表持有（0.5.0 多视图 Phase 1；Phase 2 扩为「每栏一份活动指针」）。
   // 行为中性要点：注册表里装的就是下面这些 tab 对象**本身**（同一引用），没有对象搬家、没有代理；
@@ -184,9 +184,10 @@ export function createEditor(callbacks) {
   //   · **单文档单栏**：一个 tab 只属于一个 pane（registry.setPaneOf），openFile 命中已开文件时
   //     直接聚焦到它所在的栏并提示 —— 因此「同一文件同时开在两栏」这种组合在本阶段**不会出现**
   //     （真·同文件多视图同步是 Phase 3 的 G2，本阶段刻意不做）。
-  //   · **p0 沿用历史 ID**（#tabs / #editor-host / #image-host / #diff-host / #viewer-bar /
+  //   · **p0 沿用历史 ID**（#tabs / #editor-host / #image-host / #diff-host /
   //     #split-divider / #preview-host / #preview-content / #zoom-badge / #editor-empty）：
   //     find.js / preview.js / globalsearch.js / 冒烟里所有按 ID 取值的地方在单栏下一字不用改；
+  //     （#viewer-bar 已随大文件悬浮操作条在 v0.9.0 删除）
   //     p1 只用 class 定位，DOM 结构与 p0 完全对称。
   //   · **焦点栏** focusPaneId 决定：状态栏显示谁、Ctrl+S 保存谁、onTabSwitch（→ 预览/树跟随）为谁触发、
   //     新打开的文件进哪一栏、`getView()` 返回哪个 EditorView。
@@ -472,14 +473,9 @@ export function createEditor(callbacks) {
     const host = el('editor-host');
     const imageHost = el('image-host hidden');
     const diffHost = el('diff-host hidden');
-    const viewerBar = el('viewer-bar hidden');
-    viewerBar.innerHTML =
-      '<button class="tbtn small" data-vb="prev" title="上一窗口">⏪</button>' +
-      '<span class="viewer-pos"></span>' +
-      '<button class="tbtn small" data-vb="next" title="下一窗口">⏩</button>' +
-      '<button class="tbtn small" data-vb="jump" title="跳转到百分比或字节偏移">📍 跳转</button>' +
-      '<button class="tbtn small" data-vb="edit" title="编辑当前窗口内容（保存时写回原位置）">✏️ 启用区域编辑</button>' +
-      '<button class="tbtn small" data-vb="extract" title="把当前窗口内容另存为新文件（可正常编辑）">📤 提取为新文件</button>';
+    // v0.9.0：**删除大文件查看器悬浮操作条**（原「⏪/位置/⏩/📍跳转/✏️启用区域编辑/📤提取为新文件」）。
+    // 该条是分页查看器（viewer-lg，v0.7.0 起已被虚拟滚动查看器取代、生产路径不可达）的遗留 UI，
+    // 却被 preview.applyMode 一并显示在 huge 标签上，成为浮在大文件正文上方的一条无效栏。
     const divider = el('split-divider hidden');
     const previewHost = el('preview-host hidden');
     const zoomBadge = el('zoom-badge hidden');
@@ -488,7 +484,7 @@ export function createEditor(callbacks) {
     previewHost.append(zoomBadge, previewContent);
     const empty = el('editor-empty');
     empty.innerHTML = '<div class="empty-icon">✍</div><p>从左侧打开一个文件开始编辑</p><p class="empty-sub">支持 .md / .txt / .json / .py</p>';
-    body.append(host, imageHost, diffHost, viewerBar, divider, previewHost, empty);
+    body.append(host, imageHost, diffHost, divider, previewHost, empty);
     // ---------- 0.5.0 Phase 5a A3：标签栏溢出处理（▾ 全部标签下拉） ----------
     // 挂在 .pane 上（.pane 已是 position:relative）而不是 .tabs 内：renderPaneTabs 每次都
     // 清空 .tabs 的 innerHTML，放里面会被反复重建；挂外面还能躲开标签栏的横向滚动（不会被卷走）。
@@ -508,7 +504,6 @@ export function createEditor(callbacks) {
       host.id = 'editor-host';
       imageHost.id = 'image-host';
       diffHost.id = 'diff-host';
-      viewerBar.id = 'viewer-bar';
       divider.id = 'split-divider';
       previewHost.id = 'preview-host';
       zoomBadge.id = 'zoom-badge';
@@ -516,11 +511,8 @@ export function createEditor(callbacks) {
       empty.id = 'editor-empty';
       moreBtn.id = 'tabs-more';
       tabsMenu.id = 'tabs-menu';
-      viewerBar.querySelector('.viewer-pos').id = 'viewer-pos';
-      const vbid = { prev: 'btn-viewer-prev', next: 'btn-viewer-next', jump: 'btn-viewer-jump', edit: 'btn-viewer-edit', extract: 'btn-viewer-extract' };
-      for (const [k, id] of Object.entries(vbid)) viewerBar.querySelector(`[data-vb="${k}"]`).id = id;
     }
-    return { root, tabsEl, moreBtn, tabsMenu, lockBar, conflictBar, body, host, imageHost, diffHost, viewerBar, divider, previewHost, previewContent, zoomBadge, empty };
+    return { root, tabsEl, moreBtn, tabsMenu, lockBar, conflictBar, body, host, imageHost, diffHost, divider, previewHost, previewContent, zoomBadge, empty };
   }
 
   /** 建一栏：DOM + 独立的 EditorView + 该栏的宿主级事件绑定 */
@@ -534,8 +526,6 @@ export function createEditor(callbacks) {
       id: 'p' + panes.length,
       ...dom,
       view: null,
-      viewerPos: dom.viewerBar.querySelector('.viewer-pos'),
-      btnViewerEdit: dom.viewerBar.querySelector('[data-vb="edit"]'),
       tabBadges: new Map(), // 该栏的 tab → 元素（O1 徽标增量更新按栏各一份）
       ratio: 0.5,
       conflictTab: null,    // 冲突横幅当前指向的文档（Phase 4 L3）
@@ -646,53 +636,7 @@ export function createEditor(callbacks) {
       hideConflictBanner(pane);
       if (t) await reloadFromDisk(t, false); // 丢弃本地改动、载入对方版本（显式动作，绝不自动做）
     });
-    pane.viewerBar.querySelector('[data-vb="jump"]').addEventListener('click', () => {
-      const t = registry.activeOf(pane.id);
-      if (!t || t.kind !== 'viewer-lg') return;
-      showPrompt('跳转位置', '百分比（如 50%）或字节偏移（如 1.5G / 500M / 1600000000）', '', (v) => viewerJump(t, v));
-    });
-    pane.btnViewerEdit.addEventListener('click', () => {
-      const t = registry.activeOf(pane.id);
-      if (!t || t.kind !== 'viewer-lg') return;
-      setViewerEditing(t, !t.editing);
-    });
-    pane.viewerBar.querySelector('[data-vb="prev"]').addEventListener('click', () => {
-      const t = registry.activeOf(pane.id);
-      if (t && t.kind === 'viewer-lg') slideViewer(t, -1);
-    });
-    pane.viewerBar.querySelector('[data-vb="next"]').addEventListener('click', () => {
-      const t = registry.activeOf(pane.id);
-      if (t && t.kind === 'viewer-lg') slideViewer(t, +1);
-    });
-    // ②e：提取当前窗口内容为新文件（同目录另存 → 正常打开编辑；二进制窗口禁用）
-    pane.viewerBar.querySelector('[data-vb="extract"]').addEventListener('click', () => {
-      const t = registry.activeOf(pane.id);
-      if (!t || t.kind !== 'viewer-lg') return;
-      if (t.vwin.binary) {
-        toast('二进制窗口内容不含可提取的文本（控制字符已替换显示）');
-        return;
-      }
-      const stem = t.name.replace(/\.[^.]+$/, '') || 'extract';
-      showPrompt(
-        '提取为新文件',
-        '文件名（保存到当前文件所在目录）',
-        `extract-${stem}-${Math.floor(t.vwin.offset / 1048576)}MB.txt`,
-        async (val) => {
-          // 名字合法化（与主进程 fs:create 同口径）：拒绝路径分隔符与「..」（否则可含 ..\
-          // 把内容写出目录外），其余 Windows 非法字符替换为 '_'。抛错走 showPrompt 的
-          // alertBox + 弹窗保持打开，与 createEntry 的失败口径一致。
-          const raw = String(val || '').trim();
-          if (!raw || /[\\/]/.test(raw) || raw === '.' || raw === '..') {
-            throw new Error('文件名不合法：不能包含路径分隔符或「..」');
-          }
-          const safe = raw.replace(/[:*?"<>|]/g, '_');
-          const p = dirOf(t.path) + '\\' + safe;
-          await window.api.writeFile(p, t.state.doc.toString());
-          toast('已提取：' + safe);
-          openFile(p);
-        }
-      );
-    });
+    // v0.9.0：查看器横幅（上一窗/跳转/区域编辑/提取为新文件）整体删除 —— 见 buildPaneDom 注释。
     // 焦点栏判定：栏内任意 mousedown / focusin 都把焦点栏切到本栏（capture 阶段，先于 CM 的默认处理）
     pane.root.addEventListener('mousedown', () => setFocusPane(pane.id, { silent: true }), true);
     pane.root.addEventListener('focusin', () => setFocusPane(pane.id, { silent: true }));
@@ -876,7 +820,7 @@ export function createEditor(callbacks) {
   }
 
   /** 合并回单栏。**保留栏恒为 p0**（不按屏幕位置取）—— p0 是唯一挂历史 ID
-   *  （#tabs / #editor-host / #image-host / #diff-host / #viewer-bar / #split-divider / #preview-host /
+   *  （#tabs / #editor-host / #image-host / #diff-host / #split-divider / #preview-host /
    *  #editor-empty）的那一栏，若在左分屏后被销毁，find.js / preview.js / 冒烟里所有按 ID 取值的
    *  地方会集体失联。另一栏的文档按顺序并回 p0，焦点与活动项落到「被合并栏的原活动文档」。 */
   function mergePanes() {
@@ -1205,11 +1149,18 @@ export function createEditor(callbacks) {
     tab.huge = createHugeView(pane.host, {
       path: tab.path,
       size: tab.hugeSize || 0,
+      wordWrap: wordWrapOn !== false,
+      // 状态条「↵ 自动换行」= 改应用级 wordWrap（app.js 负责落盘 + 同步 CM 与其它大文件视图）
+      onWordWrapChange: (on) => { if (typeof onWordWrapChange === 'function') onWordWrapChange(on === true); },
       onStatus: (msg) => {
         tab.hugeStatus = msg;
         if (msg) {
           const sb = document.getElementById('sb-len');
           if (sb) sb.textContent = msg;
+        } else if (registry.isActive(tab)) {
+          // v0.9.0：无临时提示时回到标准状态栏文案 —— 否则「行 X / 共 N 行（索引建立中）」
+          // 只在切换标签那一刻算过一次，索引就绪后一直停在「共 1 行 / 索引建立中」。
+          updateStatusBar();
         }
       },
       // Phase D 第三步：脏标记由 hugeview（主进程 overlay 文档）同步过来 —— 标签徽标/关闭确认
@@ -1411,7 +1362,6 @@ export function createEditor(callbacks) {
       registry.markDirty(tab, false);
       clearTimeout(tab.saveTimer);
       if (registry.isActive(tab)) {
-        updateViewerBar(tab);
         updateStatusBar();
       }
     } finally {
@@ -1514,7 +1464,6 @@ export function createEditor(callbacks) {
       viewOfDoc(tab).dispatch({ effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(true)) });
       tab.editing = false;
     }
-    updateViewerBar(tab);
     return true;
   }
 
@@ -1535,7 +1484,6 @@ export function createEditor(callbacks) {
       t.lastSavedAt = Date.now();
       if (onSaveStatus) onSaveStatus(`已保存区域 ${t.name}`);
       updateTabBadges();
-      updateViewerBar(t);
       return true;
     } catch (err) {
       if (onSaveStatus) onSaveStatus(`保存失败：${err.message || err}`);
@@ -1543,22 +1491,9 @@ export function createEditor(callbacks) {
     }
   }
 
-  /** 更新查看器横幅（位置/百分比 + 编辑按钮文案） */
-  function updateViewerBar(tab) {
-    // Phase 2：横幅是**每栏一份**的 DOM，取该标签所属栏的那一份（p0 仍挂着历史 ID #viewer-bar）
-    const pane = paneOfDoc(tab);
-    const bar = pane.viewerBar;
-    const pos = pane.viewerPos;
-    const btnEdit = pane.btnViewerEdit;
-    if (!bar || !tab || tab.kind !== 'viewer-lg') return;
-    const c = tab.vwin;
-    const pct = c.size > 0 ? Math.floor((c.offset / c.size) * 100) : 0;
-    if (pos) pos.textContent = `${formatSize(c.offset)} ~ ${formatSize(c.offset + c.byteLen)} / ${formatSize(c.size)}（${pct}%${tab.editing ? ' · 区域编辑中' : ' · 只读'}）`;
-    if (btnEdit) {
-      btnEdit.textContent = tab.editing ? '✅ 退出区域编辑' : '✏️ 启用区域编辑';
-      btnEdit.classList.toggle('danger', !!tab.editing);
-    }
-  }
+  /** v0.9.0：查看器悬浮横幅已整体删除（分页 viewer-lg 的遗留 UI，huge 标签上一直是无效栏）。
+   *  原 updateViewerBar 的位置/百分比文案随栏一起移除；viewer-lg 的分页/区域编辑代码仍保留
+   *  （生产路径不可达，仅旧代码路径内部使用），不再有任何 UI 入口。 */
 
   // 全局搜索命中大文件：按字节偏移居中开窗（globalsearch → findLineOffset 后调用）
   async function revealViewerAt(tab, byteOffset) {
@@ -1853,7 +1788,6 @@ export function createEditor(callbacks) {
     restoreTabScroll(tab, pane);
     renderTabsAll(); // 切换可能伴随新增标签（openFile→switchTab）：结构渲染（低频路径；高频 docChanged 才走 updateTabBadges）
     updateLockBanner(pane); // Phase 4：本栏活动文档的跨窗口锁态横幅
-    if (tab.kind === 'viewer-lg') updateViewerBar(tab);
     updateEmpty();
     // 状态栏 / 预览 / 树跟随只认**焦点栏**：非焦点栏内部切标签不能把状态栏拽过去。
     // 但**非焦点栏也要通知一次**（focused=false）：图片/对比/预览三层的显隐归 app.js 的 preview
@@ -2024,8 +1958,10 @@ export function createEditor(callbacks) {
       // Phase D：编辑态显示光标位置 + 脏计数（未启用编辑时为纯查看口径；hugeview 的 onStatus
       // 会把更细的提示（只读原因/保存进度）写到 sbLen，因此这里只在无提示时兜底）
       const caretPos = st2 && st2.editable && st2.caret ? ` · 光标 行 ${st2.caret.line} 列 ${st2.caret.col + 1}` : '';
+      // v0.9.0：行号用真实视口首行 firstLine（锚点修正后 rendered.from 是「上两屏的渲染窗起点」，
+      // 不再等于屏幕顶部那一行；此前状态栏显示的是渲染窗起点）
       sbPos.textContent = st2
-        ? `${st2.editable ? '✎ 编辑中' : '只读'} · 行 ${st2.rendered ? st2.rendered.from : 1} / 共 ${st2.lines} 行（${st2.indexed ? '索引就绪' : '索引建立中'}）${caretPos}`
+        ? `${st2.editable ? '✎ 编辑中' : '只读'} · 行 ${st2.firstLine || 1} / 共 ${st2.lines} 行（${st2.indexed ? '索引就绪' : '索引建立中'}）${caretPos}`
         : '加载中…';
       sbLen.textContent = st2 && st2.dirty
         ? `未保存修改 ${st2.dirtyCount || 1} 处`
@@ -3265,7 +3201,8 @@ export function createEditor(callbacks) {
     }
   }
 
-  /** 换行设置是**应用级**开关，但要落到**每个栏**的视图上（C4：Compartment 可复用，reconfigure 必须逐 view 派发） */
+  /** 换行设置是**应用级**开关，但要落到**每个栏**的视图上（C4：Compartment 可复用，reconfigure 必须逐 view 派发）；
+   *  v0.9.0 起也同步已打开的大文件视图（huge 的自动换行跟随同一设置）。 */
   function setWordWrap(on) {
     wordWrapOn = on;
     for (const pane of panes) {
@@ -3273,6 +3210,11 @@ export function createEditor(callbacks) {
       if (!cur || cur.kind) continue;
       pane.view.dispatch({ effects: wrapCompartment.reconfigure(on ? EditorView.lineWrapping : []) });
       cur.state = pane.view.state;
+    }
+    for (const t of docs()) {
+      if (t.kind === 'huge' && t.huge && typeof t.huge.setWrapPreference === 'function') {
+        try { t.huge.setWrapPreference(on === true); } catch { /* 视图已销毁 */ }
+      }
     }
   }
 
@@ -3667,7 +3609,6 @@ export function createEditor(callbacks) {
         tab.vwin.size = st.size;
         const off = Math.max(0, Math.min(tab.vwin.offset, Math.max(0, st.size - VIEWER_WINDOW)));
         await loadViewerWindow(tab, off);
-        updateViewerBar(tab);
         updateStatusBar();
         const { toast } = await import('./ui.js');
         toast(`已从外部重新加载 ${tab.name}（当前窗口）`);
@@ -3844,7 +3785,7 @@ export function createEditor(callbacks) {
         editorHost: p.host,
         imageHost: p.imageHost,
         diffHost: p.diffHost,
-        viewerBar: p.viewerBar,
+        viewerBar: null, // v0.9.0：查看器悬浮横幅已删除（保留键位以兼容旧调用方）
         divider: p.divider,
         previewHost: p.previewHost,
         previewContent: p.previewContent,
@@ -3867,7 +3808,7 @@ export function createEditor(callbacks) {
         editorHost: p.host,
         imageHost: p.imageHost,
         diffHost: p.diffHost,
-        viewerBar: p.viewerBar,
+        viewerBar: null, // v0.9.0：查看器悬浮横幅已删除（保留键位以兼容旧调用方）
         divider: p.divider,
         previewHost: p.previewHost,
         previewContent: p.previewContent,

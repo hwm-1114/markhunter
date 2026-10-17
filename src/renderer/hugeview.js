@@ -35,6 +35,7 @@ import { toast } from './ui.js'; // v0.8.0：复制反馈（与预览代码块�
 const OVERSCAN = 2;                 // 视口上下各多取的屏数（v0.7.0：1→2，快速滚动时视口边缘更少闪白）
 const BATCH_MAX_LINES = 1000;       // 单次批量取行上限（与主进程 lineindex.BATCH_MAX_LINES 对齐）
 const LINE_TEXT_LIMIT = 40000;      // 超长行入 DOM 前的截断（与主进程 LINE_MAX_CHARS 一致）
+const WRAP_MAX_ROWS = 40;           // 自动换行下单个逻辑行最多折成多少个视觉行（40×20px=800px，防布局被单个超长行拖垮）
 // Chromium 的布局/滚动高度上限约 33.5M px（超过即被静默截断，表现为"滚不到后面"）。
 // 因此：总高 = 行数×行高 超过 MAX_SCROLL_PX 时改用**比例映射**——滚动条只作导航，
 // 像素位置 ↔ 行号按比例换算（4GB/4000 万行时 1px ≈ 2~3 行，仍可精确落到目标行）。
@@ -66,12 +67,18 @@ export function createHugeView(host, opts) {
   editBtn.type = 'button';
   editBtn.className = 'huge-btn';
   editBtn.textContent = '✎ 启用编辑';
+  // v0.9.0：自动换行开关（状态条里；默认跟随设置 wordWrap，首次读取设置后校正）
+  const wrapBtn = document.createElement('button');
+  wrapBtn.type = 'button';
+  wrapBtn.className = 'huge-btn';
+  wrapBtn.textContent = '↵ 自动换行';
+  wrapBtn.title = '长行自动折行显示（不改文件内容）';
   const saveBtn = document.createElement('button');
   saveBtn.type = 'button';
   saveBtn.className = 'huge-btn';
   saveBtn.textContent = '💾 保存';
   saveBtn.disabled = true;
-  status.append(statusText, editBtn, saveBtn);
+  status.append(statusText, wrapBtn, editBtn, saveBtn);
   const sizer = document.createElement('div');
   sizer.className = 'huge-sizer';
   const rows = document.createElement('div');
@@ -81,7 +88,14 @@ export function createHugeView(host, opts) {
   root.appendChild(status);
 
   let index = null;              // { lines, longest, encoding, binary, cached }
+  let indexReady = false;        // v0.9.0：索引**已画出**（= render 用的是整份索引）。供 getState().indexed
+                                 //  —— 只置 index 而不等渲染完成会让「indexed=true 但 DOM 还是半屏/占位」成为可观测竞态
   let estLines = 0;              // 索引就绪前的估算行数
+  // v0.9.0 自动换行：初值由调用方（tabs.js）按应用级设置 wordWrap 传入；状态条按钮改动时
+  // 经 opts.onWordWrapChange 回写设置（app.js 负责落盘并同步 CM 与其它大文件视图）。
+  // 只影响显示，不改文件内容。
+  let wrap = opts.wordWrap !== false;
+  let lastRowH = 0;              // 上次换行渲染的实测平均行高（0 = 还没量过）；用于自适应渲染窗大小
   let lineHeight = 20;           // 由首屏实测校正
   let lineHeightFixed = false;
   let destroyed = false;
@@ -99,6 +113,18 @@ export function createHugeView(host, opts) {
   let indexError = null;         // 索引失败原因（占位行改画错误文案，不永远转圈）
   let placeholderEl = null;      // 当前占位行（进度回调就地更新文案；就绪后随 rows 清空）
   const lastBatch = { lines: 0, bytes: 0, ms: 0 }; // 最近一次批量取数（诊断用，getState 暴露）
+  // v0.9.0 实测埋点（纯诊断，零行为影响）：bigperf 探针据此算首屏/滚动/重画耗时与帧稳定性
+  const perf = {
+    createdAt: (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+    renders: 0,          // 成功的视口重画次数
+    lastRenderMs: 0,     // 最近一次取数 + DOM 落盘的总耗时
+    maxRenderMs: 0,
+    lastRenderAt: 0,     // 最近一次重画完成时刻（page performance.now 口径）
+    firstContentAt: 0,   // 首次画出**真实内容行**（非占位）的时刻
+    readMsTotal: 0,      // 累计取数（IPC）耗时
+    placeholderRenders: 0,
+  };
+
 
   // ---------- Phase D：编辑态（渲染端只保存「光标 + 最近一次主进程回执」，不保存文档内容） ----------
   let editable = false;          // 当前是否处于编辑态（视口内可输入）
@@ -121,7 +147,7 @@ export function createHugeView(host, opts) {
   /** 总行数：打开编辑会话后以 overlay 视角为准（否则编辑后行数不会变） */
   const totalLines = () => (docInfo != null && docLines > 0 ? docLines : (index ? index.lines : estLines)) || 1;
   const isScaled = () => totalLines() * lineHeight > MAX_SCROLL_PX;
-  const maxScroll = () => Math.max(1, (isScaled() ? MAX_SCROLL_PX : totalLines() * lineHeight) - (root.clientHeight || 0));
+  const maxScroll = () => Math.max(1, sizerHeight() - (root.clientHeight || 0));
 
   /** 二进制提示（常驻状态栏，只提示一次） */
   function markBinary() {
@@ -148,15 +174,21 @@ export function createHugeView(host, opts) {
 
   // ---------- 索引 ----------
   /** 占位行文案：索引失败优先，其次带进度百分比的「建立中」 */
-  function placeholderText() {
+  function placeholderText(scannedLines, scannedBytes, totalBytes) {
     if (indexError != null) return `索引失败：${indexError} —— 可关闭标签后重开重试`;
-    return `索引建立中 ${indexPct != null ? indexPct + '%' : '…'}—— 可拖动滚动条定位，就绪后自动落位`;
+    // v0.9.0：渐进索引建立中——已扫描前缀可读，告诉用户「能滚到哪一行」
+    const pct = indexPct != null ? indexPct + '%' : (scannedBytes && totalBytes ? Math.min(99, Math.round((scannedBytes / totalBytes) * 100)) + '%' : '…');
+    const hint = scannedLines > 0
+      ? ` —— 已扫 ${scannedLines.toLocaleString()} 行（可先滚到该行以内）`
+      : '';
+    return `索引建立中 ${pct} —— 可拖动滚动条定位，就绪后自动落位${hint}`;
   }
 
   /** 索引未就绪时的占位渲染：**不发任何取数 IPC**，只画一行居中提示（钉在视口中央，随滚动跟随） */
-  function renderPlaceholder() {
+  function renderPlaceholder(info) {
     if (destroyed) return;
     renderedRange = null; // 就绪后必须走真渲染，别被「位置未变」短路
+    perf.placeholderRenders++;
     rows.innerHTML = '';
     const el = document.createElement('div');
     el.className = 'huge-line huge-placeholder';
@@ -164,10 +196,22 @@ export function createHugeView(host, opts) {
     el.style.justifyContent = 'center';
     if (indexError != null) el.style.color = 'var(--mh-err, #d64545)';
     else el.style.color = 'var(--mh-text-2)';
-    el.textContent = placeholderText();
+    el.textContent = placeholderText(info && info.scannedLines, info && info.scannedBytes, info && info.totalBytes);
     rows.appendChild(el);
+    rows.style.height = ''; // 回到 inset:0 的满高（真渲染可能把高度改成块高，占位沿用满高才居中）
     rows.style.transform = 'translateY(' + root.scrollTop + 'px)'; // 与真渲染同口径：跟随视口
     placeholderEl = el;
+  }
+
+  // v0.9.0：渐进索引期间的占位重试（扫描推进 → 已扫描前缀变长 → 尽快把真实内容换上来）。
+  // 80ms 合并，避免每次进度事件都触发一次 IPC。
+  let provisionalTimer = null;
+  function scheduleProvisionalRender() {
+    if (destroyed || provisionalTimer || index || docInfo) return;
+    provisionalTimer = setTimeout(() => {
+      provisionalTimer = null;
+      if (!destroyed && !index && !docInfo) render();
+    }, 80);
   }
 
   async function loadIndex() {
@@ -185,6 +229,9 @@ export function createHugeView(host, opts) {
       if (estBinary) markBinary();
       applySizer();
     } catch { estLines = Math.max(1, Math.round(size / 120)); applySizer(); }
+    // v0.9.0：估算行数一就位就补一帧真渲染（挂载时首次 render 只知道 totalLines=1，只画 1 行）。
+    // 这里读的是「已扫描前缀 / 文件头」，不等 huge:index 全量扫完 → 首屏是满屏内容而不是一行。
+    void render();
 
     // 进度订阅：只注册一次并保存退订句柄（此前每次 loadIndex 都注册、destroy 不摘 → 监听器泄漏）
     if (!progressBound) {
@@ -195,6 +242,7 @@ export function createHugeView(host, opts) {
           indexPct = Math.min(99, Math.round((d.done / Math.max(1, d.total)) * 100));
           if (!binarySeen && !dirty) setStatus(`索引建立中 ${indexPct}%`); // 二进制/脏标记优先，不被进度文案覆盖
           if (placeholderEl && placeholderEl.isConnected) placeholderEl.textContent = placeholderText();
+          scheduleProvisionalRender(); // 扫描推进 → 已扫描前缀变长，尽快换成真实内容
         });
         offIndexProgress = typeof off === 'function' ? off : null; // 旧 preload 不返回退订函数
       } catch { /* 订阅失败不影响查看 */ }
@@ -209,6 +257,8 @@ export function createHugeView(host, opts) {
       else baseStatus();
       applySizer();
       await render();               // 行号口径变了，重画当前视口（此刻起走真渲染，落位当前 scrollTop）
+      indexReady = !destroyed;      // 只有「整份索引已画出」才算就绪（避免 indexed/DOM 不一致的竞态）
+      baseStatus();                 // 刷一次状态栏：否则「共 N 行（索引建立中）」会停在渲染那一刻的快照
     } catch (err) {
       indexError = msgOf(err);
       setStatus('索引失败：' + indexError);
@@ -216,23 +266,32 @@ export function createHugeView(host, opts) {
     }
   }
 
+  /** 滚动条总高：自动换行时在末尾补一屏空白 —— 直映模式下 maxScroll = n*lh - clientH 只能滚到
+   *  倒数第 N 行；换行后每行可能占好几行高，末尾那几行会永远落在视口外（够不着）。补一屏后
+   *  滚到底时 firstVisibleLine 能到 n，最后一行可以被顶到视口顶部完整阅读。 */
+  function sizerHeight() {
+    const base = isScaled() ? MAX_SCROLL_PX : totalLines() * lineHeight;
+    return base + (wrap && !isScaled() ? (root.clientHeight || 0) : 0);
+  }
+
   function applySizer() {
-    sizer.style.height = (isScaled() ? MAX_SCROLL_PX : totalLines() * lineHeight) + 'px';
+    sizer.style.height = sizerHeight() + 'px';
   }
 
   // ---------- 渲染 ----------
-  /** 视口首行：比例模式按滚动比例换算，直映模式按行高换算 */
+  /** 视口首行：比例模式按滚动比例换算，直映模式按行高换算（末尾补白时可能算术越界，夹到 n） */
   function firstVisibleLine() {
     const n = totalLines();
-    if (isScaled()) return Math.max(1, 1 + Math.round((root.scrollTop / maxScroll()) * (n - 1)));
-    return Math.max(1, Math.floor(root.scrollTop / lineHeight) + 1);
+    if (isScaled()) return Math.max(1, Math.min(n, 1 + Math.round((root.scrollTop / maxScroll()) * (n - 1))));
+    return Math.max(1, Math.min(n, Math.floor(root.scrollTop / lineHeight) + 1));
   }
 
   function measureLineHeight() {
     if (lineHeightFixed) return;
     const probe = rows.querySelector('.huge-line');
     if (!probe) return;
-    const h = probe.getBoundingClientRect().height;
+    // 换行模式下 probe 可能是多行高，不能拿来当行高；行高取 CSS 的 line-height（固定 20px）
+    const h = wrap ? (parseFloat(getComputedStyle(probe).lineHeight) || lineHeight) : probe.getBoundingClientRect().height;
     if (h > 4 && Math.abs(h - lineHeight) > 0.5) {
       lineHeight = h;
       lineHeightFixed = true;
@@ -255,17 +314,35 @@ export function createHugeView(host, opts) {
 
   async function render() {
     if (destroyed) return;
-    // v0.8.0：索引/编辑会话都未就绪时不发取数 IPC（此前每屏一次 huge:lines 都会让主进程顺带
-    // 全量建索引，与 huge:index 的扫描互相踩踏）——改画占位行；sizer 已由 estLines 撑起，
-    // 滚动事件照常改 scrollTop，索引就绪后 loadIndex 里的 render() 自然落到当前位置。
-    if (!index && !docInfo) { renderPlaceholder(); return; }
+    // v0.9.0：**不再**「索引未就绪就不取数」。huge:lines 现在能服务「已扫描前缀」，
+    // 首行甚至不用等索引（主进程直接从文件头读），所以索引建立期间就能出字并跟随滚动。
+    // 目标行尚未扫到时主进程返回 pending（不阻塞），这里画进度占位，进度事件驱动重试。
     const token = ++renderToken;
     const lh = lineHeight;
     // 宿主可能瞬时高度为 0（标签切换/布局未完成）→ 保底 8 行，避免 to < from 算出空视图
     const perScreen = Math.max(8, Math.ceil((root.clientHeight || 0) / lh) || 30);
-    const from = Math.max(1, firstVisibleLine() - perScreen * OVERSCAN);
-    const count = Math.max(1, Math.min(BATCH_MAX_LINES, perScreen * (1 + OVERSCAN * 2)));
-    const to = Math.min(totalLines(), from + count - 1);
+    const first = firstVisibleLine();
+    // v0.9.0：总行数未知（挂载瞬间 estLines=0）时也要画满一屏 —— 旧实现 totalLines() 兜底 1，
+    // 首帧只画 1 行；大文件冷开时「1 行 → 满屏」之间会被外部读到（冒烟 hugeSelectCopy 曾因此拿不到选区）。
+    const totalKnown = !!(index || docInfo || estLines > 0);
+    // 渲染窗大小：换行模式下每行可能占好几个视觉行，5 屏逻辑行会变成几十屏 DOM（长行文件里
+    // 实测 180 行 × 180px = 32,000px），既拖慢布局又浪费；按「平均行长 / 上次实测行高」折算
+    // 真正需要的逻辑行数（上 1~2 屏、下 2 屏），未换行或短行文件保持原窗口。
+    let above = perScreen * OVERSCAN;
+    let count = Math.max(1, Math.min(BATCH_MAX_LINES, perScreen * (1 + OVERSCAN * 2)));
+    if (wrap) {
+      const availW = Math.max(120, (root.clientWidth || 800) - 90);
+      const charsPerRow = Math.max(16, Math.floor(availW / 7.8));
+      const avgChars = totalKnown ? Math.max(1, (size || 0) / Math.max(1, totalLines())) : 0;
+      const estRowH = lastRowH > 0 ? lastRowH : (avgChars > charsPerRow ? lh * Math.ceil(avgChars / charsPerRow) : lh);
+      if (estRowH > lh * 1.5) {
+        const need = Math.max(4, Math.ceil(((root.clientHeight || 600) * 2) / estRowH) + 6);
+        count = Math.max(4, Math.min(count, need * 2));
+        above = Math.max(1, Math.min(perScreen * OVERSCAN, need));
+      }
+    }
+    const from = Math.max(1, first - above);
+    const to = totalKnown ? Math.min(totalLines(), from + count - 1) : from + count - 1;
     if (renderedRange && renderedRange[0] === from && renderedRange[1] === to && pendingScrollTop === null) {
       // 位置未变（例如索引校正后行数变化不大）→ 跳过重画
       return;
@@ -276,6 +353,11 @@ export function createHugeView(host, opts) {
       const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
       const res = await readWindow(from, to - from + 1);
       if (destroyed || token !== renderToken) return; // 已有更新请求：放弃本次
+      if (res && res.pending) {
+        // 索引建立中且目标行还没扫到：画进度占位（progress 事件会让本函数重跑）
+        renderPlaceholder(res);
+        return;
+      }
       const got = new Map();
       let batchBinary = false;
       if (res && Array.isArray(res.lines)) {
@@ -294,11 +376,17 @@ export function createHugeView(host, opts) {
       const caretLine = editable && caret ? caret.line : -1;
       const caretCol = editable && caret ? caret.col : 0;
       const frag = document.createDocumentFragment();
+      // 换行模式下每行可能折成很多个视觉行：按「可用宽度 / 单字符宽」估算每行字符数，
+      // 单行最多画 WRAP_MAX_ROWS 个视觉行（40 × 20px = 800px），超出部分截断并提示。
+      // 不设上限的话，40000 字符的单行会折成 5 万多像素高的一个绝对定位元素，直接拖垮布局。
+      const wrapMaxChars = wrap
+        ? Math.min(LINE_TEXT_LIMIT, Math.max(64, Math.floor(Math.max(120, (root.clientWidth || 800) - 90) / 7.8)) * WRAP_MAX_ROWS)
+        : LINE_TEXT_LIMIT;
       for (let ln = from; ln <= to; ln++) {
         const it = got.get(ln) || { text: '', line: ln }; // 缺行占位（读到末尾/超长行跨窗口）
         const el = document.createElement('div');
         el.className = 'huge-line';
-        el.style.top = (ln - from) * lh + 'px'; // 视口内相对定位
+        el.style.top = (ln - from) * lh + 'px'; // 视口内相对定位（换行模式下由下方按实测高度重排）
         el.dataset.line = String(ln);
         const no = document.createElement('span');
         no.className = 'huge-no';
@@ -308,9 +396,9 @@ export function createHugeView(host, opts) {
         // 超长行（含"无换行的 GB 级单行文件"）：入 DOM 前截断，否则单行文本节点可达数 MB
         // （主进程已按 LINE_MAX_CHARS 截断并给出 truncated/chars，这里再兜一层，防旧 preload 直连）
         const raw = it.text == null ? '' : String(it.text);
-        const cut = it.truncated || raw.length > LINE_TEXT_LIMIT;
+        const cut = it.truncated || raw.length > wrapMaxChars;
         const shown = cut
-          ? raw.slice(0, LINE_TEXT_LIMIT) + (it.chars ? ` …（本行共 ${it.chars} 字符，已截断显示）` : ' …（超长行，已截断显示）')
+          ? raw.slice(0, wrapMaxChars) + (it.chars ? ` …（本行共 ${it.chars} 字符，已截断显示）` : ' …（超长行，已截断显示）')
           : raw;
         if (ln === caretLine && !cut) {
           // 光标行：文本按光标列切成 前/光标/后 三段（光标用零宽 span 画，不做 DOM 选择）
@@ -329,10 +417,46 @@ export function createHugeView(host, opts) {
       }
       rows.innerHTML = '';
       rows.appendChild(frag);
-      rows.style.transform = 'translateY(' + root.scrollTop + 'px)'; // 渲染窗跟随视口（比例模式下高度不再 1:1）
+      // v0.9.0：锚点修正 —— 把「视口首行 first」钉在视口顶部。
+      // 旧实现 translateY(scrollTop) 等价于把渲染窗**整体上移 (first - from) 行 = 2 屏**：
+      // 实测跳转到第 2000 万行时，DOM 视口顶部是第 19,999,930 行（差 72 行），
+      // 文件末尾那几十行永远滚不到、所见即所编辑也落错行。这里统一按「块内偏移」定位：
+      //   translateY = scrollTop - (first 在块内的偏移) - 行内小数偏移
+      // 非换行直映模式下它恒等于 (from-1)*lineHeight（即绝对文档位置），行为与视觉一致。
+      const firstIdx = Math.max(0, Math.min(rows.children.length - 1, first - from));
+      let offsetFirst = firstIdx * lh;
+      if (wrap) {
+        const kids = rows.children;
+        // 两趟：先只读高度（一次布局），再只写 top（一次样式重算），避免读写交错触发 N 次重排
+        const hs = new Array(kids.length);
+        for (let i = 0; i < kids.length; i++) hs[i] = Math.max(lh, kids[i].offsetHeight || lh);
+        let y = 0;
+        for (let i = 0; i < kids.length; i++) {
+          kids[i].style.top = y + 'px';
+          if (i === firstIdx) offsetFirst = y;
+          y += hs[i];
+        }
+        rows.style.height = y + 'px';
+        lastRowH = kids.length ? y / kids.length : 0;
+      } else {
+        rows.style.height = (to - from + 1) * lh + 'px';
+        lastRowH = lh;
+      }
+      const frac = isScaled() ? 0 : Math.max(0, Math.min(lh - 1, root.scrollTop - (first - 1) * lh));
+      rows.style.transform = 'translateY(' + (root.scrollTop - offsetFirst - frac) + 'px)';
       renderedRange = [from, to];
       measureLineHeight();
       baseStatus();
+      // 诊断埋点：一次成功重画的耗时（取数 IPC + DOM 重建）与首屏真实内容时刻
+      try {
+        const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        perf.renders++;
+        perf.readMsTotal += lastBatch.ms;
+        perf.lastRenderMs = Math.round(t0 ? (now - t0) : 0);
+        if (perf.lastRenderMs > perf.maxRenderMs) perf.maxRenderMs = perf.lastRenderMs;
+        perf.lastRenderAt = now;
+        if (!perf.firstContentAt && got.size > 0 && rows.childElementCount > 0) perf.firstContentAt = now;
+      } catch { /* 诊断失败不影响渲染 */ }
     } catch (err) {
       // 编辑会话已被主进程释放（保存后关窗/被外部关闭）→ 退回只读读法，别把视图卡死
       if (docInfo && /文档句柄不存在|文档已关闭|DOC_GONE/.test(msgOf(err))) {
@@ -527,6 +651,28 @@ export function createHugeView(host, opts) {
     await placeCaret(nextLine, nextCol);
   }
 
+  /** v0.9.0 单行编辑快路径收尾：**不再**每次按键都 syncDocState + loadLineText（串行 3 个 IPC）。
+   *  行文本在本地按 IPC 回执的前提推出来（主进程执行的正是同一处替换），只重画一次视口；
+   *  下一次按键用的是同一份文本，列号不会漂。跨行编辑/未知文本仍走 afterEdit 的权威路径。 */
+  async function afterEditFast(r, nextLine, nextCol, nextText) {
+    if (destroyed) return;
+    if (r && typeof r.lines === 'number' && r.lines > 0) docLines = r.lines;
+    if (r && typeof r.dirty === 'boolean') setDirty(r.dirty, r.dirtyCount);
+    // 撤销栈深度由主进程随编辑回执一起给（省掉每键一次 huge:doc-state 的串行 IPC）
+    if (r && typeof r.undoDepth === 'number') {
+      undoDepth = r.undoDepth;
+      redoDepth = Number(r.redoDepth) || 0;
+      canUndo = r.canUndo === true || undoDepth > 0;
+      canRedo = r.canRedo === true;
+    }
+    applySizer();
+    if (nextText == null) { await afterEdit(r, nextLine, nextCol); return; }
+    caret = { line: nextLine, col: nextCol, text: nextText, oversize: nextText.length > LINE_TEXT_LIMIT };
+    baseStatus();
+    renderedRange = null;
+    await render();
+  }
+
   function editReady() {
     if (destroyed) return false;
     if (!editable || !docInfo || !caret) return false;
@@ -541,13 +687,16 @@ export function createHugeView(host, opts) {
     if (!s) return Promise.resolve(false);
     const line = caret.line;
     const col = caret.col;
+    const cur = caret.text;
     const nlCount = (s.match(/\n/g) || []).length;
     const nextLine = line + nlCount;
     const nextCol = nlCount > 0 ? s.length - s.lastIndexOf('\n') - 1 : col + s.length;
+    // 单行内插入：结果文本本地可推（与主进程执行的替换逐字一致）→ 走快路径
+    const nextText = nlCount === 0 ? (cur.slice(0, col) + s + cur.slice(col)) : null;
     return queue(async () => {
       try {
         const r = await api.hugeDocInsert({ docId: docInfo.docId, line, col, text: s });
-        await afterEdit(r, nextLine, nextCol);
+        await afterEditFast(r, nextLine, nextCol, nextText);
         return true;
       } catch (err) { setStatus('编辑失败：' + msgOf(err)); return false; }
     });
@@ -556,10 +705,14 @@ export function createHugeView(host, opts) {
   /** 区间删除（跨行自动合并首尾行）；next* 为删除后的光标落点 */
   function opDeleteRange(fromLine, fromCol, toLine, toCol, nextLine, nextCol) {
     if (!editReady()) return Promise.resolve(false);
+    // 同一行内的删除：结果文本本地可推 → 快路径
+    const nextText = (fromLine === toLine && caret && caret.line === fromLine)
+      ? (caret.text.slice(0, fromCol) + caret.text.slice(toCol))
+      : null;
     return queue(async () => {
       try {
         const r = await api.hugeDocDelete({ docId: docInfo.docId, fromLine, fromCol, toLine, toCol });
-        await afterEdit(r, nextLine, nextCol);
+        await afterEditFast(r, nextLine, nextCol, nextText);
         return true;
       } catch (err) { setStatus('编辑失败：' + msgOf(err)); return false; }
     });
@@ -767,6 +920,34 @@ export function createHugeView(host, opts) {
   editBtn.addEventListener('click', () => { void setEditable(!editable); });
   saveBtn.addEventListener('click', () => { void save(); });
 
+  /** 应用换行样式（root 上加类，CSS 负责 white-space/高度自适应） */
+  function applyWrapClass() {
+    if (destroyed) return;
+    try { root.classList.toggle('huge-wrap', wrap); } catch { /* 忽略 */ }
+    try { wrapBtn.classList.toggle('on', wrap); } catch { /* 忽略 */ }
+  }
+
+  /** 切换自动换行：重算滚动条（末尾补一屏）+ 重画视口。
+   *  @param {boolean} on
+   *  @param {boolean} [notify] true（默认）= 用户点的、回写应用级设置；false = 外部同步（不再回调，避免环） */
+  function setWrap(on, notify) {
+    const next = on === true;
+    if (next === wrap) return;
+    wrap = next;
+    applyWrapClass();
+    lastRowH = 0; // 换行口径变了：行高估计作废，按新口径重新量
+    applySizer();
+    renderedRange = null;
+    if (!destroyed) { try { root.focus({ preventScroll: true }); } catch { /* 忽略 */ } }
+    void render();
+    if (notify !== false && typeof opts.onWordWrapChange === 'function') {
+      try { opts.onWordWrapChange(next); } catch { /* 上层失败不影响本视图 */ }
+    }
+  }
+  wrapBtn.addEventListener('click', () => { setWrap(!wrap); });
+
+  applyWrapClass();
+
   /**
    * 进入/退出编辑态。
    * 进入时打开 overlay 编辑会话（huge:doc-open），**能否编辑由主进程返回的 editable 决定**：
@@ -957,6 +1138,7 @@ export function createHugeView(host, opts) {
     try { root.classList.remove('huge-editable'); } catch { /* 忽略 */ }
     try { await api.hugeIndexDrop(filePath); } catch { /* 主进程无缓存：忽略 */ }
     index = null;
+    indexReady = false;
     indexRequested = false;
     estLines = 0;
     renderedRange = null;
@@ -999,6 +1181,8 @@ export function createHugeView(host, opts) {
     closeDoc,
     moveCaret,
     reloadExternal,
+    /** v0.9.0：外部同步应用级 wordWrap（设置页/其它窗口改动 → 本视图跟随；不回调，避免环） */
+    setWrapPreference(on) { setWrap(on === true, false); },
     /** 测试友好薄封装（仅冒烟用；见函数注释） */
     applyEditForTest,
     getState: () => ({
@@ -1006,12 +1190,15 @@ export function createHugeView(host, opts) {
       // 真实视口首行（比例/直映两模式统一换算）：tabs.js 的 hugeTopLine 采集器用它 ——
       // 不能用 rendered.from 反推（v0.7.0 OVERSCAN 1→2 后渲染窗起点语义变了，反推会偏一屏）
       firstLine: firstVisibleLine(),
-      indexed: !!index || !!docInfo,
+      indexed: (!!index && indexReady) || !!docInfo,
       indexedLines: index ? index.lines : null,
       encoding: index ? index.encoding : (docInfo ? docInfo.encoding : null),
       binary: binarySeen || !!(index && index.binary),
       lineHeight,
+      wrap, // v0.9.0：自动换行开关（状态条按钮；探针/冒烟可断言）
       lastBatch: { lines: lastBatch.lines, bytes: lastBatch.bytes, ms: lastBatch.ms },
+      // v0.9.0 实测埋点（bigperf 探针消费；对产品行为零影响）
+      perf: { ...perf, now: (typeof performance !== 'undefined' ? performance.now() : Date.now()) },
       rendered: renderedRange ? { from: renderedRange[0], to: renderedRange[1] } : null,
       renderedRows: rows.childElementCount,
       scrollTop: root.scrollTop,

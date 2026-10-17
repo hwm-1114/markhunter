@@ -15,7 +15,7 @@ const allWindows = new Set(); // v0.1.51：窗口集合（window-all-closed 以�
 // 背景：--smoke/--mmtest/--exttest 过去直接使用真实 userData，测试会写脏用户配置
 // （实测被改：theme、lastSession、lastDirectory、sidebarRoots、maxFileSizeMB、favoriteDirs）。
 // 现在测试模式改用独立 profile；MH_USERDATA 环境变量让测试派生的子进程（模拟二次启动）共用同一 profile。
-const TEST_FLAGS = ['--smoke', '--mmtest', '--exttest', '--bigprobe'];
+const TEST_FLAGS = ['--smoke', '--mmtest', '--exttest', '--bigprobe', '--bigperf'];
 const testFlag = TEST_FLAGS.find((f) => process.argv.includes(f));
 const envProfile = process.env.MH_USERDATA;
 if (envProfile || testFlag) {
@@ -101,9 +101,9 @@ function createWindow(opts = {}) {
 
   // 冒烟/扩展测试模式：仅首窗口绑定（scripts/smoke.js 在 src 内随 asar 打包但打包版不启用）
   if (win === mainWindow && !opts.noTestHooks) {
-    for (const flag of ['--smoke', '--mmtest', '--exttest', '--bigprobe']) {
+    for (const flag of ['--smoke', '--mmtest', '--exttest', '--bigprobe', '--bigperf']) {
       if (process.argv.includes(flag)) {
-        const mod = { '--smoke': 'smoke', '--mmtest': 'mm-test', '--exttest': 'ext-test', '--bigprobe': 'bigfile-probe' }[flag];
+        const mod = { '--smoke': 'smoke', '--mmtest': 'mm-test', '--exttest': 'ext-test', '--bigprobe': 'bigfile-probe', '--bigperf': 'bigperf' }[flag];
         try {
           const m = require('../../scripts/' + mod);
           if (m.runSmoke) m.runSmoke(win);

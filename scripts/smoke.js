@@ -924,11 +924,11 @@ const RENDERER_TEST = `
     await new Promise((r) => setTimeout(r, 200));
     const visible = !document.querySelector('#modal-mask').classList.contains('hidden');
     const inputs = document.querySelectorAll('#modal-body input').length;
-    // 范围提示应显示大文件上限最大值（v0.7.0 起 5120 = 5GB）与滚动条宽度最大值
+    // 范围提示应显示大文件上限最大值（v0.9.0 起 20480 = 20GB）与滚动条宽度最大值
     const hints = Array.from(document.querySelectorAll('#modal-body .hint'))
       .map((h) => h.textContent)
       .join('|');
-    const rangeOk = hints.includes('5120') && hints.includes('40');
+    const rangeOk = hints.includes('20480') && hints.includes('40');
     // 取消关闭
     const cancelBtn = document.querySelector('#modal-actions .tbtn');
     if (cancelBtn) cancelBtn.click();

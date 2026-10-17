@@ -20,6 +20,8 @@
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
+const os = require('os');
+const { Worker } = require('worker_threads');
 
 const SKIP_DIRS = new Set([
   'node_modules', '.git', '.svn', '.hg', '.idea', '.vscode',
@@ -34,8 +36,11 @@ const TEXT_EXT = new Set([
 ]);
 
 const MAX_SEARCH_FILE_MB = 10;      // 小文件路径上限：整读进内存逐行匹配
-const MAX_STREAM_FILE_MB = 5120;    // 1B-4：大文件流式扫描上限（v0.7.0：4GB→5GB，与打开上限同步）
+const MAX_STREAM_FILE_MB = 20480;   // 大文件流式扫描上限（v0.9.0：5GB→20GB，与打开上限 20GB 同步；
+                                    // 旧值 5GB 会让 10GB 文件被**静默跳过** → 搜索 0 命中）
 const PROGRESS_EVERY = 25;          // 每扫描 25 个文件回传一次进度（1GB 工程 ≈ 数千文件 → 数百条进度）
+const SHARD_MIN_BYTES = 128 * 1024 * 1024; // >128MB 的单文件才走多线程分片（分片启动约 50ms）
+const SHARD_MAX = 8;
 
 const ASCII_ONLY = /^[\x20-\x7e]+$/; // 纯可打印 ASCII 查询 → 走原生字节匹配快路径
 const FALLBACK_BUF_MAX = 1024 * 1024;  // 回退路径 strBuf 截断消费阈值（无换行巨文件防无界增长）
@@ -46,17 +51,38 @@ function isAsciiLetter(b) {
   return (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a);
 }
 
-// 英文文本小写字母频率（约 %，a-z 顺序）：锚点选 needle 中最低频的字节，非字母记 0
-// （非字母在文本里远比字母稀疏，且精确匹配只需单游标单遍扫描）
-const LETTER_FREQ = [8.2, 1.5, 2.8, 4.3, 12.7, 2.2, 2.0, 6.1, 7.0, 0.15, 0.8, 4.0, 2.4,
-  6.7, 7.5, 1.9, 0.1, 6.0, 6.3, 9.1, 2.8, 1.0, 2.4, 0.15, 2.0, 0.07];
+// 字节频率表（‰，近似 English/日志文本；数值越低越适合作锚点）—— v0.9.0 重写。
+// 旧实现用「LETTER_FREQ，非字母记 0」，把空格/数字当成"最稀有"：实测查询 "SECTION 2000000"
+// 的锚点落在空格上（文本里 ~18%），5GB 文件产生约 6 亿次 indexOf 候选 → 搜索 20s。
+// 现在给 0x20-0x7e 全部可见字符填真实频率（空格 180‰、字母按语料、数字/标点 0.2~9‰），
+// 锚点必然落在真正稀疏的字节上（"SECTION 2000000" → 数字 '2' 7‰，候选量降 25 倍）。
+const BYTE_FREQ = (() => {
+  const f = new Float32Array(256);
+  for (let i = 0; i < 256; i++) f[i] = 0.05;  // 控制符/高位字节：文本里几乎不出现（比任何可见字符稀有）
+  f[0x20] = 180;                              // 空格 ~18%
+  const lower = [82, 15, 28, 43, 127, 22, 20, 61, 70, 1.5, 8, 40, 24, 67, 75, 19, 1,
+    60, 63, 91, 28, 10, 24, 1.5, 20, 0.7];    // a-z（‰，为常见百分比表的 10 倍）
+  for (let i = 0; i < 26; i++) { f[0x61 + i] = lower[i]; f[0x41 + i] = lower[i]; } // 大小写共用同一频度（两变体都扫）
+  const digit = [9, 9, 7, 4, 4, 4, 4, 4, 4, 4]; // 0-9（日志里时间戳/序号占比高，仍远低于空格）
+  for (let i = 0; i < 10; i++) f[0x30 + i] = digit[i];
+  const punct = {
+    0x2e: 25, 0x2c: 10, 0x2d: 15, 0x3a: 5, 0x3b: 1, 0x2f: 4, 0x3d: 3, 0x5f: 4,
+    0x22: 3, 0x27: 2, 0x28: 1.5, 0x29: 1.5, 0x5b: 1, 0x5d: 1, 0x7b: 1, 0x7d: 1,
+    0x3c: 1, 0x3e: 1, 0x21: 0.5, 0x3f: 0.5, 0x40: 0.4, 0x23: 0.4, 0x24: 0.3,
+    0x25: 1, 0x26: 0.5, 0x2a: 0.5, 0x2b: 0.5, 0x7c: 0.5, 0x5c: 0.5,
+    0x7e: 0.2, 0x5e: 0.2, 0x60: 0.2,
+  };
+  for (const k of Object.keys(punct)) f[Number(k)] = punct[k];
+  return f;
+})();
 
 /** 大小写不敏感的原生字节匹配：返回 chunk 内命中偏移（升序），最多收集 cap 个。
  *  needle 中的字母字节同时接受两种大小写（历史教训：小写+大写两个 needle 各扫一遍的方案
  *  漏配内容里的一切混合形态，如查询 readme 漏 Readme/ReAdMe），非字母字节精确匹配。
- *  锚点 = needle 中最低频的字节（LETTER_FREQ，非字母优先）：字母则小写/大写两个变体各持
- *  一个游标，单调前进、整块只扫一遍，每次取更近候选（逐候选各扫一遍会在锚点变体稀疏时
- *  退化成 O(n²)），候选位置逐字节折叠校验（isLetterPos 预标记，无函数调用）；
+ *  锚点 = needle 中最低频的字节（BYTE_FREQ，v0.9.0 起含空格/数字/标点的真实频率）：
+ *  字母则小写/大写两个变体各持一个游标，单调前进、整块只扫一遍，每次取更近候选
+ *  （逐候选各扫一遍会在锚点变体稀疏时退化成 O(n²)），候选位置逐字节折叠校验
+ *  （isLetterPos 预标记，无函数调用）；
  *  needle 全为非字母时退化为精确匹配；长度 1 时锚点即命中。
  *  cap 的意义：只需全局前 maxResults 条结果，密集查询（如单空格）若全量收集会吃满内存与排序时间。
  *  ASCII 查询在 UTF-8 与 GBK 下字节表示一致，故两种编码共用同一快路径。 */
@@ -69,11 +95,8 @@ function nativeMatchesCI(chunk, needle, cap) {
   let best = Infinity;
   for (let j = 0; j < len; j++) {
     const n = needle[j];
-    let f = 0;
-    if (isAsciiLetter(n)) {
-      isLetterPos[j] = 1;
-      f = LETTER_FREQ[(n | 0x20) - 0x61];
-    }
+    if (isAsciiLetter(n)) isLetterPos[j] = 1;
+    const f = BYTE_FREQ[n] != null ? BYTE_FREQ[n] : 1;
     if (f < best) { best = f; anchor = j; }
   }
   const n0 = needle[anchor];
@@ -233,6 +256,187 @@ async function scanStream(file, rawQuery, q, results, maxResults, isCancelled) {
 let currentId = null;   // 当前任务 id（新 search 覆盖旧任务，旧任务在下次迭代点自行退出）
 let cancelled = false;  // 取消标记（cancel 消息置位，walk/行扫描间隙检查）
 
+// ===================== v0.9.0：GB 级单文件多线程分片扫描 =====================
+// 背景：5GB 文件单线程字节扫描实测 20s（锚点选错时）；锚点修正后仍受「候选数 × 单核」限制。
+// 做法：按字节把文件切成 N 段（N = 核数-1，上限 8），每段一个 worker_threads 线程跑同一套
+//       nativeMatchesCI；行号由「各分片换行数前缀和 + 片内偏移」还原（不依赖行索引）。
+// 语义与串行 fast path 完全一致：ASCII 大小写不敏感、行首行尾剪裁、matchIndex 小写口径、
+//       跨块/跨片命中用 needle.length-1 字节重叠兜住、结果上限 maxResults。
+// 任何分片异常 → 自动回退串行 scanStream（正确性优先，功能不受影响）。
+const SHARD_SRC = (() => {
+  let cached = null;
+  return () => {
+    if (cached) return cached;
+    cached = [
+      'const { parentPort, workerData } = require("worker_threads");',
+      'const fs = require("fs");',
+      'const BYTE_FREQ = new Float32Array(' + JSON.stringify(Array.from(BYTE_FREQ)) + ');',
+      'function isAsciiLetter(b) { return (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a); }',
+      nativeMatchesCI.toString(),
+      shardMain.toString(),
+      'shardMain();',
+    ].join('\n');
+    return cached;
+  };
+})();
+
+/** 单个分片的扫描主体（自包含：不能被闭包捕获任何东西，会被 toString 注入 worker）。
+ *  **不做「对齐到行首」**：分片从 start 原样读起，行号一律用「[start, hit) 之间的换行数」，
+ *  再加协调方的换行前缀和 → 与串行结果逐条一致（实测教训：早期版本跳过 start 处的半行，
+ *  既漏掉正好落在片首的命中，又漏计那条换行，导致后续分片行号整体漂移）。
+ *  **零分配读循环**（v0.9.0 实测关键）：早期版本每块 `Buffer.allocUnsafe(8MB)` + `Buffer.concat`，
+ *  在 Electron 的 worker_threads 里 640MB/片能吃掉 2.5s+（node 24 同样代码只要 0.6s）——
+ *  改成「一片一个复用缓冲 + 尾部 needle-1 字节搬移」，分配次数从 80 次降到 1 次。 */
+function shardMain() {
+  const { parentPort, workerData } = require('worker_threads');
+  const fs = require('fs');
+  const wd = workerData;
+  const needle = Buffer.from(wd.needle);
+  const len = needle.length;
+  const CHUNK = 8 * 1024 * 1024;
+  const overlap = Math.max(0, len - 1); // 块尾/片尾重叠字节（跨块命中兜底）
+  const { file, size, start, end } = wd;
+  const scanEnd = Math.min(size, end + overlap); // 片尾多读 needle-1 字节，跨片命中不漏
+  const hits = [];
+  let nlScanned = 0;      // 本片已扫描字节里的换行总数（[start, 已扫位置)）
+  let lastOff = -1;
+  let pos = start;
+  let tailLen = 0;
+  let dec = null;
+  let fd = null;
+  const t0 = Date.now();
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.allocUnsafe(CHUNK + overlap); // 唯一一次分配（整个分片复用）
+    while (pos < scanEnd && hits.length < wd.cap) {
+      const want = Math.min(CHUNK, scanEnd - pos);
+      const got = fs.readSync(fd, buf, tailLen, want, pos);
+      if (!got) break;
+      const viewLen = tailLen + got;
+      const view = buf.subarray(0, viewLen);
+      const viewStart = pos - tailLen; // view[0] 的绝对偏移
+      if (!dec) {
+        try {
+          new TextDecoder('utf-8', { fatal: true }).decode(view.subarray(0, Math.max(0, Math.min(viewLen, 1 << 20) - 4)));
+          dec = new TextDecoder('utf-8');
+        } catch { dec = new TextDecoder('gbk'); }
+      }
+      const found = needle.length ? nativeMatchesCI(view, needle, wd.cap) : [];
+      for (let i = 0; i < found.length; i++) {
+        const h = found[i];
+        const abs = viewStart + h;
+        // 去重口径：**整体**落在上一块（含重叠区）里的命中上一块已报告；起点在重叠区、尾部越过
+        // 块尾的跨块命中上一块看不到（needle 不完整），必须在本块报告。
+        if (abs + len <= pos) continue;
+        if (abs < start || abs >= end) continue; // 归属别的分片
+        if (abs <= lastOff) continue;   // 去重（命中升序）
+        lastOff = abs;
+        // 片内行号 = 已扫换行数 + 本块内该命中之前的换行数
+        let nlBefore = nlScanned;
+        for (let p = view.indexOf(10, tailLen); p >= 0 && p < h; p = view.indexOf(10, p + 1)) nlBefore++;
+        let ls = view.lastIndexOf(10, h - 1);
+        ls = ls < 0 ? 0 : ls + 1;
+        let le = view.indexOf(10, h);
+        if (le < 0) le = viewLen;
+        let text;
+        try { text = dec.decode(view.subarray(ls, le)); } catch { text = view.subarray(ls, le).toString('latin1'); }
+        text = text.replace(/\r$/, '');
+        const mi = text.toLowerCase().indexOf(wd.q);
+        hits.push({ o: abs, line0: nlBefore, text: text.length > 1000 ? text.slice(0, 1000) : text, matchIndex: mi < 0 ? 0 : mi });
+        if (hits.length >= wd.cap) break;
+      }
+      // 换行统计：只统计归属本片的 [pos, min(pos+got, end))，重叠区不计（下一片自己数）
+      const ownLen = Math.max(0, Math.min(got, end - pos));
+      for (let p = view.indexOf(10, tailLen); p >= 0 && p < tailLen + ownLen; p = view.indexOf(10, p + 1)) nlScanned++;
+      // 尾部 needle-1 字节搬回缓冲开头，供下一块跨块匹配
+      tailLen = Math.max(0, Math.min(overlap, viewLen));
+      if (tailLen > 0) buf.copy(buf, 0, viewLen - tailLen, viewLen);
+      pos += got;
+    }
+    parentPort.postMessage({ ok: true, hits, nl: nlScanned, start, ms: Date.now() - t0 });
+  } catch (e) {
+    parentPort.postMessage({ ok: false, error: String((e && e.message) || e) });
+  } finally {
+    try { if (fd != null) fs.closeSync(fd); } catch { /* 忽略 */ }
+  }
+}
+
+/** 分片并行扫描。返回 { ok:true, full } 或 { ok:false, reason }（ok:false 时调用方回退串行） */
+async function scanStreamParallel(file, rawQuery, q, results, maxResults, isCancelled) {
+  const st = await fsp.stat(file);
+  const size = st.size;
+  const cap = Math.max(1, maxResults - results.length);
+  const cores = os.availableParallelism ? os.availableParallelism() : os.cpus().length;
+  // MH_SEARCH_SHARDS：调试/低配机可强制分片数（不设则按核数-1，上限 8）
+  const want = parseInt(process.env.MH_SEARCH_SHARDS, 10);
+  const n = Number.isFinite(want) && want > 0
+    ? Math.min(want, SHARD_MAX)
+    : Math.max(2, Math.min(SHARD_MAX, Math.max(2, cores - 1)));
+  const per = Math.ceil(size / n);
+  const ranges = [];
+  for (let i = 0; i < n; i++) {
+    const s = i * per;
+    const e = Math.min(size, s + per);
+    if (s < e) ranges.push({ start: s, end: e });
+  }
+  const needle = Array.from(Buffer.from(String(rawQuery), 'latin1'));
+  const workers = [];
+  let cancelledNow = false;
+  const runShard = (payload) => new Promise((resolve) => {
+    let w = null;
+    try {
+      w = new Worker(SHARD_SRC(), { eval: true, workerData: payload });
+    } catch (e) {
+      resolve({ ok: false, error: 'worker 启动失败：' + ((e && e.message) || e) });
+      return;
+    }
+    workers.push(w);
+    let settled = false;
+    const fin = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+      try { w.terminate(); } catch { /* 已退出 */ }
+    };
+    w.once('message', (m) => fin(m && typeof m === 'object' ? m : { ok: false, error: '分片无响应' }));
+    w.once('error', (e) => fin({ ok: false, error: String((e && e.message) || e) }));
+    w.once('exit', (c) => fin({ ok: false, error: '分片线程退出码 ' + c }));
+  });
+  const timer = setInterval(() => {
+    if (!isCancelled()) return;
+    cancelledNow = true;
+    for (const w of workers) { try { w.terminate(); } catch { /* 忽略 */ } }
+  }, 100);
+  try {
+    const parts = await Promise.all(ranges.map((r) => runShard({
+      file, size, start: r.start, end: r.end, needle, q, cap,
+    })));
+    if (process.env.MH_SEARCH_DEBUG) {
+      console.error('[search] 分片总耗时(ms)=', parts.map((p) => (p && p.ms) || -1).join(','));
+    }
+    if (cancelledNow || isCancelled()) return { ok: false, reason: 'cancelled' };
+    for (const p of parts) {
+      if (!p || p.ok !== true) return { ok: false, reason: (p && p.error) || '分片失败' };
+    }
+    // 分片顺序 = ranges 顺序（起始偏移升序）：换行数前缀和还原每片首行号
+    let base = 1;
+    const all = [];
+    for (const p of parts) {
+      for (const h of p.hits) all.push({ o: h.o, line: base + h.line0, text: h.text, matchIndex: h.matchIndex });
+      base += p.nl;
+    }
+    all.sort((a, b) => a.o - b.o);
+    for (const h of all) {
+      results.push({ file, line: h.line, text: h.text, matchIndex: h.matchIndex });
+      if (results.length >= maxResults) return { ok: true, full: true };
+    }
+    return { ok: true, full: false };
+  } finally {
+    clearInterval(timer);
+    for (const w of workers) { try { w.terminate(); } catch { /* 忽略 */ } }
+  }
+}
+
 // ---------- 0.5.0 Phase 5a A1：快速打开的文件清单（缓存 + 增量下发） ----------
 // 目标：Ctrl+P 首次呼出**不等整目录扫完**（冒烟/真实工程里 node_modules 级别的目录首扫可达数秒），
 // 因此清单按 200 个/批流式回传，渲染端拿到一批就能先匹配；同时按目录缓存整份清单，
@@ -353,8 +557,21 @@ async function runSearch(id, dir, query, maxResults) {
     }
     if (st.size === 0) continue;
     if (st.size > MAX_SEARCH_FILE_MB * 1024 * 1024) {
-      // 1B-4：大文件走流式扫描（≤4GB），不再整体跳过
+      // 1B-4：大文件走流式扫描（v0.9.0 上限 20GB），不再整体跳过
       if (st.size > MAX_STREAM_FILE_MB * 1024 * 1024) continue;
+      // v0.9.0：GB 级纯 ASCII 查询优先多线程分片（5GB 单线程 20s → 多核 ~1s 量级）；
+      // 非 ASCII（中文关键词）仍走增量解码回退路径；分片任何异常自动回退串行。
+      if (st.size > SHARD_MIN_BYTES && ASCII_ONLY.test(String(query))) {
+        const pr = await scanStreamParallel(file, query, q, results, maxResults, isCancelled);
+        if (isCancelled()) return { cancelled: true };
+        if (pr.ok) {
+          if (pr.full) return { results };
+          continue;
+        }
+        if (pr.reason === 'cancelled') return { cancelled: true };
+        // 分片失败：回退串行扫描（功能不受影响，只是慢）
+        if (process.env.MH_SEARCH_DEBUG) console.error('[search] 分片回退串行:', pr.reason || 'unknown');
+      }
       const full = await scanStream(file, query, q, results, maxResults, isCancelled);
       if (isCancelled()) return { cancelled: true };
       if (full) return { results };
@@ -378,7 +595,10 @@ async function runSearch(id, dir, query, maxResults) {
   return { results };
 }
 
-process.parentPort.on('message', (e) => {
+// 只有作为 utilityProcess 运行（process.parentPort 存在）时才注册消息口；
+// 纯 node 里 require 本文件可用于探针直测（scripts/search-shard-probe.js）。
+if (process.parentPort && typeof process.parentPort.on === 'function') {
+  process.parentPort.on('message', (e) => {
   const msg = e && e.data;
   if (!msg || typeof msg !== 'object') return;
   if (msg.type === 'files') {
@@ -409,4 +629,15 @@ process.parentPort.on('message', (e) => {
   } else if (msg.type === 'cancel') {
     if (msg.id === currentId) cancelled = true;
   }
-});
+  });
+}
+
+// 供纯 node 探针直测（scripts/search-shard-probe.js）；utilityProcess 运行时同样导出但不被使用。
+module.exports = {
+  scanStream,
+  scanStreamParallel,
+  nativeMatchesCI,
+  runSearch,
+  MAX_STREAM_FILE_MB,
+  SHARD_MIN_BYTES,
+};

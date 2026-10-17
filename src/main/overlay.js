@@ -155,7 +155,7 @@ function buildBlocks(base) {
   if (lines > 0 && size === 0) throw new Error('行索引与文件大小不一致（lines>0 但 size=0），请重建索引');
   if (lines <= 0) {
     // 空文件：保留一个 0 字节块，保证块表始终非空（否则 splice 无处落笔）
-    return [{ kind: 'file', start: 0, bytes: 0, lines: 0, endsNL: false }];
+    return [{ kind: 'file', start: 0, baseLine: 0, bytes: 0, lines: 0, endsNL: false }];
   }
   const full = Math.floor(lines / LINES_PER_BLOCK);
   const rest = lines % LINES_PER_BLOCK;
@@ -166,6 +166,9 @@ function buildBlocks(base) {
     out.push({
       kind: 'file',
       start,
+      // v0.9.0：块首行在**原始文件**里的 0 基行号。相邻块编辑切分后 b*LINES_PER_BLOCK 不再成立，
+      // 块内稀疏定位（inBlockOffset）必须靠这个字段换算 starts 下标。
+      baseLine: b * LINES_PER_BLOCK,
       bytes: 0, // 下面按相邻块首之差补齐
       lines: Math.min(LINES_PER_BLOCK, lines - b * LINES_PER_BLOCK),
       endsNL: true, // 中间块一律以换行结束（块边界即行首）；末块在下面修正
@@ -633,14 +636,18 @@ function createDoc(opts = {}) {
     let from = 0;   // 块内扫描起点
     let need = k;   // 还需越过的换行数
     if (blk.kind === 'file') {
-      // 稀疏表定位到 1000 行子块（与 lineindex.lineToOffset 同口径）
-      const sub = Math.floor(k / LINES_PER_SPARSE);
+      // 稀疏表定位到 1000 行子块（与 lineindex.lineToOffset 同口径）。
+      // v0.9.0：用块自带的 baseLine（旧公式 b*SUB_PER_BLOCK 只在"块从未被编辑切分"时成立）。
+      // j = 块内 0 基行号 → 原始文件 0 基行号 g = baseLine + j；starts[sub-1] 记住的是
+      // 原始第 sub*1000 行的行首（1 基 sub*1000+1 行），且必须仍落在本块区间内。
+      const g = (Number.isFinite(blk.baseLine) ? blk.baseLine : -1) + k;
+      const sub = g >= 0 ? Math.floor(g / LINES_PER_SPARSE) : 0;
       if (sub > 0) {
-        const idx = b * SUB_PER_BLOCK + sub - 1;
+        const idx = sub - 1;
         const v = st.base.starts[idx];
         if (Number.isFinite(v) && v >= blk.start && v <= blk.start + blk.bytes) {
           from = v - blk.start;
-          need = k - sub * LINES_PER_SPARSE;
+          need = k - (sub * LINES_PER_SPARSE - blk.baseLine);
         }
       }
     }
@@ -793,6 +800,43 @@ function createDoc(opts = {}) {
     return { line, text: s };
   }
 
+  /** v0.9.0：把「未被编辑过的整块 file 块」按稀疏档（LINES_PER_SPARSE 行）切成若干小 file 块。
+   *  纯块表操作、**零 IO**（边界来自行索引 base.starts 的 1000 行稀疏表）——单键编辑因此只物化
+   *  ≤1000 行（GB 级日志约 128KB），而不是整块 10 万行（十几 MB）：这是「5GB 文件打字不卡」的关键。
+   *  返回是否切过（false = 不需要切 / 稀疏表覆盖不了，保持原块）。 */
+  function splitFileBlockBySparse(b) {
+    const blk = st.blocks[b];
+    if (!blk || blk.kind !== 'file') return false;
+    if (!(blk.lines > LINES_PER_SPARSE)) return false;
+    if (!Number.isFinite(blk.baseLine) || blk.baseLine < 0) return false;
+    const starts = st.base.starts || [];
+    if (!starts.length) return false;
+    const first = blk.baseLine;              // 0 基原始行号
+    const next = blk.baseLine + blk.lines;   // 块后第一行的 0 基行号
+    const children = [];
+    let segStartLine = first;
+    let segStartByte = blk.start;
+    for (let L = Math.ceil(first / LINES_PER_SPARSE) * LINES_PER_SPARSE; L < next; L += LINES_PER_SPARSE) {
+      if (L <= first) continue;
+      const v = starts[L / LINES_PER_SPARSE - 1];
+      if (!Number.isFinite(v) || v <= segStartByte || v >= blk.start + blk.bytes) return false; // 表不完整/不一致：不切
+      children.push({
+        kind: 'file', start: segStartByte, baseLine: segStartLine,
+        bytes: v - segStartByte, lines: L - segStartLine, endsNL: true,
+      });
+      segStartByte = v;
+      segStartLine = L;
+    }
+    if (!children.length) return false;
+    children.push({
+      kind: 'file', start: segStartByte, baseLine: segStartLine,
+      bytes: blk.start + blk.bytes - segStartByte, lines: next - segStartLine, endsNL: blk.endsNL === true,
+    });
+    st.blocks.splice(b, 1, ...children);
+    st.prefix = null;
+    return true;
+  }
+
   // ---------- 编辑（块级 CoW） ----------
   /** 把一段文本切成 ≤1000 行 / ≤4MB 的分片，写入 overlay 并生成 overlay 块 */
   async function putChunks(newBuf, regionEndsNL) {
@@ -852,7 +896,15 @@ function createDoc(opts = {}) {
     const lastDel = f0 + del - 1;
     if (lastDel > total) throw new Error(`删除范围越界（第 ${f0} 行起删 ${del} 行，文档共 ${total} 行）`);
     const atEnd = lastDel >= total; // 触及文档末尾 → 末行的换行状态由本次编辑决定
-    const p = prefixNow();
+    // v0.9.0：编辑前把触及的整块按稀疏档切成 ≤1000 行小块（零 IO，只改块表）——
+    // 使「单键编辑」物化的是 ~128KB 而不是整块 10 万行/12.8MB。切不动（稀疏表不完整）则保持原样。
+    let p = prefixNow();
+    splitFileBlockBySparse(findBlock(p.cums, Math.min(f0, Math.max(1, total))));
+    if (del > 0) {
+      p = prefixNow();
+      splitFileBlockBySparse(findBlock(p.cums, Math.max(1, lastDel)));
+    }
+    p = prefixNow();
     const fb = findBlock(p.cums, Math.min(f0, Math.max(1, total)));
     const lb = del > 0 ? findBlock(p.cums, Math.max(1, lastDel)) : fb;
     const bufA = (await blockText(fb)).buf;
@@ -909,6 +961,12 @@ function createDoc(opts = {}) {
       bytes: totalBytes(),
       dirty: isDirty(),
       dirtyCount: dirtyCount(),
+      // v0.9.0：撤销栈状态随编辑回执一起返回 —— 渲染端「键入即回显」快路径不再为拿 undoDepth
+      // 额外发一次 huge:doc-state（每次按键省一个串行 IPC），而冒烟/状态栏仍能看到即时深度。
+      undoDepth: st.undo.length,
+      redoDepth: st.redo.length,
+      canUndo: st.undo.length > 0,
+      canRedo: st.redo.length > 0,
     };
   }
   /** 便捷：在某行某列插入文本（含换行则裂成多行；列 = 行文本内的 0 基字符下标） */
@@ -1121,6 +1179,10 @@ function createDoc(opts = {}) {
     const blocks = st.blocks.map((b, i) => ({
       kind: 'file',
       start: p.cumBytes[i],
+      // 新文件的块首行号（0 基）：保存后字节顺序 = 块顺序，行号口径完全保持。
+      // starts 暂时为空（由调用方 force 重建索引后挂回），但 baseLine 先算好，
+      // 挂回后 inBlockOffset 的稀疏定位立刻可用（否则保存后每次编辑都要从块首顺序扫）。
+      baseLine: p.cums[i],
       bytes: b.bytes,
       lines: b.lines,
       endsNL: b.endsNL === true,

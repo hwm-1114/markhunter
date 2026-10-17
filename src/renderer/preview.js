@@ -172,7 +172,7 @@ function showPreviewImgMenu(e, img, tab) {
  * @param getIsDark 当前是否暗色主题
  * @param opt       （可选，0.5.0 多视图 Phase 2）本实例绑定的栏上下文：
  *                  `{ paneId, els: () => ({previewHost, contentEl, editorHost, divider, imageHost,
- *                     diffHost, viewerBar, zoomBadge}), getView }`。
+ *                     diffHost, zoomBadge}), getView }`。
  *                  **不传则逐位退回旧的「全窗口唯一 ID」行为**（单栏路径零变化）；
  *                  传了则本实例的 mode / 缩放 / 滚动同步都只作用于那一个栏 ——
  *                  这是「栏内预览模式（edit/split/preview）必须按栏独立」的落点：
@@ -462,11 +462,9 @@ export function createPreview(getEditor, getTab, getIsDark, opt) {
 
   function applyMode() {
     const tab = getTab();
-    // 0.5.0 Phase 2：宿主按**本实例所属栏**取（p0 仍是历史 ID #image-host / #diff-host / #viewer-bar）
+    // 0.5.0 Phase 2：宿主按**本实例所属栏**取（p0 仍是历史 ID #image-host / #diff-host）
     const imageHost = (E && E.imageHost) || $('#image-host');
     const diffHostEl = (E && E.diffHost) || $('#diff-host');
-    const viewerBar = (E && E.viewerBar) || $('#viewer-bar');
-    if (viewerBar) viewerBar.classList.add('hidden');
     if (tab && tab.kind === 'image') {
       // 图片标签页：编辑区显示图片，隐藏编辑器/预览/分隔条
       editorHost.classList.add('hidden');
@@ -486,8 +484,7 @@ export function createPreview(getEditor, getTab, getIsDark, opt) {
       return;
     }
     if (diffHostEl) diffHostEl.classList.add('hidden');
-    // viewer-lg：编辑区只读显示 + 查看器横幅；无 markdown 预览
-    if (viewerBar) viewerBar.classList.toggle('hidden', !(tab && (tab.kind === 'viewer-lg' || tab.kind === 'huge')));
+    // v0.9.0：viewer-lg / huge 的悬浮操作横幅已整体删除（大文件查看器自带底部状态条）
     const canPreview = tab && tab.kind !== 'viewer-lg' && tab.kind !== 'huge' && isMarkdown(tab.name);
     // 非 Markdown 文件（txt/json/py 等）编辑器始终显示，仅 Markdown 参与分屏/仅预览切换
     previewHost.classList.toggle('hidden', !canPreview || mode === 'edit');

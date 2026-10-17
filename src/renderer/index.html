@@ -95,9 +95,10 @@
 
     <section id="workbench">
       <!-- 0.5.0 多视图 Phase 2：编辑区改为「栏容器」，各栏（.pane）由 tabs.js 的 buildPaneDom 模板生成。
-           · p0 沿用历史 ID（#tabs / #editor-host / #image-host / #diff-host / #viewer-bar /
+           · p0 沿用历史 ID（#tabs / #editor-host / #image-host / #diff-host /
              #split-divider / #preview-host / #preview-content / #zoom-badge / #editor-empty）——
              find.js / preview.js / globalsearch.js / 冒烟里所有按 ID 取值的地方零改动；
+             （#viewer-bar 已随大文件悬浮操作条在 v0.9.0 删除）
            · p1（Ctrl+\ 或拖标签到编辑区边缘时创建）只用 class 定位，DOM 与 p0 完全对称；
            · 两栏之间的 .pane-divider 也由 tabs.js 动态插入（回到单栏时移除）。 -->
       <div id="editor-panes" class="editor-panes"></div>

@@ -120,8 +120,11 @@ function decodeBuffer(buf, encoding) {
   }
 }
 
-/** 流式扫描：返回 { lines, longest, starts:number[], encoding, binary, elapsedMs } */
-async function scan(file, size, onProgress) {
+/** 流式扫描：返回 { lines, longest, starts:number[], encoding, binary, elapsedMs }
+ *  onPartial(starts, lines, bytesScanned, encoding, binary)：每读完一个块回调一次（v0.9.0 渐进索引）。
+ *  调用方拿到的 starts 是**同一份数组引用**（只读使用）：扫描进行中就能服务「已扫描前缀」的取行，
+ *  让 5GB/10GB 冷开不再「等整份索引才出字」。 */
+async function scan(file, size, onProgress, onPartial) {
   const t0 = Date.now();
   const starts = [];
   let lines = 0;
@@ -154,6 +157,10 @@ async function scan(file, size, onProgress) {
         from = i + 1;
       }
       base += chunk.length;
+      // 渐进发布（每块一次，纯数值更新，代价可忽略）：readLines 立刻就能按行号读已扫描前缀
+      if (onPartial) {
+        try { onPartial(starts, lines, base, encoding, binary); } catch { /* 调用方异常不影响扫描 */ }
+      }
       if (onProgress && base >= nextProgress) {
         nextProgress = base + PROGRESS_EVERY;
         try { onProgress(base, size); } catch { /* 窗口已销毁等 */ }
@@ -201,10 +208,34 @@ function writeCache(cachePath, payload) {
 // 索引未就绪时 huge:lines / huge:index / line-offset 并发进来，此前每个调用都各自全量重扫一遍）。
 const inflightBuilds = new Map(); // key -> Promise（构建中的扫描，含 force 另起的）
 
+// v0.9.0 渐进索引：构建中的「已扫描前缀」表（同 key 单条；供 readLines 在索引就绪前服务视口）。
+// 数组引用与扫描内部同一份（只读消费），每块更新一次数值，无需 IPC。
+const partialIndexes = new Map(); // key -> { file, size, mtimeMs, lines, starts[], bytes, encoding, binary, done, error }
+const PARTIAL_MAX = 8;
+
+/** 向所有窗口广播索引进度（v0.9.0：进度不再绑定「谁发起 huge:index」——
+ *  首个视口取数也会起扫描，若进度只发给发起方，先渲染后索引的窗口会一直看不到进度）。 */
+function broadcastProgress(file, done, total) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    try { if (!win.isDestroyed()) win.webContents.send('huge:index-progress', { file, done, total }); } catch { /* 忽略 */ }
+  }
+}
+
 /** 发起一次真实扫描（调用方已确认缓存未命中）：登记 in-flight，结束后仅摘除自己那一份 */
 function startBuild(key, cachePath, file, st, opts) {
+  const part = {
+    file, size: st.size, mtimeMs: st.mtimeMs,
+    lines: 0, starts: [], bytes: 0, encoding: null, binary: false, done: false, error: null,
+  };
+  partialIndexes.set(key, part);
+  while (partialIndexes.size > PARTIAL_MAX) partialIndexes.delete(partialIndexes.keys().next().value);
   const p = (async () => {
-    const r = await scan(file, st.size, opts.onProgress);
+    const r = await scan(file, st.size, (done, total) => broadcastProgress(file, done, total), (starts, lines, bytes, enc, bin) => {
+      part.lines = lines;
+      part.bytes = bytes;
+      if (enc) part.encoding = enc;
+      if (bin) part.binary = true;
+    });
     writeCache(cachePath, {
       version: CACHE_VERSION,
       size: st.size,
@@ -224,12 +255,53 @@ function startBuild(key, cachePath, file, st, opts) {
       bytes: st.size,
     };
     memPut(key, idx, st, file); // force 重建同样覆盖内存缓存（旧 key 已被新 size/mtime 天然替换）
+    // 渐进表收尾：标为完成（其 starts 与 idx.starts 同一份数组，读到也不浪费）
+    part.lines = r.lines;
+    part.bytes = st.size;
+    part.encoding = r.encoding;
+    part.binary = r.binary === true;
+    part.done = true;
     return { ...idx, cached: false, elapsedMs: r.elapsedMs, key };
   })();
   inflightBuilds.set(key, p);
   const cleanup = () => { if (inflightBuilds.get(key) === p) inflightBuilds.delete(key); };
-  p.then(cleanup, cleanup); // 不 finally 返回新 promise：保持 p 本身可被多方 await
+  p.then(cleanup, (err) => {
+    part.error = (err && err.message) || String(err);
+    cleanup();
+  }); // 不 finally 返回新 promise：保持 p 本身可被多方 await
   return p;
+}
+
+/** 非阻塞索引解析（huge:lines / 视口取数专用）：
+ *  内存/侧车命中 → 完整索引；正在构建 → 渐进前缀；都没有 → **后台起扫描并立刻返回**。
+ *  返回 { index, partial, key, st }（index 与 partial 至少一个非空；两者都可为 null 表示刚起扫描）。 */
+async function resolveIndex(file) {
+  const st = await fsp.stat(file);
+  if (!st.isFile()) throw new Error('目标不是文件');
+  const key = cacheKey(st, file);
+  const cachePath = path.join(indexDir(), key + '.idx');
+  const mem = memGet(key, st);
+  if (mem) return { index: mem, partial: null, key, st };
+  const hit = readCache(cachePath);
+  if (hit && hit.size === st.size) {
+    const idx = {
+      lines: hit.lines,
+      longest: hit.longest,
+      starts: hit.starts,
+      encoding: hit.encoding,
+      binary: hit.binary === true,
+      bytes: st.size,
+    };
+    memPut(key, idx, st, file);
+    return { index: idx, partial: null, key, st };
+  }
+  const part = partialIndexes.get(key);
+  if (part) return { index: null, partial: part, key, st };
+  if (!inflightBuilds.has(key)) {
+    // 首次取数就把扫描拉起来（此前要等 huge:index 的 IPC 到达；冷开首屏因此白白晚一步）
+    startBuild(key, cachePath, file, st, {}).catch(() => { /* 错误由 partial.error / 后续调用体现 */ });
+  }
+  return { index: null, partial: partialIndexes.get(key) || null, key, st };
 }
 
 async function getIndex(file, opts = {}) {
@@ -359,37 +431,95 @@ function makeLineItem(line, text) {
 /** 批量取行（huge:lines 核心）：一次定位起始偏移 → 顺序读出整个视口 → 解码切行。
  *  语义：行号 1 基；跨块安全（不依赖 8MB 对齐，块边界对调用方不可见）；超长行安全；
  *  读到换行不足（单行超出读窗口 / 文件末尾）时按实际返回，调用方允许缺行显示为空。
- *  返回 { lines:[{line,text,truncated?,chars?}], endLine, start, bytes, eof, encoding } */
+ *
+ *  v0.9.0 渐进取数（GB 级冷开的关键）：**不再 await 整份索引**——
+ *    · 完整索引就绪 → 与旧实现完全一致；
+ *    · 索引构建中 → 用「已扫描前缀」当索引，行号精确（前缀已被完整扫过），滚动可跟扫描推进；
+ *    · 目标行还没扫到 → 立刻返回 { pending:true, scannedLines, scannedBytes }（调用方画占位/进度）；
+ *    · 第 1 行永远可直接从文件头读（首屏零等待，不必等首个 8MB 块扫完）。
+ *  返回 { lines:[{line,text,truncated?,chars?}], endLine, start, bytes, eof, encoding,
+ *         pending?, scannedLines?, scannedBytes?, totalBytes? } */
 async function readLines(file, from, count) {
   const line = Math.max(1, Math.floor(Number(from) || 1));
   const want = Math.max(1, Math.min(BATCH_MAX_LINES, Math.floor(Number(count) || 1)));
-  const idx = await getIndex(file); // 进程内命中时无侧车解析；未建索引时顺带建立
-  const size = idx.bytes;
-  const offset = await lineToOffset(file, line, idx);
+  const r = await resolveIndex(file);
+  const size = r.st.size;
+  let idx = r.index;
+  let guessed = false;      // 索引不可用时的「无行号口径」读（只用于首屏第 1 行）
+  let headOnly = false;
+  if (!idx) {
+    const p = r.partial;
+    const avail = p ? p.lines : 0;
+    if (line > avail) {
+      if (line !== 1) {
+        // 还没扫到目标行：不阻塞，交还进度让渲染端画占位（扫描中会持续重试）
+        return {
+          lines: [],
+          endLine: line - 1,
+          start: 0,
+          bytes: 0,
+          eof: false,
+          encoding: (p && p.encoding) || null,
+          pending: true,
+          scannedLines: avail,
+          scannedBytes: p ? p.bytes : 0,
+          totalBytes: size,
+          indexError: (p && p.error) || null,
+        };
+      }
+      // 首屏：扫描可能刚起步（甚至 0 行）——直接从文件头按字节读，0 等待
+      headOnly = true;
+      guessed = true;
+      idx = {
+        lines: 0,
+        starts: [],
+        bytes: size,
+        encoding: (p && p.encoding) || null,
+        binary: !!(p && p.binary),
+      };
+    } else {
+      // 渐进前缀当索引：行号精确（前缀内每个换行都已统计）
+      idx = {
+        lines: avail,
+        starts: p.starts,
+        bytes: size,
+        encoding: p.encoding || null,
+        binary: p.binary === true,
+      };
+    }
+  }
   const done = (lines) => ({
     lines,
     endLine: lines.length ? lines[lines.length - 1].line : line - 1,
-    start: offset,
+    start: 0,
     bytes: 0,
     eof: true,
-    encoding: idx.encoding,
+    encoding: idx.encoding || 'utf-8',
+    pending: false,
+    scannedLines: idx.lines,
+    totalBytes: size,
   });
-  if (line > idx.lines || offset >= size) return done([]);
+  if (!idx.lines && !headOnly) return done([]);
+  if (idx.lines && line > idx.lines) return done([]);
   // 按「平均行长（含换行）× 行数」估算读窗口：视口 100~300 行 → 通常几十 KB，远小于 4MB 上限
-  const avg = Math.max(16, Math.ceil(size / Math.max(1, idx.lines)));
+  const avg = guessed
+    ? 128 // 无行数口径：按 128B/行估（GB 级日志的典型值；读不够会自动扩窗）
+    : Math.max(16, Math.ceil(size / Math.max(1, idx.lines)));
   let len = Math.min(BATCH_MAX_BYTES, Math.max(BATCH_MIN_BYTES, want * avg + 1024));
   for (;;) {
-    const r = await readRangeBytes(file, offset, len, BATCH_MAX_BYTES);
-    const buf = r.buf;
+    const rr = await readRangeBytes(file, headOnly ? 0 : await lineToOffset(file, line, idx), len, BATCH_MAX_BYTES);
+    const buf = rr.buf;
     if (!buf.length) return done([]);
-    const eof = r.end >= size;
+    // 编码未定时就近探测（首屏直读路径；与 scan 同口径：严格 UTF-8 → GBK）
+    if (!idx.encoding) idx.encoding = detectEncoding(buf.subarray(0, Math.min(buf.length, 1 << 20)));
+    const eof = rr.end >= size;
     const text = decodeBuffer(buf, idx.encoding);
     const segs = text.split('\n');
     const endsNL = buf[buf.length - 1] === NL;
     // 完整行数：末尾不以换行结束时，未到文件末尾的那一段是「半截行」，不能当整行返回
     const complete = endsNL ? segs.length - 1 : (eof ? segs.length : segs.length - 1);
     // 取够 / 已到文件末尾 / 读窗口已到上限 / 本次读不满（短读）→ 按实际返回
-    if (complete >= want || eof || buf.length >= BATCH_MAX_BYTES || r.end < offset + len) {
+    if (complete >= want || eof || buf.length >= BATCH_MAX_BYTES || rr.end < rr.start + len) {
       const n = Math.min(want, complete);
       const lines = [];
       for (let i = 0; i < n; i++) lines.push(makeLineItem(line + i, segs[i]));
@@ -401,10 +531,13 @@ async function readLines(file, from, count) {
       return {
         lines,
         endLine: lines.length ? lines[lines.length - 1].line : line - 1,
-        start: offset,
+        start: rr.start,
         bytes: buf.length,
         eof,
         encoding: idx.encoding,
+        pending: false,
+        scannedLines: idx.lines,
+        totalBytes: size,
       };
     }
     len = Math.min(BATCH_MAX_BYTES, len * 2); // 行长估算不足（有超长行）→ 扩窗重读，最多到 4MB
