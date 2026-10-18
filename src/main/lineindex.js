@@ -592,6 +592,66 @@ function scheduleIndexGc(protectKey) {
     .finally(() => { gcRunning = false; });
 }
 
+/** 偏移直读的编码探测：以「块内最后一个换行」为界做严格 UTF-8 校验（截点落在多字节字符中间时不误判） */
+function detectEncodingProbe(buf) {
+  const nl = buf.lastIndexOf(10);
+  const end = nl > 0 ? nl : Math.max(0, buf.length - 4);
+  return detectEncoding(buf.subarray(0, end));
+}
+
+/** v0.10.0：按**字节偏移**直读一片行（索引尚未覆盖的区域也能看到真实内容；行号由渲染端估算）。
+ *  - offset 落在行中时向前最多回退 64KB 找行首，保证第一行完整；
+ *  - 只读 ≤4MB，末尾半行丢掉（下一次读取会从行首重新给出）；
+ *  - 返回的 line 恒为 0（调用方按估算行号覆盖），text 已按 LINE_MAX_CHARS 截断并带 chars/truncated。
+ *  这是**只读**路径：不建索引、不写侧车，也不影响渐进扫描。 */
+async function readLinesAtOffset(file, offset, count) {
+  const want = Math.max(1, Math.min(BATCH_MAX_LINES, Math.floor(Number(count) || 1)));
+  const st = await fsp.stat(file);
+  const size = st.size;
+  let start = Math.max(0, Math.min(size, Math.floor(Number(offset) || 0)));
+  if (start > 0) {
+    const back = Math.min(64 * 1024, start);
+    const hb = Buffer.allocUnsafe(back);
+    const fh0 = await fsp.open(file, 'r');
+    let got0 = 0;
+    try {
+      const rr = await fh0.read(hb, 0, back, start - back);
+      got0 = rr.bytesRead;
+    } finally {
+      await fh0.close();
+    }
+    if (got0 > 0) {
+      const nl = hb.subarray(0, got0).lastIndexOf(10);
+      if (nl >= 0) start = start - back + nl + 1; // 行首
+    }
+  }
+  const MAX_READ = 4 * 1024 * 1024;
+  const len = Math.min(MAX_READ, size - start);
+  if (len <= 0) return { lines: [], startOffset: start, endOffset: start, eof: true, encoding: null };
+  const buf = Buffer.allocUnsafe(len);
+  const fh = await fsp.open(file, 'r');
+  let got = 0;
+  try {
+    const rr = await fh.read(buf, 0, len, start);
+    got = rr.bytesRead;
+  } finally {
+    await fh.close();
+  }
+  const chunk = buf.subarray(0, got);
+  const encoding = detectEncodingProbe(chunk);
+  const text = decodeBuffer(chunk, encoding);
+  const parts = text.split('\n');
+  const atEof = start + got >= size;
+  // 末尾换行后不是新行（''），非 EOF 的末尾半行留给下一段 —— 两种都丢掉最后一段
+  if (text.endsWith('\n') || !atEof) parts.pop();
+  const lines = [];
+  for (let i = 0; i < parts.length && lines.length < want; i++) {
+    const s = parts[i].endsWith('\r') ? parts[i].slice(0, -1) : parts[i];
+    lines.push(makeLineItem(0, s));
+  }
+  return { lines, startOffset: start, endOffset: start + got, eof: atEof, encoding };
+}
+
 function registerLineIndexIpc() {
   ipcMain.handle('huge:index', async (e, file, opts) => {
     if (!file) throw new Error('缺少文件路径');
@@ -614,6 +674,12 @@ function registerLineIndexIpc() {
     return await readLines(file, arg.from, arg.count);
   });
   ipcMain.handle('huge:line-offset', async (_e, file, line) => lineToOffset(file, line));
+  // v0.10.0：偏移直读（索引未覆盖区域的「真实内容 + 估算行号」预览）
+  ipcMain.handle('huge:lines-by-offset', async (_e, arg) => {
+    const file = arg && arg.file;
+    if (!file) throw new Error('缺少文件路径');
+    return await readLinesAtOffset(file, arg.offset, arg.count);
+  });
   ipcMain.handle('huge:offset-line', async (_e, file, offset) => offsetToLine(file, offset));
   // 缓存维护：删除某文件的索引（文件已不存在时清理用）—— 内存与磁盘两份一起失效
   ipcMain.handle('huge:index-drop', async (_e, file) => {
@@ -637,6 +703,7 @@ module.exports = {
   lineToOffset,
   offsetToLine,
   readLines,
+  readLinesAtOffset,
   scan,
   gcIndexDir,
   memStats,

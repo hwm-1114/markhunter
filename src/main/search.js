@@ -18,6 +18,10 @@ const pending = new Map();        // id -> { resolve, reject, timer, win }
 // 目录参数由渲染端给出，主进程只做遍历与转发，不落盘、不返回文件内容）。
 const filesPending = new Map();   // id -> { resolve, reject, timer, win, files: [] }
 let filesActiveId = null;
+// ---------- v0.10.0：单文件查找（大文件视图内 Ctrl+F） ----------
+// 与目录搜索/清单并行独立记账，互不取消；同一时刻至多一个文件查找任务（新任务取代旧任务）。
+const FILE_SEARCH_TIMEOUT_MS = 120000;
+let fileActiveId = null;
 
 function winOf(e) {
   try {
@@ -91,6 +95,7 @@ function spawnWorker() {
     filesPending.clear();
     activeId = null;
     filesActiveId = null;
+    fileActiveId = null;
   });
   return w;
 }
@@ -133,6 +138,53 @@ function registerSearchIpc() {
         reject(new Error('搜索进程不可用：' + (err && err.message ? err.message : err)));
       }
     });
+  });
+
+  // ---------- v0.10.0：单文件查找（大文件视图内 Ctrl+F） ----------
+  // 返回 [{ file, line, text, matchIndex }]（与 search:global 的内容命中同形状），上限 maxResults。
+  // 扫描与目录搜索共用 worker 的 scanFileInto：>128MB 走分片、编码探测、每行最多一条，口径完全一致。
+  ipcMain.handle('search:file', (_e, payload) => {
+    const { file, query, maxResults = 500 } = payload || {};
+    if (!file || !query) return [];
+    if (fileActiveId && pending.has(fileActiveId)) {
+      const old = pending.get(fileActiveId);
+      clearTimeout(old.timer);
+      pending.delete(fileActiveId);
+      try { getWorker().postMessage({ id: fileActiveId, type: 'cancel' }); } catch { /* 忽略 */ }
+      old.reject(new Error('查找已被新的请求取代'));
+    }
+    const id = nextId++;
+    fileActiveId = id;
+    const w = getWorker();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (!pending.has(id)) return;
+        pending.delete(id);
+        if (fileActiveId === id) fileActiveId = null;
+        try { w.postMessage({ id, type: 'cancel' }); } catch { /* 忽略 */ }
+        reject(new Error('文件查找超时，已终止'));
+      }, FILE_SEARCH_TIMEOUT_MS);
+      pending.set(id, { resolve, reject, timer, win: winOf(_e) });
+      try {
+        w.postMessage({ id, type: 'search-file', file, query, maxResults });
+      } catch (err) {
+        clearTimeout(timer);
+        pending.delete(id);
+        reject(new Error('搜索进程不可用：' + (err && err.message ? err.message : err)));
+      }
+    });
+  });
+
+  ipcMain.handle('search:file-cancel', () => {
+    if (fileActiveId && pending.has(fileActiveId)) {
+      const p = pending.get(fileActiveId);
+      clearTimeout(p.timer);
+      pending.delete(fileActiveId);
+      try { getWorker().postMessage({ id: fileActiveId, type: 'cancel' }); } catch { /* 忽略 */ }
+      p.reject(new Error('文件查找已取消'));
+    }
+    fileActiveId = null;
+    return true;
   });
 
   // ---------- 0.5.0 Phase 5a A1：工作目录文件清单（Ctrl+P 快速打开） ----------

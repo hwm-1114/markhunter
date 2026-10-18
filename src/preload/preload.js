@@ -92,6 +92,9 @@ contextBridge.exposeInMainWorld('api', {
   // 全局搜索（P6：主进程转发 utilityProcess worker；支持取消与进度订阅）
   globalSearch: (dir, query) => ipcRenderer.invoke('search:global', { dir, query }),
   globalSearchCancel: () => ipcRenderer.invoke('search:cancel'),
+  // v0.10.0：单文件查找（大文件视图内 Ctrl+F）。返回 [{file,line,text,matchIndex}]，上限 maxResults。
+  searchFile: (file, query, maxResults) => ipcRenderer.invoke('search:file', { file, query, maxResults }),
+  searchFileCancel: () => ipcRenderer.invoke('search:file-cancel'),
   // 0.5.0 Phase 5a A1：工作目录文件清单（Ctrl+P 快速打开）——**只读清单**，不读文件内容。
   // 解析值 { files, total, cached, truncated }；分批进度见 onSearchFilesProgress。
   searchFiles: (dir) => ipcRenderer.invoke('search:files', { dir }),
@@ -163,6 +166,8 @@ contextBridge.exposeInMainWorld('api', {
   // v0.4.0 批量取行：一次 IPC 取整个视口（from 为 1 基行号）
   // 返回 { lines: [{ line, text, truncated?, chars? }], endLine, start, bytes, eof, encoding }
   hugeLines: (p, from, count) => ipcRenderer.invoke('huge:lines', { file: p, from, count }),
+  // v0.10.0：按字节偏移直读（索引未覆盖区域的预览；返回行不带真实行号，由渲染端按滚动比例估算）
+  hugeLinesAtOffset: (p, offset, count) => ipcRenderer.invoke('huge:lines-by-offset', { file: p, offset, count }),
   hugeIndexDrop: (p) => ipcRenderer.invoke('huge:index-drop', p),
   // 索引进度订阅：返回退订函数（查看器 destroy 时必须调用，否则监听器随标签累积泄漏）
   onHugeIndexProgress: (cb) => {

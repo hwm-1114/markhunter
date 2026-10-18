@@ -112,6 +112,12 @@ export function createHugeView(host, opts) {
   let indexPct = null;           // 索引建立进度 0~99（占位行文案复用；null=尚未收到进度）
   let indexError = null;         // 索引失败原因（占位行改画错误文案，不永远转圈）
   let placeholderEl = null;      // 当前占位行（进度回调就地更新文案；就绪后随 rows 清空）
+  // v0.10.0：偏移直读预览（索引还没扫到目标区时，按滚动比例换算字节偏移直接读真实内容；
+  // 行号是估算值 → 禁止落光标/编辑，复制走 provTexts，索引覆盖后自动切回真渲染）
+  let provMode = false;
+  let provTexts = null;
+  let provFrom = 1;
+  let provOffset = 0;            // 预览读取的起始字节（进度回调据此判断「扫描是否已越过视口」）
   const lastBatch = { lines: 0, bytes: 0, ms: 0 }; // 最近一次批量取数（诊断用，getState 暴露）
   // v0.9.0 实测埋点（纯诊断，零行为影响）：bigperf 探针据此算首屏/滚动/重画耗时与帧稳定性
   const perf = {
@@ -169,6 +175,8 @@ export function createHugeView(host, opts) {
     if (dirty) { setStatus(`未保存修改 ${dirtyCount || 1} 处 —— Ctrl+S 保存（Ctrl+Z 撤销）`); return; }
     if (indexError != null) { setStatus('索引失败：' + indexError); return; }
     if (binarySeen) { setStatus('二进制内容：按文本近似显示'); return; }
+    // v0.10.0：索引还没覆盖当前区域 → 内容按字节偏移直读，行号是估算值（不能落光标/编辑）
+    if (provMode) { setStatus('索引建立中：行号为估算（内容直读，可浏览/选中复制；编辑需等索引就绪）'); return; }
     setStatus(index || docInfo ? '' : '索引建立中…');
   }
 
@@ -188,6 +196,9 @@ export function createHugeView(host, opts) {
   function renderPlaceholder(info) {
     if (destroyed) return;
     renderedRange = null; // 就绪后必须走真渲染，别被「位置未变」短路
+    provMode = false;
+    provTexts = null;
+    try { root.classList.remove('huge-prov'); } catch { /* 忽略 */ }
     perf.placeholderRenders++;
     rows.innerHTML = '';
     const el = document.createElement('div');
@@ -240,9 +251,22 @@ export function createHugeView(host, opts) {
         const off = api.onHugeIndexProgress((d) => {
           if (destroyed || !d || d.file !== filePath) return;
           indexPct = Math.min(99, Math.round((d.done / Math.max(1, d.total)) * 100));
-          if (!binarySeen && !dirty) setStatus(`索引建立中 ${indexPct}%`); // 二进制/脏标记优先，不被进度文案覆盖
+          // 二进制/脏标记优先，不被进度文案覆盖；v0.10.0：预览态保留「行号为估算」的说明
+          if (!binarySeen && !dirty) {
+            if (provMode) baseStatus();
+            else setStatus(`索引建立中 ${indexPct}%`);
+          }
           if (placeholderEl && placeholderEl.isConnected) placeholderEl.textContent = placeholderText();
-          scheduleProvisionalRender(); // 扫描推进 → 已扫描前缀变长，尽快换成真实内容
+          // v0.10.0：**预览态不在每个进度事件上重画** —— 每次都要多读 4MB 且会把顺序扫描拖慢
+          //（10GB 实测索引 5s 级被拖到 156s）；只有扫描真正越过视口字节位置时才重画一次，换成真实行号。
+          if (provMode) {
+            if (provOffset > 0 && d.done >= provOffset) {
+              renderedRange = null;
+              scheduleProvisionalRender();
+            }
+          } else {
+            scheduleProvisionalRender(); // 扫描推进 → 已扫描前缀变长，尽快换成真实内容
+          }
         });
         offIndexProgress = typeof off === 'function' ? off : null; // 旧 preload 不返回退订函数
       } catch { /* 订阅失败不影响查看 */ }
@@ -312,6 +336,33 @@ export function createHugeView(host, opts) {
     return await api.hugeLines(filePath, from, count);
   }
 
+  /** v0.10.0：索引还没扫到目标区时的「偏移直读」预览。
+   *  按滚动比例把目标行换算成字节偏移（总字节数已知），直接读一片真实内容；
+   *  行号按比例估算并assigned为 from..to（与滚动映射同一套估算），因此落位与滚动条一致。
+   *  返回 { lines, bytes:0, provisional:true } 或 null（不可用/读空/请求已过期）。 */
+  async function readProvisionalWindow(fromLine, toLine) {
+    if (typeof api.hugeLinesAtOffset !== 'function' || !(size > 0)) return null;
+    if (!(index || docInfo || estLines > 0)) return null; // 总行数未知时无法估算，还是等索引
+    const total = Math.max(1, totalLines());
+    const frac = total > 1 ? Math.min(1, Math.max(0, (fromLine - 1) / (total - 1))) : 0;
+    const off = Math.min(Math.max(0, size - 1), Math.floor(size * frac));
+    let r = null;
+    try {
+      r = await api.hugeLinesAtOffset(filePath, off, Math.max(8, toLine - fromLine + 1));
+    } catch { return null; }
+    if (!r || !Array.isArray(r.lines) || !r.lines.length) return null;
+    const lines = [];
+    for (let i = 0; i < r.lines.length && fromLine + i <= toLine; i++) {
+      const it = r.lines[i] || {};
+      lines.push({ line: fromLine + i, text: it.text == null ? '' : it.text, truncated: it.truncated, chars: it.chars });
+    }
+    if (!lines.length) return null;
+    provTexts = lines.map((x) => x.text);
+    provFrom = fromLine;
+    provOffset = off;
+    return { lines, bytes: 0, provisional: true, encoding: r.encoding || null };
+  }
+
   async function render() {
     if (destroyed) return;
     // v0.9.0：**不再**「索引未就绪就不取数」。huge:lines 现在能服务「已扫描前缀」，
@@ -351,13 +402,18 @@ export function createHugeView(host, opts) {
     try {
       // 一次 IPC 取整个视口（含上下各一屏 overscan）：彻底去掉逐行 await 的串行往返
       const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-      const res = await readWindow(from, to - from + 1);
+      let res = await readWindow(from, to - from + 1);
       if (destroyed || token !== renderToken) return; // 已有更新请求：放弃本次
       if (res && res.pending) {
-        // 索引建立中且目标行还没扫到：画进度占位（progress 事件会让本函数重跑）
-        renderPlaceholder(res);
-        return;
+        // 索引建立中且目标行还没扫到：优先「按字节偏移直读」显示真实内容（行号估算）；
+        // 直读不可用/读空时才退回进度占位（progress 事件会让本函数重跑）。
+        const prov = await readProvisionalWindow(from, to);
+        if (destroyed || token !== renderToken) return;
+        if (prov) res = prov;
+        else { renderPlaceholder(res); return; }
       }
+      provMode = !!(res && res.provisional);
+      if (!provMode) { provTexts = null; }
       const got = new Map();
       let batchBinary = false;
       if (res && Array.isArray(res.lines)) {
@@ -390,7 +446,7 @@ export function createHugeView(host, opts) {
         el.dataset.line = String(ln);
         const no = document.createElement('span');
         no.className = 'huge-no';
-        no.textContent = String(ln);
+        no.textContent = (provMode ? '~' : '') + String(ln);
         const tx = document.createElement('span');
         tx.className = 'huge-text';
         // 超长行（含"无换行的 GB 级单行文件"）：入 DOM 前截断，否则单行文本节点可达数 MB
@@ -445,6 +501,7 @@ export function createHugeView(host, opts) {
       const frac = isScaled() ? 0 : Math.max(0, Math.min(lh - 1, root.scrollTop - (first - 1) * lh));
       rows.style.transform = 'translateY(' + (root.scrollTop - offsetFirst - frac) + 'px)';
       renderedRange = [from, to];
+      try { root.classList.toggle('huge-prov', provMode); } catch { /* 忽略 */ }
       measureLineHeight();
       baseStatus();
       // 诊断埋点：一次成功重画的耗时（取数 IPC + DOM 重建）与首屏真实内容时刻
@@ -810,6 +867,15 @@ export function createHugeView(host, opts) {
       }
       // 只读态：视口首行；readWindow 按会话状态自动走 hugeDocLines/hugeLines（所见即所得）
       const ln = firstVisibleLine();
+      // v0.10.0：索引未覆盖区域的内容是偏移直读来的（readWindow 会返回 pending），直接复制预览文本
+      if (provMode && provTexts && provTexts.length) {
+        const idx = Math.max(0, Math.min(provTexts.length - 1, ln - provFrom));
+        const text = provTexts[idx] || '';
+        if (!text) { setStatus(`第 ${ln} 行无内容可复制`); return; }
+        await api.writeClipboardText(text);
+        toast(`已复制第 ${ln} 行（索引建立中，估算行号；${text.length} 字符）`);
+        return;
+      }
       const r = await readWindow(ln, 1);
       if (destroyed) return;
       const it = r && Array.isArray(r.lines)
@@ -847,6 +913,7 @@ export function createHugeView(host, opts) {
     if (!editable) {
       if (key.length === 1 || key === 'Enter' || key === 'Backspace' || key === 'Delete') {
         e.preventDefault();
+        if (provMode) { setStatus('索引建立中：行号为估算，稍候再编辑'); return; }
         if (!docEditableKnown || docEditable) void setEditable(true);
       }
       return;
@@ -893,6 +960,11 @@ export function createHugeView(host, opts) {
       // 刻意**不** preventDefault —— 默认行为是从按下点开始建立文本选区，拦掉它
       // 「选中文字」就没了（与 Ctrl+C 复制闭环直接冲突）。
       try { root.focus({ preventScroll: true }); } catch { /* 忽略 */ }
+      return;
+    }
+    if (provMode) {
+      // 预览行号是估算值：编辑态落光标会改错行 —— 明确拒绝并提示
+      setStatus('索引建立中：行号为估算，暂不能定位光标');
       return;
     }
     const rowEl = e.target && e.target.closest ? e.target.closest('.huge-line') : null;
@@ -956,6 +1028,11 @@ export function createHugeView(host, opts) {
    */
   async function setEditable(on) {
     if (destroyed) return false;
+    // v0.10.0：偏移直读预览的行号是估算值 —— 此刻落光标/编辑会改错行，必须先等索引就绪
+    if (on === true && provMode) {
+      setStatus('索引建立中：当前内容按字节直读（行号估算），暂不能编辑 —— 稍候自动就绪');
+      return false;
+    }
     if (on !== true) {
       editable = false;
       caret = null;
@@ -1196,6 +1273,8 @@ export function createHugeView(host, opts) {
       binary: binarySeen || !!(index && index.binary),
       lineHeight,
       wrap, // v0.9.0：自动换行开关（状态条按钮；探针/冒烟可断言）
+      prov: provMode, // v0.10.0：当前视口是「索引未覆盖区域的偏移直读」（行号为估算）
+      provFrom: provMode ? provFrom : 0,
       lastBatch: { lines: lastBatch.lines, bytes: lastBatch.bytes, ms: lastBatch.ms },
       // v0.9.0 实测埋点（bigperf 探针消费；对产品行为零影响）
       perf: { ...perf, now: (typeof performance !== 'undefined' ? performance.now() : Date.now()) },

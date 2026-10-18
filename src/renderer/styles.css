@@ -2066,6 +2066,9 @@ html[data-theme^="fx-"] .cm-editor { background: color-mix(in srgb, var(--mh-bg-
   font-family: var(--mh-mono, Consolas, 'Courier New', monospace); font-size: 13px;
 }
 .huge-view .huge-no { flex: none; width: 72px; text-align: right; color: var(--mh-text-2); user-select: none; }
+/* v0.10.0：索引未覆盖区域 = 按字节偏移直读的真实内容 + **估算行号**（行号前带 ~、斜体弱化），
+   避免把估算值当精确行号；索引扫到后进度回调会重画成真实行号与精确落位。 */
+.huge-view.huge-prov .huge-no { opacity: .55; font-style: italic; }
 .huge-view .huge-text { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
 /* v0.9.0 自动换行（状态条「↵ 自动换行」开关 / 跟随设置 wordWrap）：
    行高改为按内容自适应，文本 pre-wrap + 任意断行（长 token 也能折），行号列顶端对齐。

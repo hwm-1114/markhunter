@@ -75,6 +75,10 @@ export function createFind(getEditor, getTab) {
   let timedOut = false;       // 达到执行预算被中止
   let patternError = '';      // 模式被拒（过长 / 嵌套量词 / 语法错误）
   let unsupported = '';       // 非空 = 当前视图不支持（值为 kind）
+  // v0.10.0：大文件视图内查找（>256MB 的 huge 标签没有 CM 文档，走单文件搜索 IPC）
+  let hugeMode = false;       // 当前结果来自 huge 单文件搜索
+  let hugeToken = 0;          // 请求令牌：切标签/改词后旧结果必须丢弃
+  let hugeMs = 0;             // 上次单文件搜索耗时（显示 + 冒烟断言）
   let searchRuns = 0;         // 真正执行的搜索次数（防抖用例的判据）
   let debounceTimer = null;
   // P10（v0.1.45）：结果 DOM 优化 —— 行元素数组 + 上次渲染快照（state/query/开关 三者恒等 → 跳过重建）。
@@ -162,6 +166,7 @@ export function createFind(getEditor, getTab) {
   }
 
   function applyHighlights() {
+    if (hugeMode) return; // huge 视图没有 CM 文档，高亮由结果列表承担
     try {
       const view = getView();
       if (!view || view.isDestroyed) return;
@@ -199,8 +204,9 @@ export function createFind(getEditor, getTab) {
     const tab = getTab();
     // P10：文档内容未变（state 引用恒等）且 query/开关/匹配数与诊断位都一致 → 结果必然一致，跳过全量重建。
     // 诊断位（不支持/模式被拒/截断/超时）必须进签名：它们变化时 matches 可能都是 0，不加就会显示旧提示。
-    const sig = `${optSig()}|${unsupported}|${patternError}|${truncated ? 't' : ''}${timedOut ? 'T' : ''}`;
-    const unchanged = query === lastQuery && lastLen === matches.length && sig === lastSig && !!tab && tab.state === lastState;
+    // v0.10.0：huge 单文件搜索走异步 IPC，结果集不由 tab.state 决定 → 不进这条缓存捷径。
+    const sig = `${optSig()}|${unsupported}|${patternError}|${truncated ? 't' : ''}${timedOut ? 'T' : ''}${hugeMode ? 'H' : ''}`;
+    const unchanged = !hugeMode && query === lastQuery && lastLen === matches.length && sig === lastSig && !!tab && tab.state === lastState;
     if (unchanged) {
       syncCurrentClass();
       return;
@@ -220,7 +226,9 @@ export function createFind(getEditor, getTab) {
       return;
     }
     if (!query) {
-      resultsEl.innerHTML = '<div class="find-empty">输入关键词开始搜索（默认不区分大小写；Aa 区分大小写 / 整词 / .* 正则，展示前 500 处）</div>';
+      resultsEl.innerHTML = hugeMode
+        ? '<div class="find-empty">大文件视图内查找：输入关键词开始搜索（不区分大小写；每行最多显示一条命中）</div>'
+        : '<div class="find-empty">输入关键词开始搜索（默认不区分大小写；Aa 区分大小写 / 整词 / .* 正则，展示前 500 处）</div>';
       return;
     }
     if (matches.length === 0) {
@@ -251,6 +259,16 @@ export function createFind(getEditor, getTab) {
       note.textContent = more;
       frag.appendChild(note);
     }
+    if (hugeMode) {
+      // 口径提示（有意不做成 .toast）：大文件查找走磁盘内容 + 固定大小写不敏感子串，
+      // 三个开关（Aa/整词/正则）在 huge 视图不生效 —— 必须显式告知，不能静默忽略。
+      const parts = ['大文件视图：按磁盘内容搜索（未保存的修改不在结果中）' + (hugeMs ? ` · 耗时 ${hugeMs}ms` : '')];
+      if (caseSensitive || wholeWord || regexMode) parts.push('Aa / 整词 / 正则 在大文件视图不生效');
+      const tip = document.createElement('div');
+      tip.className = 'find-more';
+      tip.textContent = parts.join(' · ');
+      frag.appendChild(tip);
+    }
     resultsEl.appendChild(frag);
     lastState = tab ? tab.state : null;
     lastQuery = query;
@@ -263,6 +281,7 @@ export function createFind(getEditor, getTab) {
 
   /** 单行高亮：**与收集同源**的匹配器（下标取原串位置，修掉旧的 toLowerCase 错位） */
   function highlightText(text) {
+    if (hugeMode) return highlightLiteral(text, query);
     const matcher = buildMatcher(query);
     if (!matcher.re) return escapeHtml(text);
     const re = matcher.re;
@@ -281,10 +300,38 @@ export function createFind(getEditor, getTab) {
     return html;
   }
 
+  /** 字面量高亮（大小写不敏感，与 worker 的单文件搜索口径一致）。
+   *  小写映射变长（如 İ）时下标会错位 —— 直接放弃高亮，只做转义输出。 */
+  function highlightLiteral(text, q) {
+    if (!q) return escapeHtml(text);
+    const lower = text.toLowerCase();
+    const needle = q.toLowerCase();
+    if (lower.length !== text.length || !needle) return escapeHtml(text);
+    let i = 0;
+    let guard = 0;
+    let out = '';
+    for (;;) {
+      const k = lower.indexOf(needle, i);
+      if (k < 0 || guard++ > HIGHLIGHT_GUARD) break;
+      out += escapeHtml(text.slice(i, k)) + `<mark>${escapeHtml(text.slice(k, k + needle.length))}</mark>`;
+      i = k + needle.length;
+    }
+    return out + escapeHtml(text.slice(i));
+  }
+
   function jumpTo(i) {
     if (i < 0 || i >= matches.length) return;
     current = i;
     const m = matches[i];
+    if (hugeMode) {
+      // huge 没有 CM 文档：直接跳到命中行（视口首行 = 该行），高亮交给结果列表
+      const tab = getTab();
+      if (tab && tab.huge) {
+        try { Promise.resolve(tab.huge.gotoLine(m.line)).catch(() => { /* 视图销毁竞态 */ }); } catch { /* 忽略 */ }
+      }
+      syncCurrentClass();
+      return;
+    }
     const view = getView();
     view.dispatch({
       selection: { anchor: m.from },
@@ -292,6 +339,43 @@ export function createFind(getEditor, getTab) {
     });
     applyHighlights();
     syncCurrentClass(); // P10：仅切 current 高亮 + 滚入视野，不重建结果列表
+  }
+
+  /** v0.10.0：huge 视图的异步单文件查找（结果形状 { line, text, index }） */
+  function startHugeSearch(tab, noJump) {
+    const token = ++hugeToken;
+    const t0 = Date.now();
+    count.textContent = '搜索中…';
+    resultsEl.textContent = '';
+    resultsEl.innerHTML = '<div class="find-empty">大文件视图内查找：正在扫描文件…</div>';
+    matches = [];
+    const api = (typeof window !== 'undefined' && window.api) || null;
+    if (!api || typeof api.searchFile !== 'function') {
+      count.textContent = '查找失败：当前版本缺少 search:file 通道';
+      resultsEl.innerHTML = '<div class="find-empty">查找失败：当前版本缺少 search:file 通道</div>';
+      return;
+    }
+    Promise.resolve(api.searchFile(tab.path, query, effLimit()))
+      .then((list) => {
+        if (token !== hugeToken) return; // 词已改/切了标签：丢弃过期结果
+        hugeMs = Date.now() - t0;
+        matches = (Array.isArray(list) ? list : []).map((r) => ({
+          line: r.line, text: r.text || '', index: r.matchIndex || 0, from: -1, to: -1,
+        }));
+        truncated = matches.length >= effLimit();
+        count.textContent = `${matches.length} 处匹配（${hugeMs}ms）`;
+        renderResults();
+        if (matches.length > 0 && !noJump) jumpTo(0);
+      })
+      .catch((err) => {
+        if (token !== hugeToken) return;
+        const msg = (err && err.message) || String(err);
+        matches = [];
+        truncated = false;
+        count.textContent = '查找失败：' + msg;
+        resultsEl.textContent = '';
+        resultsEl.innerHTML = `<div class="find-empty">查找失败：${escapeHtml(msg)}</div>`;
+      });
   }
 
   /** 执行一次查找（同步；程序化入口 setQuery / 内部重算走它，**不经防抖**） */
@@ -304,7 +388,26 @@ export function createFind(getEditor, getTab) {
     patternError = '';
     unsupported = '';
     searchRuns++;
-    // G1：无文档视图（huge / viewer-lg / image / diff）→ **必须在"空 query 提前返回"之前判**。
+    // v0.10.0：huge 视图 = 单文件搜索（异步 IPC），不再走「当前视图不支持」守卫。
+    // 空 query 时也给出 huge 专属提示（不是"输入关键词"的通用文案）。
+    if (tab && !tab.state && tab.kind === 'huge') {
+      hugeMode = true;
+      if (!query) {
+        hugeToken++; // 作废在途请求
+        matches = [];
+        truncated = false;
+        count.textContent = '大文件视图内查找：输入关键词开始搜索（不区分大小写）';
+        renderResults();
+        return;
+      }
+      startHugeSearch(tab, noJump);
+      return;
+    }
+    // 普通标签（或其它无文档视图）：huge 的在途结果一律作废，避免串台
+    const wasHuge = hugeMode;
+    hugeMode = false;
+    if (wasHuge) hugeToken++;
+    // G1：无文档视图（viewer-lg / image / diff）→ **必须在"空 query 提前返回"之前判**。
     // 顺序曾经写反：空 query 先 return，于是「在 huge 视图里按 Ctrl+F」看到的是一句
     // "输入关键词开始搜索"，敲了字才发现 0 命中 —— 正是挂账的那条静默项（真窗口探针抓到的）。
     if (tab && !tab.state) {
@@ -422,6 +525,7 @@ export function createFind(getEditor, getTab) {
   // ---------- 替换（与查找**同口径**：走同一个匹配器；替换文本原样插入，不做分组引用） ----------
   /** 替换当前选中匹配（无选中时替换第一处），替换后跳到下一处 */
   function replaceCurrent() {
+    if (hugeMode) { toast('大文件视图内不支持替换（只读磁盘内容，请用全局替换或先切回普通视图）'); return 0; }
     if (getView().state.readOnly) {
       toast('只读内容不可替换');
       return 0;
@@ -443,6 +547,7 @@ export function createFind(getEditor, getTab) {
    *  **注意**：展示列表可能被 FIND_LIMIT 截断，因此这里**必须重新全量扫描**，
    *  绝不能拿 matches 当全集（否则"全部替换"只换前 500 处，是静默的错误结果）。 */
   function replaceAll() {
+    if (hugeMode) { toast('大文件视图内不支持替换（只读磁盘内容，请用全局替换或先切回普通视图）'); return 0; }
     if (getView().state.readOnly) {
       toast('只读内容不可替换');
       return 0;
@@ -502,10 +607,10 @@ export function createFind(getEditor, getTab) {
     if (Number.isInteger(idx) && idx >= 0 && idx < matches.length) jumpTo(idx);
   });
 
-  /** 当前焦点栏的活动文档没有 CM 文档（huge / viewer-lg / image / diff）→ 需要立刻给出显式提示 */
+  /** 当前焦点栏的活动文档没有 CM 文档（viewer-lg / image / diff）→ 需要立刻给出显式提示 */
   function unsupportedNow() {
     const t = getTab();
-    return !!(t && !t.state);
+    return !!(t && !t.state && t.kind !== 'huge'); // v0.10.0：huge 已支持文件内查找
   }
 
   return {
@@ -539,6 +644,8 @@ export function createFind(getEditor, getTab) {
       current,
       matchLines: matches.slice(0, 5).map((m) => m.line),
       pendingDebounce: !!debounceTimer,
+      huge: hugeMode,     // v0.10.0：结果来自 huge 单文件搜索
+      hugeMs,             // 上次单文件搜索耗时（0 = 未跑过/无 CM 文档）
     }),
     /** 测试面（dev 独有）：临时收紧执行预算 / 展示上限（传 null 恢复默认；返回生效值）。
      *  只影响后续搜索，不改任何常量；正常使用不会走到这里。 */

@@ -715,6 +715,63 @@ async function* walk(dir, opts = {}) {
  *  结果条目的 kind 字段：'name'（文件名命中，line=0）/ 'dir'（目录名命中，line=0）/
  *  缺省 = 内容命中（既有形态，渲染端与替换逻辑零改动兼容）。名字命中与内容命中可并存
  *  （同一文件两条结果，渲染端按文件分组后行级区分展示）。 */
+/** 扫描单个文本文件（目录搜索与「大文件视图内查找」共用同一条路径，保证两者命中口径一致）。
+ *  返回 { skip }（不可扫/空/超限）、{ cancelled }、{ full }（达到 maxResults）、{ ok }。 */
+async function scanFileInto(file, query, q, results, maxResults, isCancelled) {
+  let st;
+  try {
+    st = await fsp.stat(file);
+  } catch {
+    return { skip: true };
+  }
+  if (st.size === 0) return { skip: true };
+  if (st.size > MAX_SEARCH_FILE_MB * 1024 * 1024) {
+    // 1B-4：大文件走流式扫描（v0.9.0 上限 20GB），不再整体跳过
+    if (st.size > MAX_STREAM_FILE_MB * 1024 * 1024) return { skip: true };
+    // v0.9.0：GB 级查询优先多线程分片（5GB 单线程 20s → 多核 ~1s 量级）。
+    // v0.9.1：非 ASCII（中文关键词）也走分片 —— 按行边界切片 + 解码后逐行匹配，语义与串行回退一致。
+    // 分片任何异常都自动回退串行扫描。
+    if (st.size > SHARD_MIN_BYTES) {
+      const pr = ASCII_ONLY.test(String(query))
+        ? await scanStreamParallel(file, query, q, results, maxResults, isCancelled)
+        : await scanStreamParallelDecoded(file, query, q, results, maxResults, isCancelled);
+      if (isCancelled()) return { cancelled: true };
+      if (pr.ok) return pr.full ? { full: true } : { ok: true };
+      if (pr.reason === 'cancelled') return { cancelled: true };
+      // 分片失败：回退串行扫描（功能不受影响，只是慢）
+      if (process.env.MH_SEARCH_DEBUG) console.error('[search] 分片回退串行:', pr.reason || 'unknown');
+    }
+    const full = await scanStream(file, query, q, results, maxResults, isCancelled);
+    if (isCancelled()) return { cancelled: true };
+    return full ? { full: true } : { ok: true };
+  }
+  let content;
+  try {
+    content = await fsp.readFile(file, 'utf8');
+  } catch {
+    return { skip: true };
+  }
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const idx = lines[i].toLowerCase().indexOf(q);
+    if (idx >= 0) {
+      results.push({ file, line: i + 1, text: lines[i], matchIndex: idx });
+      if (results.length >= maxResults) return { full: true }; // 截断（与原逻辑一致）
+    }
+  }
+  return { ok: true };
+}
+
+/** 单文件查找（「大文件视图内 Ctrl+F」的 IPC 后端；与目录搜索共用 scanFileInto，口径一致） */
+async function runFileSearch(id, file, query, maxResults) {
+  const q = String(query).toLowerCase();
+  const isCancelled = () => cancelled || currentId !== id;
+  const results = [];
+  const r = await scanFileInto(file, query, q, results, maxResults, isCancelled);
+  if (r.cancelled) return { cancelled: true };
+  return { results };
+}
+
 async function runSearch(id, dir, query, maxResults) {
   const q = String(query).toLowerCase();
   const isCancelled = () => cancelled || currentId !== id;
@@ -741,51 +798,9 @@ async function runSearch(id, dir, query, maxResults) {
     }
     const ext = path.extname(file).toLowerCase();
     if (!TEXT_EXT.has(ext)) continue;
-    let st;
-    try {
-      st = await fsp.stat(file);
-    } catch {
-      continue;
-    }
-    if (st.size === 0) continue;
-    if (st.size > MAX_SEARCH_FILE_MB * 1024 * 1024) {
-      // 1B-4：大文件走流式扫描（v0.9.0 上限 20GB），不再整体跳过
-      if (st.size > MAX_STREAM_FILE_MB * 1024 * 1024) continue;
-      // v0.9.0：GB 级查询优先多线程分片（5GB 单线程 20s → 多核 ~1s 量级）。
-      // v0.9.1：非 ASCII（中文关键词）也走分片 —— 按行边界切片 + 解码后逐行匹配，语义与串行回退一致。
-      // 分片任何异常都自动回退串行扫描。
-      if (st.size > SHARD_MIN_BYTES) {
-        const pr = ASCII_ONLY.test(String(query))
-          ? await scanStreamParallel(file, query, q, results, maxResults, isCancelled)
-          : await scanStreamParallelDecoded(file, query, q, results, maxResults, isCancelled);
-        if (isCancelled()) return { cancelled: true };
-        if (pr.ok) {
-          if (pr.full) return { results };
-          continue;
-        }
-        if (pr.reason === 'cancelled') return { cancelled: true };
-        // 分片失败：回退串行扫描（功能不受影响，只是慢）
-        if (process.env.MH_SEARCH_DEBUG) console.error('[search] 分片回退串行:', pr.reason || 'unknown');
-      }
-      const full = await scanStream(file, query, q, results, maxResults, isCancelled);
-      if (isCancelled()) return { cancelled: true };
-      if (full) return { results };
-      continue;
-    }
-    let content;
-    try {
-      content = await fsp.readFile(file, 'utf8');
-    } catch {
-      continue;
-    }
-    const lines = content.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      const idx = lines[i].toLowerCase().indexOf(q);
-      if (idx >= 0) {
-        results.push({ file, line: i + 1, text: lines[i], matchIndex: idx });
-        if (results.length >= maxResults) return { results }; // 截断（与原逻辑一致）
-      }
-    }
+    const r = await scanFileInto(file, query, q, results, maxResults, isCancelled);
+    if (r.cancelled) return { cancelled: true };
+    if (r.full) return { results };
   }
   return { results };
 }
@@ -821,6 +836,24 @@ if (process.parentPort && typeof process.parentPort.on === 'function') {
           message: (err && err.message) || String(err),
         });
       });
+  } else if (msg.type === 'search-file') {
+    // v0.10.0：大文件视图内查找（单文件；与目录搜索共用 scanFileInto）
+    currentId = msg.id;
+    cancelled = false;
+    const { id, file, query } = msg;
+    const maxResults = Number.isFinite(msg.maxResults) ? msg.maxResults : 500;
+    if (!file || !query) {
+      process.parentPort.postMessage({ id, type: 'done', results: [] });
+      return;
+    }
+    runFileSearch(id, file, query, maxResults)
+      .then((r) => {
+        if (r.cancelled) process.parentPort.postMessage({ id, type: 'cancelled' });
+        else process.parentPort.postMessage({ id, type: 'done', results: r.results });
+      })
+      .catch((err) => {
+        process.parentPort.postMessage({ id, type: 'error', message: (err && err.message) || String(err) });
+      });
   } else if (msg.type === 'cancel') {
     if (msg.id === currentId) cancelled = true;
   }
@@ -832,6 +865,7 @@ module.exports = {
   scanStream,
   scanStreamParallel,
   scanStreamParallelDecoded,
+  runFileSearch,
   nativeMatchesCI,
   runSearch,
   MAX_STREAM_FILE_MB,

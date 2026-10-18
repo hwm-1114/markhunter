@@ -7968,18 +7968,26 @@ async function runSmoke(win) {
             await p6Sleep(400);
             const noFalse = await p6Eval(`(() => { ${S}.setOptions({ caseSensitive: false, wholeWord: false, regex: false }); ${S}.setQuery('alpha'); const s = ${S}.getState();
               return { timedOut: s.timedOut, shown: s.shown, budget: s.limits.budgetMs, limit: s.limits.limit }; })()`);
-            // ⑩ huge 视图守卫：显式提示（不是静默 0 命中）—— Ctrl+F 一进面板就要看到
-            let hugeGuard = null;
+            // ⑩ huge 视图内查找（v0.10.0）：走单文件搜索 IPC，不再给「当前视图不支持」守卫
+            let hugeFind = null;
             try {
               await p6Eval(`window.__app.editor.setHugeThresholdMB(1)`);
               await p6Effect(`window.__app.editor.openFile(${p6J(P6_SMALLHUGE)})`);
               const hOpen = await p6Wait(`(() => { const t = window.__app.editor.getActiveTab(); return t && t.kind ? { path: t.path, kind: t.kind } : null; })()`, (v) => !!v && v.kind === 'huge', 20000, 250);
-              const typed = await p6Eval(`(() => { ${S}.setQuery('p6'); const s = ${S}.getState();
-                return { kind: ${p6J('')} + (window.__app.editor.getActiveTab().kind || ''), unsupported: s.unsupported, count: s.countText, text: s.resultsText, shown: s.shown }; })()`);
-              // Ctrl+F 一进面板（未输入任何字）也必须已经给出提示
+              // Ctrl+F 空 query：huge 专属提示（不是「不支持」）
               const onFocus = await p6Eval(`(() => { ${S}.setQuery(''); ${S}.focus(); const s = ${S}.getState();
-                return { unsupported: s.unsupported, count: s.countText, text: s.resultsText }; })()`);
-              hugeGuard = { open: hOpen, typed: typed, focus: onFocus };
+                return { unsupported: s.unsupported, huge: s.huge, count: s.countText, text: s.resultsText }; })()`);
+              // 有 query：异步单文件搜索 → 等结果（'small line 999' 每 1000 行一条 = 60 处，首条在第 1000 行）
+              await p6Eval(`(() => { ${S}.setOptions({ caseSensitive: false, wholeWord: false, regex: false }); ${S}.setQuery('small line 999'); return true; })()`);
+              const hit = await p6Wait(`(() => { const s = ${S}.getState(); return { shown: s.shown, count: s.countText, text: s.resultsText, lines: s.matchLines, hugeMs: s.hugeMs, unsupported: s.unsupported, huge: s.huge }; })()`, (v) => !!v && /处匹配/.test(v.count || ''), 30000, 100);
+              // 跳转：视口首行必须就是首个命中行
+              const jumped = await p6Eval(`(() => { const s = ${S}.getState(); const t = window.__app.editor.getActiveTab(); const st = t && t.huge && t.huge.getState(); return { first: st && st.firstLine, want: s.matchLines[0], kind: t && t.kind }; })()`);
+              // 替换必须被拒绝（huge 只读磁盘内容，不能在把视图当 CM 文档改）
+              const rep = await p6Eval(`(() => ({ all: ${S}.replaceAll(), one: ${S}.replaceCurrent() }))()`);
+              // 三个开关在 huge 视图不生效 → 必须显式提示
+              await p6Eval(`(() => { ${S}.setOptions({ regex: true }); return true; })()`);
+              const optText = await p6Wait(`(() => { const s = ${S}.getState(); return /处匹配/.test(s.countText || '') ? s.resultsText : ''; })()`, (v) => !!v && v.length > 0, 30000, 100);
+              hugeFind = { open: hOpen, focus: onFocus, hit, jumped, rep, optText };
             } finally {
               await p6Eval(`window.__app.editor.setHugeThresholdMB(null)`).catch(() => {});
             }
@@ -8023,8 +8031,16 @@ async function runSmoke(win) {
               'budget-timeout-explicit': !!(budget && budget.timedOut === true && budget.budget === 1 && budget.docLines >= 20000 && /执行预算/.test(budget.count || '') && /执行预算/.test(budget.more || '') && budget.shown === 0),
               'budget-no-false-positive': !!(noFalse && noFalse.timedOut === false && noFalse.budget === 120 && noFalse.limit === 500 && noFalse.shown === 4
                 && noFalseBig && noFalseBig.timedOut === false && noFalseBig.truncated === true && noFalseBig.shown === 500 && noFalseBig.docLines >= 20000),
-              'huge-guard-explicit-on-type': !!(hugeGuard && hugeGuard.open && hugeGuard.open.kind === 'huge' && P6_SMALL_BYTES > 1024 * 1024 && hugeGuard.typed.unsupported === 'huge' && /当前视图不支持文件内查找/.test(hugeGuard.typed.count || '') && /当前视图不支持文件内查找/.test(hugeGuard.typed.text || '') && hugeGuard.typed.shown === 0),
-              'huge-guard-explicit-on-ctrl-f': !!(hugeGuard && hugeGuard.focus.unsupported === 'huge' && /当前视图不支持文件内查找/.test(hugeGuard.focus.count || '')),
+              // v0.10.0：huge 视图内查找已支持（不再有「当前视图不支持」守卫）
+              'huge-find-hint-not-unsupported': !!(hugeFind && hugeFind.open && hugeFind.open.kind === 'huge' && P6_SMALL_BYTES > 1024 * 1024
+                && hugeFind.focus.huge === true && hugeFind.focus.unsupported === ''
+                && /大文件视图/.test(hugeFind.focus.count || '') && /输入关键词/.test(hugeFind.focus.text || '')),
+              'huge-find-hits-and-note': !!(hugeFind && hugeFind.hit && hugeFind.hit.huge === true && hugeFind.hit.unsupported === ''
+                && hugeFind.hit.shown === 60 && /60 处匹配/.test(hugeFind.hit.count || '') && /磁盘内容/.test(hugeFind.hit.text || '')),
+              'huge-find-jump-to-line': !!(hugeFind && hugeFind.jumped && hugeFind.jumped.kind === 'huge'
+                && hugeFind.jumped.want === 1000 && hugeFind.jumped.first === 1000),
+              'huge-find-no-replace': !!(hugeFind && hugeFind.rep && hugeFind.rep.all === 0 && hugeFind.rep.one === 0),
+              'huge-find-option-ignored-note': !!(hugeFind && /不生效/.test(hugeFind.optText || '')),
               // 布局：p1 = P6_FIND（4 处）、p0 = P6_FIND2（1 处）→ 期望值与栏一一对应
               'find-follows-focus-pane': !!(focusPane && focusPane.p0.shown === 1 && focusPane.p1.shown === 4
                 && focusPane.p0.focus === 'p0' && focusPane.p1.focus === 'p1'
@@ -8033,7 +8049,7 @@ async function runSmoke(win) {
             };
             return p6Fail(conj, 'def=' + p6J(def) + ' cs=' + p6J(cs) + ' ww=' + p6J(ww) + ' re1=' + p6J(re1) + ' re2=' + p6J(re2) +
               ' bad=' + p6J(bad) + ' tooLong=' + p6J(tooLong) + ' nested=' + p6J(nested) + ' budget=' + p6J(budget) + ' noFalseBig=' + p6J(noFalseBig) + ' noFalse=' + p6J(noFalse) +
-              ' smallBytes=' + p6J(P6_SMALL_BYTES) + ' hugeGuard=' + p6J(hugeGuard) + ' focusPane=' + p6J(focusPane));
+              ' smallBytes=' + p6J(P6_SMALL_BYTES) + ' hugeFind=' + p6J(hugeFind) + ' focusPane=' + p6J(focusPane));
           });
 
           // ==================== 4. findMatchLimit：匹配上限 + 显式截断提示 + 输入防抖 ====================

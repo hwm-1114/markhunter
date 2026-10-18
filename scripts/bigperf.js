@@ -117,6 +117,38 @@ async function run(win) {
           for (let i = 0; i < 200 && (__st() ? __st().lines : 1) <= 1; i++) await __sleep(10); // 等估算行数撑起滚动条
           const rr = __root();
           const base = __st();
+          // ---- 1a2. v0.10.0：索引未覆盖区域的「偏移直读预览」（内容真实、行号估算、行号带 ~）----
+          let prov = null;
+          try {
+            const nP = base.lines;
+            const scaledP = nP * base.lineHeight > 16 * 1024 * 1024;
+            const maxP = Math.max(1, (scaledP ? 16 * 1024 * 1024 : nP * base.lineHeight) - rr.clientHeight);
+            rr.scrollTop = Math.floor(maxP * 0.75); // 75% 处此刻一定还没扫到（5GB 索引约 2s）
+            const tProv = performance.now();
+            let gotProv = -1;
+            for (let i = 0; i < 900; i++) {
+              const s = __st();
+              if (s && s.prov && rr.querySelectorAll('.huge-rows .huge-line:not(.huge-placeholder)').length > 3) {
+                gotProv = Math.round(performance.now() - tProv);
+                break;
+              }
+              await __sleep(10);
+            }
+            const s = __st();
+            const r0 = rr.querySelector('.huge-rows .huge-line');
+            const noEl = r0 && r0.querySelector('.huge-no');
+            const txEl = r0 && r0.querySelector('.huge-text');
+            const stEl = rr.querySelector('.huge-status-text');
+            prov = {
+              ms: gotProv, prov: !!(s && s.prov), firstLine: s && s.firstLine, provFrom: s && s.provFrom,
+              rows: rr.querySelectorAll('.huge-rows .huge-line').length,
+              noText: noEl ? noEl.textContent : null,
+              text: txEl ? txEl.textContent.slice(0, 40) : null,
+              status: stEl ? stEl.textContent.slice(0, 60) : null,
+            };
+            rr.scrollTop = 0;
+            await __sleep(150);
+          } catch (e) { prov = { err: String((e && e.message) || e) }; }
           const isScaled = base.lines * base.lineHeight > 16 * 1024 * 1024;
           const maxScroll = Math.max(1, (isScaled ? 16 * 1024 * 1024 : base.lines * base.lineHeight) - rr.clientHeight);
           const expectLine = (top) => isScaled ? Math.max(1, 1 + Math.round((top / maxScroll) * (base.lines - 1))) : Math.max(1, Math.floor(top / base.lineHeight) + 1);
@@ -138,7 +170,7 @@ async function run(win) {
               await __sleep(10);
             }
             const s3 = __st();
-            during.push({ pct, ms, indexed: s3.indexed, firstLine: s3.firstLine, want });
+            during.push({ pct, ms, indexed: s3.indexed, firstLine: s3.firstLine, want, prov: !!(s3 && s3.prov) });
           }
           rr.scrollTop = 0;
           await __sleep(120);
@@ -151,14 +183,18 @@ async function run(win) {
           await __sleep(200);
           const st = __st();
           return { tOpen: Math.round(tOpen), tFirst: tFirst == null ? -1 : Math.round(tFirst), tIdx: tIdx == null ? -1 : Math.round(tIdx),
-            during, firstText, placeholderSeen, lines, kind: tab && tab.kind, st, heapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : -1 };
+            during, firstText, placeholderSeen, lines, kind: tab && tab.kind, st, prov,
+            heapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : -1 };
         })()`);
         const st0 = opened && opened.st;
         push(F.name + '.openCall', opened && opened.kind === 'huge' ? (opened.tOpen + 'ms') : 'FAIL ' + J(opened && opened.kind));
+        push(F.name + '.provisional', opened && opened.prov && opened.prov.prov === true && opened.prov.rows > 3
+          && /~/.test(opened.prov.noText || '') && (opened.prov.text || '').length > 0 && /估算/.test(opened.prov.status || '') ? 'true' : 'FAIL',
+          JSON.stringify(opened && opened.prov));
         push(F.name + '.firstContent', opened && opened.tFirst >= 0 ? (opened.tFirst + 'ms') : 'FAIL', 'text=' + J(opened && opened.firstText) + ' placeholder=' + !!(opened && opened.placeholderSeen));
         push(F.name + '.indexReady', opened && opened.tIdx >= 0 ? (opened.tIdx + 'ms') : 'FAIL', 'lines=' + (opened && opened.lines));
         push(F.name + '.duringIndex', opened && opened.during && opened.during.every((x) => x.ms >= 0) ? 'true' : 'FAIL',
-          ((opened && opened.during) || []).map((x) => x.pct + '%:' + x.ms + 'ms(first ' + x.firstLine + '/' + x.want + (x.indexed ? ',idx' : '') + ')').join(' '));
+          ((opened && opened.during) || []).map((x) => x.pct + '%:' + x.ms + 'ms(first ' + x.firstLine + '/' + x.want + (x.indexed ? ',idx' : '') + (x.prov ? ',prov' : '') + ')').join(' '));
         push(F.name + '.renderStats', st0 ? ('renders=' + st0.perf.renders + ' max=' + st0.perf.maxRenderMs + 'ms') : 'FAIL',
           'batchMs=' + J(st0 && st0.lastBatch && st0.lastBatch.ms) + ' readTotal=' + (st0 && st0.perf && st0.perf.readMsTotal) + 'ms heapMB=' + (opened && opened.heapMB));
 
