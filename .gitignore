@@ -3,6 +3,8 @@ node_modules/
 dist/
 .reasonix/
 *.log
+# 施工期探针临时目录（布局截图等，不入库）
+.probe/
 
 # 系统文件
 Thumbs.db

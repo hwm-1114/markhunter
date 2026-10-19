@@ -49,7 +49,7 @@ A Windows desktop Markdown / text editor built for large files, multi-window edi
 - 编辑 / 分屏 / 仅预览三模式（Ctrl+B），分隔条可拖拽，mermaid 图渲染，Ctrl+滚轮缩放
 - **数学公式（KaTeX）**：行内 `$...$` / `\(...\)` 与块级 `$$...$$` / `\[...\]`；货币写法（`$5 和 $10`）与代码块内的 `$` 不误判，公式与 mermaid 流程图可同文档混排，56 套明暗主题自动适配
 - **图片与流程图默认原始尺寸**：图片按原始像素 1:1 显示（不压缩画质）、流程图按内容自然宽度渲染（节点文字始终可读），超宽横向滚动，无需双击放大也能看清
-- **仅预览模式下大纲点击跳转**：左侧大纲点击直接滚到预览中对应标题（短暂高亮反馈）；编辑/分屏模式照旧跳编辑器行
+- **仅预览模式下大纲点击跳转**：正文区左侧大纲栏（文件树右侧独立一栏，Ctrl+Shift+O 折叠/展开）点击直接滚到预览中对应标题（短暂高亮反馈）；编辑/分屏模式照旧跳编辑器行
 - **代码块一键复制**：每个代码块右上角常驻大按钮，点击整块进剪贴板（不 hover 也可见）
 - **重命名改扩展名即时生效**：`.txt` 改 `.md` 后语法高亮与预览立即切换（无需重开标签）
 - **树自动定位**：查看文件时左侧目录树自动展开定位；工作目录外的文件显示在「外部文件」分支（v0.7.1 起该分支的目录/文件与侧栏目录**操作完全一致**：新建/复制/粘贴/重命名/删除/拖拽）
@@ -65,6 +65,7 @@ A Windows desktop Markdown / text editor built for large files, multi-window edi
 
 - 文件内查找（Ctrl+F / Ctrl+H）：全部匹配列表、点击跳转、编辑器同步高亮；替换当前 / 全部替换
 - 全局搜索（Ctrl+Shift+F）：按文件分组、点击打开定位；**文件名与目录名也参与匹配**（名字结果点击在左侧目录树直接跳转定位）；结果支持跨文件批量替换（带确认）
+- **两个搜索都在底部面板**：文件内搜索 / 全局搜索是底部面板上并列的页签，不再占用左侧文件树那一栏（Ctrl+F / Ctrl+Shift+F 直达对应页签）
 - **大文件秒搜**：搜索改用**原生字节匹配**（UTF-8 与 ASCII 同一份字节、GBK 正确），跨块边界命中不丢、大小写不敏感一次归并；命中行号由行索引直接算出、点击直达任意位置
 
 **脚本运行（Python / 批处理）**
@@ -135,7 +136,7 @@ cd markhunter
 npm install       # 安装依赖（Electron 走 npmmirror 镜像）
 npm start         # 启动应用
 npm run build     # esbuild 打包渲染进程（改渲染端源码后必须执行）
-npm run smoke     # 端到端冒烟测试（244 项，真实窗口自动化验证；判定用 node scripts/smoke-verify.js）
+npm run smoke     # 端到端冒烟测试（245 项，真实窗口自动化验证；判定用 node scripts/smoke-verify.js）
 npm run bigprobe  # 真实 GB 级大文件实测探针（夹具 F:\mh-bigtest\，缺失自动 SKIP）
 npm run bigperf   # 5GB/10GB 全链路计时探针（夹具由 node scripts/mkbigfile.js 生成；判定 BIGPERF_DONE fails=0）
 npm run release   # 本地打包 NSIS 安装包

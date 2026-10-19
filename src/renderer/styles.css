@@ -32,7 +32,7 @@ body {
 .cm-content,
 .markdown-body,
 .find-results,
-#sidebar-search .gs-results,
+.gs-results,
 .py-output,
 .huge-view .huge-text,
 .tab-name,
@@ -290,7 +290,8 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .tree-empty { color: var(--mh-text-2); font-size: 12.5px; padding: 18px 12px; line-height: 1.7; text-align: center; }
 
 /* ---------- 0.5.0 Phase 5a E2：侧栏分区标题行与折叠态 ----------
-   三个分区（收藏 / 文件树 / 全局搜索）各自可折叠，折叠态写入 settings.sidebarCollapsed。
+   v0.11.0 起左栏只剩「文件树」一个分区（收藏在右栏、大纲在正文区左栏、全局搜索在底部面板）：
+   这里只保留文件树的折叠规则，收藏分区 .fav-block.collapsed 在 favorites/右栏样式内自带。
    折叠 = 只给容器加 .collapsed（display:none 子内容），**树内部渲染与展开态恢复逻辑一行不改**
    （J4 的 expanded 集合与 loadChildren 补载与可见性无关）。 */
 .sect-header {
@@ -309,26 +310,38 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 }
 .sect-header:hover { color: var(--mh-text); }
 .sect-header .sect-caret { flex: none; width: 14px; font-size: 9px; text-align: center; }
-/* 树分区折叠：容器整体让位（flex:1 的空间交给其它分区） */
+/* 树分区折叠：容器整体让位（flex:1 的空间仍归文件树容器自身） */
 .file-tree.collapsed { display: none; }
-/* 搜索分区折叠：只留标题行 */
-#sidebar-search.collapsed { max-height: none; }
-#sidebar-search.collapsed .gs-bar,
-#sidebar-search.collapsed .gs-results,
-#sidebar-search.collapsed .gs-count-row { display: none; }
 
-/* ---------- 0.5.0 Phase 5a B1：大纲 / TOC 分区 ---------- */
-.outline-block {
+/* ---------- v0.11.0：大纲 / TOC 独立栏（正文区左侧，不再与文件树同栏） ----------
+   布局 = 文件树 | 大纲栏 | 编辑区：#outline-rail 是 #workbench 的第一个 flex 子项。
+   可见性由 outline.js 统一控制（#outline-rail 与 #outline-block 的 .hidden 同步；非 Markdown /
+   huge / viewer-lg / image / diff 整体隐藏）。折叠 = 收成 34px 细条（只留 ▶ 标题行，点击标题行
+   或 Ctrl+Shift+O 展开），展开时宽度随笔窗口自适应（clamp 180~280px）。 */
+#outline-rail {
   flex: none;
+  width: clamp(180px, 18vw, 280px);
   display: flex;
   flex-direction: column;
-  max-height: 34%;
-  border-bottom: 1px solid var(--mh-border);
+  min-height: 0;
   background: var(--mh-bg);
+  border-right: 1px solid var(--mh-border);
+}
+#outline-rail.hidden { display: none; }
+#outline-rail.collapsed { width: 34px; }
+#outline-rail.collapsed #outline-header { justify-content: center; padding: 7px 0; gap: 0; }
+#outline-rail.collapsed #outline-title { display: none; }
+#outline-rail.collapsed .sect-caret { width: auto; }
+.outline-block {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: transparent;
 }
 .outline-block.hidden { display: none; }
 .outline-block.collapsed .outline-list { display: none; }
-.outline-list { overflow: auto; padding: 4px 6px 8px; }
+.outline-list { flex: 1; overflow: auto; padding: 4px 6px 8px; }
 .outline-item {
   display: flex;
   align-items: center;
@@ -347,104 +360,33 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .outline-item .ol-text { overflow: hidden; text-overflow: ellipsis; }
 .outline-empty { color: var(--mh-text-2); font-size: 12px; padding: 6px 8px 10px; line-height: 1.6; }
 
-/* 侧栏全局搜索区 */
-#sidebar-search {
+/* ---------- v0.11.0：全局搜索（底部面板页签，从左侧栏迁入） ----------
+   输入行量级与文件内搜索（.find-bar）一致；结果区复用通用 .gs-results / .gs-file / .find-result。 */
+#panel-globalsearch .gs-bar {
   flex: none;
   display: flex;
-  flex-direction: column;
-  max-height: 40%;
-  border-top: 1px solid var(--mh-border);
-  background: var(--mh-bg);
+  align-items: center;
+  gap: 8px;
 }
-#sidebar-search .gs-bar {
-  display: flex;
-  gap: 6px;
-  padding: 8px 10px;
-}
-#sidebar-search .gs-bar + .gs-bar { padding-top: 0; }
-#sidebar-search .gs-bar input {
+#panel-globalsearch .gs-bar input {
   flex: 1;
-  min-width: 0;
-  padding: 6px 10px;
+  min-width: 240px;
+  max-width: min(640px, 46vw);
+  padding: 8px 12px;
   border: 1px solid var(--mh-border);
   border-radius: var(--mh-radius);
-  font-size: 12.5px;
+  font-size: 13.5px;
   outline: none;
-  background: var(--mh-bg-panel);
+  background: var(--mh-bg);
   transition: border-color 0.15s, box-shadow 0.15s;
 }
-#sidebar-search .gs-replace-bar input { font-size: 12.5px; }
-#sidebar-search .gs-bar input:focus {
+#panel-globalsearch .gs-replace-bar input { font-size: 13px; }
+#panel-globalsearch .gs-bar input:focus {
   border-color: var(--mh-accent);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
 }
-#sidebar-search .gs-results {
-  flex: 1;
-  overflow: auto;
-  padding: 0 4px 6px;
-  font-family: var(--mono);
-  font-size: 12px;
-}
-#sidebar-search .gs-count-row {
-  flex: none;
-  padding: 4px 12px 8px;
-}
-#sidebar-search .gs-group { margin-bottom: 6px; }
-#sidebar-search .gs-file {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  font-weight: 600;
-  font-size: 12px;
-  color: var(--mh-text);
-  background: var(--mh-bg);
-  border-radius: 6px 6px 0 0;
-  cursor: pointer;
-  white-space: nowrap;
-}
-#sidebar-search .gs-file:hover { color: var(--mh-accent); }
-#sidebar-search .gs-file .gs-count-badge {
-  margin-left: auto;
-  font-weight: 400;
-  font-size: 11px;
-  color: var(--mh-text-2);
-}
-#sidebar-search .find-result {
-  display: flex;
-  gap: 8px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  cursor: pointer;
-  align-items: baseline;
-}
-#sidebar-search .find-result:hover { background: var(--mh-bg-hover); }
-#sidebar-search .find-result .r-line {
-  color: var(--mh-accent);
-  flex: none;
-  min-width: 36px;
-  text-align: right;
-  font-size: 11px;
-}
-#sidebar-search .find-result .r-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--mh-text);
-  font-size: 11.5px;
-}
-#sidebar-search .find-result .r-text mark {
-  background: #ffe08a;
-  color: #26303e; /* 高亮黄底固定深色字：明/暗主题下均清晰可读 */
-  border-radius: 2px;
-  padding: 0 1px;
-}
-#sidebar-search .find-empty {
-  color: var(--mh-text-2);
-  padding: 12px;
-  text-align: center;
-  font-size: 12px;
-}
+#panel-globalsearch .gs-count-row { flex: none; }
+#panel-globalsearch .gs-group { margin-bottom: 6px; }
 
 .tree-node { display: flex; align-items: center; gap: 5px; padding: 3.5px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .tree-node:hover { background: var(--mh-bg-hover); }
@@ -503,8 +445,8 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   background: var(--mh-accent-soft);
 }
 
-/* 编辑区 */
-#workbench { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* 编辑区（v0.11.0：正文区改成横向三列中的「编辑列」—— 左侧 #outline-rail 大纲栏 + #editor-panes） */
+#workbench { flex: 1; display: flex; flex-direction: row; min-width: 0; min-height: 0; }
 
 /* ---------- 0.5.0 Phase 2：左右双栏容器（硬上限 2 栏） ----------
    #editor-panes 是各栏的 flex 行；每栏 .pane 是「标签栏 + 编辑体」的纵向列。
@@ -1635,7 +1577,8 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   background: color-mix(in srgb, var(--mh-bg-panel) 76%, transparent);
   backdrop-filter: blur(12px);
 }
-[data-theme^="fx-"] #sidebar {
+[data-theme^="fx-"] #sidebar,
+[data-theme^="fx-"] #outline-rail {
   background: color-mix(in srgb, var(--mh-bg-panel) 70%, transparent);
   backdrop-filter: blur(12px);
 }

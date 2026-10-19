@@ -568,14 +568,22 @@ const RENDERER_TEST = `
     return active && active.id !== 'gs-input' ? true : 'active=' + (active && active.id);
   });
 
-  // ---- 侧栏操作按钮位置 + 底部无全局搜索 tab ----
+  // ---- 侧栏操作按钮位置 + 全局搜索在底部面板页签（v0.11.0 布局迁移） ----
   await step('sidebarButtons', async () => {
     const inSidebar = ['btn-new-file', 'btn-new-dir', 'btn-refresh'].every((id) => {
       const el = document.getElementById(id);
       return el && !!el.closest('#sidebar');
     });
-    const noGsTab = !document.querySelector('.ptab[data-panel="globalsearch"]');
-    return inSidebar && noGsTab ? true : 'side=' + inSidebar + ',noTab=' + noGsTab;
+    // v0.11.0（用户需求反转）：全局搜索从左侧栏迁入**底部面板页签**，与「文件内搜索」「运行」并列；
+    //   左侧栏只剩文件树一个分区（搜索标题行/搜索容器都不应再存在）。
+    const gsInBottom = !!document.querySelector('#bottom-panel .ptab[data-panel="globalsearch"]')
+      && !!document.querySelector('#bottom-panel #gs-input');
+    const noSearchInSidebar = !document.getElementById('search-header')
+      && !document.getElementById('sidebar-search')
+      && !document.querySelector('#sidebar #gs-input');
+    return inSidebar && gsInBottom && noSearchInSidebar
+      ? true
+      : 'side=' + inSidebar + ',gsBottom=' + gsInBottom + ',noSidebarSearch=' + noSearchInSidebar;
   });
 
   // ---- user-select 布局：编辑器与预览区域均可选中 ----
@@ -5212,7 +5220,14 @@ async function runSmoke(win) {
             const refused = !!neg && !neg.err && (neg.toasts || []).some((x) => String(x).indexOf('大文件视图不支持同文件多视图') >= 0);
             const hugeNeg = refused && neg.kind === 'huge' && neg.homes === 1 && neg.views === 1 && neg.p1Docs === 0 && neg.paneCount === 2 && neg.focus === 'p0';
             const twoPanes = one.rootCount === 1 && s.rootCount === 2 && s.divider === true;
-            const twoCm = s.cmCount === 2 && s.cmH.every((h) => h > 100) && s.cmTextLen.every((n) => n > 0) && s.cmTextLen[0] === s.cmTextLen[1];
+            // v0.11.0：正文区新增大纲栏（#outline-rail，约 256px）后两栏可用宽度下降（550 → ~419px）：
+            //   若某一栏处于「预览分屏」模式（CM 只占栏宽一半 → 约 208px），长行会换行，而 CM 的
+            //   textContent 只含**视口内已渲染行**、换行又会改变行高与视口覆盖行数 ⇒ 两栏 textContent
+            //   长度天然可能不等。这条断言原本就被 docs/开发计划-多视图-Phase3-施工简报.md:872 标为
+            //   弱验证项（"若某天两栏宽度差导致换行差异，这条会先红"）。改为判"两栏各有一个真实渲染出
+            //   内容的 CM"（高度 >100、文本长度 >0）；"同一文档"由下面的 docSame（两视图 state.doc 逐字符
+            //   相等）证明 —— 比 DOM 渲染文本等长更强、且与视口布局无关。
+            const twoCm = s.cmCount === 2 && s.cmH.every((h) => h > 100) && s.cmTextLen.every((n) => n > 0);
             const sameFile = s.layout.panes.length === 2 && s.layout.panes[0].path === SF_A && s.layout.panes[1].path === SF_A && s.docSame === true;
             const diffViews = s.viewSame === false;
             const indepScroll = sc.a > 0 && sc.b0 === 0 && s2.scrollTops[0] > 100 && Math.abs(s2.scrollTops[1]) <= 2;
@@ -7009,7 +7024,15 @@ async function runSmoke(win) {
               const s = window.__app.outline.getState();
               const names = Array.from(document.querySelectorAll('#outline-list .outline-item .ol-text')).map((n) => n.textContent);
               const lines = Array.from(document.querySelectorAll('#outline-list .outline-item')).map((n) => Number(n.dataset.line));
-              return { state: s, names: names, lines: lines, blockHidden: document.getElementById('outline-block').classList.contains('hidden') };
+              // v0.11.0：大纲栏在正文区左栏（#workbench 内、文件树右侧、编辑区左侧）—— 几何事实
+              const rail = document.getElementById('outline-rail');
+              const rr = rail.getBoundingClientRect();
+              const er = document.getElementById('editor-panes').getBoundingClientRect();
+              const sr = document.getElementById('sidebar').getBoundingClientRect();
+              return { state: s, names: names, lines: lines, blockHidden: document.getElementById('outline-block').classList.contains('hidden'),
+                railInWorkbench: document.getElementById('workbench').contains(rail),
+                railNotInSidebar: !document.getElementById('sidebar').contains(rail),
+                railRightOfTree: rr.left >= sr.right - 1, railLeftOfEditor: rr.right <= er.left + 1, railW: Math.round(rr.width) };
             })()`);
             // 点击「二级 B」→ 光标跳到第 17 行（真 DOM 点击）
             const click = await p5Eval(`(() => {
@@ -7035,7 +7058,8 @@ async function runSmoke(win) {
             // 非 markdown：整体隐藏（连列表都要清空）
             const txt = await p5Eval(`(async () => {
               await window.__app.editor.openFile(${p5J(P5_TXT)});
-              return { state: window.__app.outline.getState(), hiddenClass: document.getElementById('outline-block').classList.contains('hidden'), rows: document.querySelectorAll('#outline-list .outline-item').length };
+              return { state: window.__app.outline.getState(), hiddenClass: document.getElementById('outline-block').classList.contains('hidden'), rows: document.querySelectorAll('#outline-list .outline-item').length,
+                railHidden: document.getElementById('outline-rail').classList.contains('hidden'), railW: Math.round(document.getElementById('outline-rail').getBoundingClientRect().width) };
             })()`);
             // 类型门控（与 UI 同源的纯函数）：huge / viewer-lg / image / diff / 非 md 一律 false
             const rules = await p5Eval(`(() => { const o = window.__app.outline; return {
@@ -7062,17 +7086,19 @@ async function runSmoke(win) {
             })()`);
             const conj = {
               'md-visible': !!(md && md.state.hidden === false && md.blockHidden === false),
+              // v0.11.0：大纲栏位于正文区（#workbench）左栏 —— 文件树右侧、编辑区左侧，且宽度 >100px
+              'outline-rail-in-content-area': !!(md && md.railInWorkbench === true && md.railNotInSidebar === true && md.railRightOfTree === true && md.railLeftOfEditor === true && md.railW > 100),
               'four-headings': !!(md && md.state.rendered === 4 && md.names.length === 4),
               'fence-and-indent-skipped': !!(md && md.names.indexOf('不是标题（在代码块里）') < 0 && rules && Array.isArray(rules.fence) && rules.fence.length === 1 && rules.fence[0] === '真标题'),
               'line-numbers-correct': !!(md && md.lines.join(',') === '1,5,9,17'),
               'click-jumps': !!(click && click.clicked === true && click.line === 17 && click.state.current === '二级 B'),
               'cursor-follows': !!(follow && follow.current === '二级 A' && follow.currentLine === 5),
               'cursor-follows-second': !!(followB && followB.current === '二级 B' && followB.currentLine === 17),
-              'txt-hidden': !!(txt && txt.state.hidden === true && txt.hiddenClass === true && txt.rows === 0),
+              'txt-hidden': !!(txt && txt.state.hidden === true && txt.hiddenClass === true && txt.rows === 0 && txt.railHidden === true && txt.railW === 0),
               'type-rules': !!(rules && rules.md === true && rules.mdChunked === true && rules.mdHuge === false && rules.mdViewer === false && rules.mdImage === false && rules.mdDiff === false && rules.txt === false),
               'two-pane-follows-focus': !!(twoPane && twoPane.inP1.tab === 'p5-outline2.md' && twoPane.backP0.tab === 'p5-outline.md' && twoPane.againP1.tab === 'p5-outline2.md' && twoPane.backP0.count === 4),
             };
-            return p5Fail(conj, 'md=' + p5J(md && { hidden: md.state.hidden, rendered: md.state.rendered, names: md.names, lines: md.lines }) +
+            return p5Fail(conj, 'md=' + p5J(md && { hidden: md.state.hidden, rendered: md.state.rendered, names: md.names, lines: md.lines, railW: md.railW, inWb: md.railInWorkbench, leftEditor: md.railLeftOfEditor }) +
               ' click=' + p5J(click && { line: click.line, current: click.state.current }) +
               ' follow=' + p5J({ a: follow && follow.current, b: followB && followB.current }) +
               ' txt=' + p5J(txt && { hidden: txt.state.hidden, rows: txt.rows }) + ' rules=' + p5J(rules) + ' twoPane=' + p5J(twoPane));
@@ -7232,6 +7258,24 @@ async function runSmoke(win) {
               const body = document.getElementById('panel-find');
               return { cls: panel.classList.contains('collapsed'), h: Math.round(panel.getBoundingClientRect().height), bodyH: body.offsetHeight };
             })()`);
+            // ②b v0.11.0：第三个页签「全局搜索」—— 点击后只有 #panel-globalsearch 可见，
+            //    输入框就在底部面板内部（y 坐标落在面板矩形内），随后切回 find 页签沿用旧口径。
+            const gsTab = await p5Eval(`(() => {
+              const btn = document.querySelector('.ptab[data-panel="globalsearch"]');
+              if (!btn) return { tab: false };
+              btn.click();
+              const act = document.querySelector('.ptab.active');
+              const body = document.getElementById('panel-globalsearch');
+              const findBody = document.getElementById('panel-find');
+              const input = document.getElementById('gs-input');
+              const ir = input.getBoundingClientRect();
+              const pr = document.getElementById('bottom-panel').getBoundingClientRect();
+              return { tab: true, active: act ? act.dataset.panel : null,
+                bodyH: body.offsetHeight, findHidden: findBody.classList.contains('hidden'),
+                inputH: input.offsetHeight, inputInBottom: !!document.querySelector('#bottom-panel #gs-input'),
+                inputInsidePanel: ir.top >= pr.top - 1 && ir.bottom <= pr.bottom + 1 };
+            })()`);
+            await p5Eval(`(() => { document.querySelector('.ptab[data-panel="find"]').click(); return true; })()`);
             // ③ 最大化 / 还原（点标题栏 ⛶）
             const max = await p5Eval(`(() => {
               const panel = document.getElementById('bottom-panel');
@@ -7276,6 +7320,9 @@ async function runSmoke(win) {
               'collapse-hides-body': !!(collapsed && collapsed.cls === true && collapsed.bodyH === 0 && collapsed.bodyDisplay === 'none'),
               'collapsed-keeps-dom': !!(collapsed && collapsed.pyInDom === true),
               'ptab-click-expands': !!(expanded && expanded.cls === false && expanded.bodyH > 100),
+              // v0.11.0：全局搜索页签（底部面板承载跨文件搜索）
+              'gs-tab-switches': !!(gsTab && gsTab.tab === true && gsTab.active === 'globalsearch' && gsTab.bodyH > 100 && gsTab.findHidden === true),
+              'gs-input-in-panel': !!(gsTab && gsTab.inputH > 0 && gsTab.inputInBottom === true && gsTab.inputInsidePanel === true),
               'maximize-grows': !!(max && max.maxed.cls === true && max.maxed.h > max.before + 100),
               'restore-shrinks': !!(max && max.after.cls === false && Math.abs(max.after.h - max.before) <= 8),
               'close-button-collapses': !!(closeBtn && closeBtn.collapsed === true),
@@ -7284,11 +7331,15 @@ async function runSmoke(win) {
               'legacy-py-output-while-collapsed': !!(legacy && legacy.pyText === 'PY_PROBE'),
             };
             return p5Fail(conj, 'boot=' + p5J(boot) + ' DEF=' + p5J(DEF) + ' collapsed=' + p5J(collapsed) + ' expanded=' + p5J(expanded) +
+              ' gsTab=' + p5J(gsTab) +
               ' max=' + p5J(max) + ' closeBtn=' + p5J(closeBtn && { collapsed: closeBtn.collapsed }) + ' esc=' + p5J(escState && { collapsed: escState.collapsed }) +
               ' legacy=' + p5J(legacy && { rows: legacy.rows, count: legacy.count, collapsed: legacy.collapsed }));
           });
 
-          // ---------------- 6. sidebarCollapse：侧栏三分区折叠 + 记忆（不破坏树的展开态） ----------------
+          // ---------------- 6. sidebarCollapse：侧栏两分区折叠 + 记忆（v0.11.0：左栏只剩文件树） ----------------
+          //    v0.11.0 布局迁移：全局搜索 → 底部面板页签、大纲 → 正文区左栏，左侧栏只剩「文件树」；
+          //    收藏分区在右栏（fav 键为历史键名保留）。本用例覆盖 tree/fav 两分区折叠与记忆，
+          //    并正向断言「搜索标题行 / 搜索容器已不在侧栏」（旧版断言的"三分区"口径随需求反转）。
           await p5Case('sidebarCollapse', async () => {
             await p5Reset();
             // 先让树里出现一个可展开的目录（p5-tree），并保证它是收起的
@@ -7296,7 +7347,9 @@ async function runSmoke(win) {
             await p5Sleep(400);
             const heads = await p5Eval(`(() => ({
               fav: !!document.getElementById('fav-header'), tree: !!document.getElementById('tree-header'),
-              search: !!document.getElementById('search-header'), caretTree: (document.getElementById('tree-caret') || {}).textContent,
+              searchHeaderGone: !document.getElementById('search-header'),
+              searchSectionGone: !document.getElementById('sidebar-search'),
+              caretTree: (document.getElementById('tree-caret') || {}).textContent,
             }))()`);
             // 展开 p5-tree 目录（真点击树节点）→ 记下子行数。
             // ⚠️ 树的行与它的子容器是**兄弟节点**（makeRow 返回 {row, children}，render/loadChildren
@@ -7342,34 +7395,23 @@ async function runSmoke(win) {
             })()`);
             await p5Sleep(250);
             const favSaved = await p5Eval(`window.api.getSettings().then((s) => s.sidebarCollapsed)`);
-            // ④ 搜索分区折叠：标题行仍在，输入区与结果区隐藏。
-            //    **折叠前先取一次快照** —— "各分区互不影响"只能靠前后差集证明（此刻 fav 仍是
-            //    第③步折叠后的 true，早先写成"期望 fav=false"是把用例自身的步骤记错了）。
-            const searchOff = await p5Eval(`(() => {
-              const before = window.__app.sidebarSections.getState();
-              document.getElementById('search-header').click();
-              const s = document.getElementById('sidebar-search');
-              const bar = s.querySelector('.gs-bar');
-              return { before: before, cls: s.classList.contains('collapsed'), barH: bar.offsetHeight, headDisplay: getComputedStyle(document.getElementById('search-header')).display,
-                state: window.__app.sidebarSections.getState() };
-            })()`);
-            // ⑤ 三分区互不影响：折叠 search 只翻 search 一位，fav/tree 的**折叠态与其 DOM 类原样不动**
+            // ④ 两分区互不影响（差集口径）：此刻 tree 已展开、fav 已折叠 → 记忆状态与 DOM 类必须一致。
+            //    （v0.11.0 前这里还测 search 分区；搜索分区已迁出左栏，改由 layoutDock 断言其新位置。）
             const indep = await p5Eval(`(() => {
               const s = window.__app.sidebarSections.getState();
               return { s: s,
                 treeCls: document.getElementById('file-tree').classList.contains('collapsed'),
-                favCls: document.getElementById('fav-block').classList.contains('collapsed'),
-                searchCls: document.getElementById('sidebar-search').classList.contains('collapsed') };
+                favCls: document.getElementById('fav-block').classList.contains('collapsed') };
             })()`);
-            // 收尾：三分区复位为全展开（settings 也复位）
+            // 收尾：两分区复位为全展开（settings 也复位；旧版遗留的 search 键应被 normalizeCollapsed 丢弃）
             await p5Eval(`window.__app.sidebarSections.set({ fav: false, tree: false, search: false })`);
             await p5Sleep(250);
             const reset = await p5Eval(`(async () => {
               const s = await window.api.getSettings();
-              return { mem: s.sidebarCollapsed, treeCls: document.getElementById('file-tree').classList.contains('collapsed'), searchCls: document.getElementById('sidebar-search').classList.contains('collapsed'), favCls: document.getElementById('fav-block').classList.contains('collapsed') };
+              return { mem: s.sidebarCollapsed, treeCls: document.getElementById('file-tree').classList.contains('collapsed'), favCls: document.getElementById('fav-block').classList.contains('collapsed') };
             })()`);
             const conj = {
-              'three-headers': !!(heads && heads.fav && heads.tree && heads.search),
+              'two-sections': !!(heads && heads.fav && heads.tree && heads.searchHeaderGone === true && heads.searchSectionGone === true),
               'dir-expanded-fixture': !!(expandDir && expandDir.found === true && expandDir.kids === 2),
               'tree-collapse-hides': !!(treeOff && treeOff.cls === true && treeOff.h === 0 && treeOff.state.tree === true),
               'tree-collapse-persisted': !!(treeSaved && treeSaved.tree === true),
@@ -7377,20 +7419,93 @@ async function runSmoke(win) {
               'tree-expand-state-kept': !!(treeOn && treeOn.kids === 2 && treeOn.icon === '📂'),
               'fav-collapse': !!(favOff && favOff.cls === true && favOff.listH === 0 && favOff.state.fav === true),
               'fav-collapse-persisted': !!(favSaved && favSaved.fav === true),
-              'search-collapse': !!(searchOff && searchOff.cls === true && searchOff.barH === 0 && searchOff.headDisplay !== 'none'),
-              // 独立性判据（差集口径）：折叠前后**只有 search 一位翻转**，
-              // fav（第③步已折叠）/tree（第②步已展开）的折叠态与 DOM 类都不变。
-              'sections-independent': !!(searchOff && searchOff.before && indep
-                && searchOff.before.search === false && searchOff.before.fav === true && searchOff.before.tree === false
-                && indep.s.search === true && indep.s.fav === searchOff.before.fav && indep.s.tree === searchOff.before.tree
-                && indep.favCls === true && indep.treeCls === false && indep.searchCls === true),
-              'reset-all-expanded': !!(reset && reset.mem && reset.mem.tree === false && reset.mem.fav === false && reset.mem.search === false && reset.treeCls === false && reset.searchCls === false && reset.favCls === false),
+              'sections-independent': !!(indep && indep.s.tree === false && indep.s.fav === true && indep.treeCls === false && indep.favCls === true),
+              'reset-all-expanded': !!(reset && reset.mem && reset.mem.tree === false && reset.mem.fav === false && reset.mem.search === undefined && reset.treeCls === false && reset.favCls === false),
             };
             return p5Fail(conj, 'heads=' + p5J(heads) + ' expandDir=' + p5J(expandDir) + ' treeOff=' + p5J(treeOff && { cls: treeOff.cls, h: treeOff.h, st: treeOff.state }) +
               ' treeSaved=' + p5J(treeSaved) + ' treeOn=' + p5J(treeOn && { cls: treeOn.cls, h: treeOn.h, kids: treeOn.kids, icon: treeOn.icon }) +
               ' favOff=' + p5J(favOff && { cls: favOff.cls, listH: favOff.listH }) + ' favSaved=' + p5J(favSaved) +
-              ' searchOff=' + p5J(searchOff && { cls: searchOff.cls, barH: searchOff.barH, head: searchOff.headDisplay }) +
               ' indep=' + p5J(indep) + ' reset=' + p5J(reset));
+          });
+
+          // ---------------- 6b. layoutDock：v0.11.0 布局迁移（大纲在正文区左栏 / 全局搜索在底部面板） ----------------
+          //    用户需求：① 文件内搜索与全局搜索都放最下方；② Markdown 大纲不与文件树同栏，放到正文区
+          //    （文件树右边一栏 → 正文左侧独立栏）。断言口径 = 真实窗口几何事实（getBoundingClientRect）
+          //    + 快捷键真键盘事件（Ctrl+Shift+O / Ctrl+Shift+F）。
+          await p5Case('layoutDock', async () => {
+            await p5Reset();
+            await p5Effect(`window.__app.editor.openFile(${p5J(P5_OUTLINE)})`);
+            await p5Sleep(500);
+            const md = await p5Eval(`(() => {
+              const rail = document.getElementById('outline-rail');
+              const ep = document.getElementById('editor-panes');
+              const side = document.getElementById('sidebar');
+              const wb = document.getElementById('workbench');
+              const rr = rail.getBoundingClientRect();
+              const er = ep.getBoundingClientRect();
+              const sr = side.getBoundingClientRect();
+              return {
+                railInWorkbench: !!(rail && wb && wb.contains(rail)),
+                railNotInSidebar: !!(rail && side && !side.contains(rail)),
+                railRightOfTree: rr.left >= sr.right - 1,
+                railLeftOfEditor: rr.right <= er.left + 1,
+                railVisible: !rail.classList.contains('hidden'),
+                railW: Math.round(rr.width),
+                items: document.querySelectorAll('#outline-list .outline-item').length,
+                state: window.__app.outline.getState(),
+              };
+            })()`);
+            // Ctrl+Shift+O：折叠（收成细条、列表隐藏）→ 再按一次展开（宽度恢复、列表可见）
+            const ctrlShiftO = `(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'O', code: 'KeyO', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); return true; })()`;
+            await p5Eval(ctrlShiftO);
+            await p5Sleep(350);
+            const collapsed = await p5Eval(`(() => { const r = document.getElementById('outline-rail'); return { w: Math.round(r.getBoundingClientRect().width), cls: r.classList.contains('collapsed'), listH: document.getElementById('outline-list').offsetHeight, state: window.__app.outline.getState() }; })()`);
+            await p5Eval(ctrlShiftO);
+            await p5Sleep(350);
+            const expanded = await p5Eval(`(() => { const r = document.getElementById('outline-rail'); return { w: Math.round(r.getBoundingClientRect().width), cls: r.classList.contains('collapsed'), listH: document.getElementById('outline-list').offsetHeight }; })()`);
+            // 非 markdown：大纲栏整体隐藏（rail 与 block 同步 .hidden、实测宽度 0 —— 不残留空白列）
+            const txt = await p5Eval(`(async () => {
+              await window.__app.editor.openFile(${p5J(P5_TXT)});
+              await new Promise((r) => setTimeout(r, 400));
+              const rail = document.getElementById('outline-rail');
+              return { railHidden: rail.classList.contains('hidden'), railW: Math.round(rail.getBoundingClientRect().width), blockHidden: document.getElementById('outline-block').classList.contains('hidden') };
+            })()`);
+            // 底部面板：默认折叠 → Ctrl+Shift+F 切到「全局搜索」页签并聚焦输入框；
+            // 页签与输入框都在 #bottom-panel 内（输入框矩形落在面板矩形内），侧栏不再有搜索输入。
+            const gs = await p5Eval(`(async () => {
+              window.__app.bottomPanel.collapse();
+              await new Promise((r) => setTimeout(r, 150));
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F', code: 'KeyF', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+              await new Promise((r) => setTimeout(r, 350));
+              const st = window.__app.bottomPanel.getState();
+              const input = document.getElementById('gs-input');
+              const panel = document.getElementById('bottom-panel');
+              const ir = input.getBoundingClientRect();
+              const pr = panel.getBoundingClientRect();
+              return { state: st, tab: !!document.querySelector('#bottom-panel .ptab[data-panel="globalsearch"]'),
+                inputInPanel: !!document.querySelector('#bottom-panel #gs-input'),
+                sidebarHasGs: !!document.querySelector('#sidebar #gs-input'),
+                inputVisible: input.offsetHeight > 0, focused: document.activeElement === input,
+                inputInsidePanel: ir.top >= pr.top - 1 && ir.bottom <= pr.bottom + 1,
+                activeBodyVisible: document.getElementById('panel-globalsearch').offsetHeight > 0,
+                findHidden: document.getElementById('panel-find').classList.contains('hidden') };
+            })()`);
+            // 收尾：切回 find 页签 + 折叠面板（避免影响后续用例）
+            await p5Eval(`(() => { document.querySelector('.ptab[data-panel="find"]').click(); window.__app.bottomPanel.collapse(); return true; })()`);
+            const conj = {
+              'rail-in-workbench': !!(md && md.railInWorkbench === true && md.railNotInSidebar === true),
+              'rail-between-tree-and-editor': !!(md && md.railRightOfTree === true && md.railLeftOfEditor === true && md.railW > 100),
+              'rail-shows-markdown-headings': !!(md && md.railVisible === true && md.items === 4 && md.state && md.state.railHidden === false),
+              'outline-collapse-narrows': !!(collapsed && collapsed.cls === true && collapsed.w <= 40 && collapsed.listH === 0 && collapsed.state.collapsed === true),
+              'outline-expand-restores': !!(expanded && expanded.cls === false && expanded.w > 100 && expanded.listH > 0),
+              'rail-hidden-for-non-md': !!(txt && txt.railHidden === true && txt.railW === 0 && txt.blockHidden === true),
+              'gs-tab-in-bottom-panel': !!(gs && gs.tab === true && gs.inputInPanel === true && gs.sidebarHasGs === false),
+              'ctrl-shift-f-opens-gs-tab': !!(gs && gs.state && gs.state.collapsed === false && gs.state.active === 'globalsearch' && gs.activeBodyVisible === true && gs.findHidden === true),
+              'gs-input-focused-and-visible': !!(gs && gs.inputVisible === true && gs.focused === true && gs.inputInsidePanel === true),
+            };
+            return p5Fail(conj, 'md=' + p5J(md && { inWb: md.railInWorkbench, notSide: md.railNotInSidebar, w: md.railW, items: md.items, st: md.state }) +
+              ' collapse=' + p5J(collapsed && { w: collapsed.w, cls: collapsed.cls, listH: collapsed.listH }) +
+              ' expand=' + p5J(expanded) + ' txt=' + p5J(txt) + ' gs=' + p5J(gs && { tab: gs.tab, st: gs.state, vis: gs.inputVisible, focus: gs.focused, inPanel: gs.inputInsidePanel }));
           });
 
           // ---------------- 7. helpPanel：F1 / Ctrl+/ 快捷键面板 + 键位单一数据源 ----------------
@@ -7477,7 +7592,7 @@ async function runSmoke(win) {
             try { window.__app.editor.hideTabsHud(); } catch (e) {}
             try { document.getElementById('modal-mask').classList.add('hidden'); } catch (e) {}
             try { window.__app.bottomPanel.collapse(); } catch (e) {}
-            try { window.__app.sidebarSections.set({ fav: false, tree: false, search: false }); } catch (e) {}
+            try { window.__app.sidebarSections.set({ fav: false, tree: false }); } catch (e) {}
             try { await window.api.setSettings({ editorFontSize: 13.5, editorLineHeight: 1.65, previewFontSize: 14.5 }); } catch (e) {}
             try { const e2 = window.__app.editor; if (e2.getPaneCount() > 1) e2.mergePanes(); e2.closeAll(); } catch (e) {}
             return true;

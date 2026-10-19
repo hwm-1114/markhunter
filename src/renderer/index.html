@@ -53,7 +53,9 @@
         <button id="btn-refresh" class="tbtn" title="刷新目录树">🔄 刷新</button>
       </div>
       <!-- 收藏目录分区已整体搬入右侧收藏栏 #fav-rail（见 #workbench 之后；所有 ID 原样保留，
-           favorites.js 与 fav* 冒烟用例按 ID 取值零改动），左栏剩 文件树 / 全局搜索 两分区 -->
+           favorites.js 与 fav* 冒烟用例按 ID 取值零改动）。
+           v0.11.0 起左栏只剩「文件树」一个分区：大纲迁入正文区左栏（#outline-rail），
+           全局搜索迁入底部面板页签（#panel-globalsearch）—— 两者都不再与文件树同栏。 -->
       <!-- 0.5.0 Phase 5a E2：树分区标题行（可折叠 + 记忆；折叠只加 #file-tree.collapsed，
            不动树内部任何渲染/展开态逻辑 —— J4 的展开态恢复不受影响） -->
       <div id="tree-header" class="sect-header" data-sect="tree" title="点击折叠/展开">
@@ -63,37 +65,26 @@
       <div id="file-tree" class="file-tree">
         <div class="tree-empty">点击「选择目录」打开一个本地文件夹</div>
       </div>
-      <!-- 0.5.0 Phase 5a B1：大纲 / TOC 分区（非 Markdown / 大文件查看器视图整体隐藏，见 outline.js） -->
-      <div id="outline-block" class="outline-block collapsed hidden">
-        <div id="outline-header" class="sect-header" data-sect="outline" title="点击折叠/展开">
-          <span class="sect-caret" id="outline-caret">▼</span>
-          <span id="outline-title">🧭 大纲</span>
-        </div>
-        <div id="outline-list" class="outline-list"></div>
-      </div>
-      <div id="tree-search-divider" class="resize-divider h"></div>
-      <!-- 全局搜索（左侧栏展示） -->
-      <div id="sidebar-search">
-        <div id="search-header" class="sect-header" data-sect="search" title="点击折叠/展开">
-          <span class="sect-caret" id="search-caret">▼</span>
-          <span>🔍 全局搜索</span>
-        </div>
-        <div class="gs-bar">
-          <input id="gs-input" type="text" placeholder="全局搜索（Ctrl+Shift+F）…" />
-          <button id="btn-gs-go" class="tbtn">搜索</button>
-        </div>
-        <div class="gs-bar gs-replace-bar">
-          <input id="gs-replace-input" type="text" placeholder="替换为…（对结果文件的全部匹配）" />
-          <button id="btn-gs-replace-all" class="tbtn small danger" title="在当前搜索结果涉及的文件中批量替换">全部替换</button>
-        </div>
-        <div id="gs-results" class="gs-results"></div>
-        <div class="gs-count-row"><span id="gs-count" class="find-count"></span></div>
-      </div>
     </aside>
 
     <div id="sidebar-divider" class="resize-divider v"></div>
 
     <section id="workbench">
+      <!-- v0.11.0：Markdown 大纲（导航栏）从左侧栏迁入**正文区左栏** ——
+           布局 = 文件树 | 大纲栏 | 编辑区（大纲不再和文件树同一栏）。
+           可见性 / 类型门控仍由 outline.js 统一控制（非 Markdown / huge / 查看器整体隐藏；
+           #outline-rail 与 #outline-block 的 .hidden 同步）；折叠 = 收成 34px 细条（Ctrl+Shift+O）。
+           所有既有 ID（#outline-block/#outline-header/#outline-caret/#outline-title/#outline-list）
+           原样保留，outline.js 与 outlinePanel 用例的取值口径不变。 -->
+      <aside id="outline-rail" class="outline-rail hidden">
+        <div id="outline-block" class="outline-block">
+          <div id="outline-header" class="sect-header" data-sect="outline" title="点击折叠/展开">
+            <span class="sect-caret" id="outline-caret">▼</span>
+            <span id="outline-title">🧭 大纲</span>
+          </div>
+          <div id="outline-list" class="outline-list"></div>
+        </div>
+      </aside>
       <!-- 0.5.0 多视图 Phase 2：编辑区改为「栏容器」，各栏（.pane）由 tabs.js 的 buildPaneDom 模板生成。
            · p0 沿用历史 ID（#tabs / #editor-host / #image-host / #diff-host /
              #split-divider / #preview-host / #preview-content / #zoom-badge / #editor-empty）——
@@ -131,6 +122,8 @@
   <footer id="bottom-panel">
     <div class="panel-tabs">
       <button class="ptab" data-panel="find">文件内搜索</button>
+      <!-- v0.11.0：全局搜索从左侧栏迁入底部面板（与「文件内搜索」并列的页签；Ctrl+Shift+F 直达本页签） -->
+      <button class="ptab" data-panel="globalsearch">全局搜索</button>
       <button class="ptab" data-panel="python">运行（Python / 批处理）</button>
       <div class="panel-actions">
         <span id="save-status" class="save-status"></span>
@@ -157,6 +150,24 @@
         <button id="btn-replace-all" class="tbtn small" title="替换当前文件中全部匹配">全部替换</button>
       </div>
       <div id="find-results" class="find-results"></div>
+    </div>
+
+    <!-- 全局搜索（v0.11.0：从左侧栏迁入底部面板页签）：
+         #gs-input / #btn-gs-go / #gs-replace-input / #btn-gs-replace-all / #gs-results / #gs-count
+         全部 ID 原样保留 —— globalsearch.js 与 globalSearchUI / gsHighlight 等既有用例零改动。
+         搜索/替换输入行沿用底部面板 .find-bar 的量级（max-width 与 find 输入框一致），结果区
+         .gs-results 由通用规则提供 flex:1 + 滚动。 -->
+    <div class="panel-body hidden" id="panel-globalsearch">
+      <div class="gs-bar">
+        <input id="gs-input" type="text" placeholder="全局搜索（Ctrl+Shift+F）…" />
+        <button id="btn-gs-go" class="tbtn">搜索</button>
+      </div>
+      <div class="gs-bar gs-replace-bar">
+        <input id="gs-replace-input" type="text" placeholder="替换为…（对结果文件的全部匹配）" />
+        <button id="btn-gs-replace-all" class="tbtn small danger" title="在当前搜索结果涉及的文件中批量替换">全部替换</button>
+      </div>
+      <div id="gs-results" class="gs-results"></div>
+      <div class="gs-count-row"><span id="gs-count" class="find-count"></span></div>
     </div>
 
     <!-- Python 输出 -->

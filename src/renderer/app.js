@@ -64,13 +64,16 @@ async function boot() {
   }
   applyFonts(state.settings);
 
-  // ---------- 0.5.0 Phase 5a E2：侧栏分区折叠（收藏 / 文件树 / 全局搜索）并记忆 ----------
+  // ---------- 0.5.0 Phase 5a E2：侧栏分区折叠并记忆（v0.11.0：左栏只剩文件树一个分区） ----------
   // ⚠️ 位置必须在 `createFavorites(...)` **之前**：收藏分区的初始折叠态要从这里取
   // （const/let 的 TDZ 会让"放到后面"直接抛 Cannot access before initialization）。
   // 折叠态写进 settings.sidebarCollapsed（键已加进 src/main/settings.js 白名单，否则会被静默丢弃）。
   // 只加/去容器上的 .collapsed 类：树内部的 expanded 集合、loadChildren 补载（J4）与可见性无关，
   // 折叠再展开后展开态原样保留。
-  const SIDEBAR_SECTIONS = ['fav', 'tree', 'search'];
+  // v0.11.0：搜索分区随全局搜索一起迁出左侧栏（底部面板页签），大纲迁入正文区左栏 ——
+  //   这里只保留 fav（右栏收藏分区，历史键名不变）与 tree 两键；旧 settings 里残留的 search 键
+  //   会被 normalizeCollapsed 静默忽略（不写回、不报错）。
+  const SIDEBAR_SECTIONS = ['fav', 'tree'];
   const normalizeCollapsed = (v) => {
     const o = {};
     for (const k of SIDEBAR_SECTIONS) o[k] = !!(v && typeof v === 'object' && v[k]);
@@ -87,7 +90,6 @@ async function boot() {
     };
     bind('#fav-block', '#fav-caret', sidebarCollapsed.fav);
     bind('#file-tree', '#tree-caret', sidebarCollapsed.tree);
-    bind('#sidebar-search', '#search-caret', sidebarCollapsed.search);
     if (persist) window.api.setSettings({ sidebarCollapsed });
   }
   function toggleSidebarSection(key) {
@@ -97,7 +99,6 @@ async function boot() {
   }
   applySidebarCollapsed(sidebarCollapsed, false);
   $('#tree-header').addEventListener('click', () => toggleSidebarSection('tree'));
-  $('#search-header').addEventListener('click', () => toggleSidebarSection('search'));
 
   // 清单/分组与 docs/开发计划-多主题皮肤.md §3.3.2 一致；暗色清单 = 实证 14 个 color-scheme: dark
   const THEME_NAMES = [
@@ -1322,8 +1323,14 @@ async function boot() {
     }
     tree.refreshSelected();
   });
-  $('#btn-global-search').addEventListener('click', () => {
+  // v0.11.0：全局搜索是底部面板的一个页签（不再是左侧栏分区）—— 入口统一走
+  // `openGlobalSearchPanel()`：切页签 + 展开面板 + 聚焦输入框（Ctrl+Shift+F / 工具栏按钮共用）。
+  function openGlobalSearchPanel() {
+    switchPanel('globalsearch');
     globalSearch.focus();
+  }
+  $('#btn-global-search').addEventListener('click', () => {
+    openGlobalSearchPanel();
   });
   const btnPreview = $('#btn-preview-mode');
   const previewModeNames = { edit: '👁 预览', split: '👁 分屏', preview: '✍ 编辑' };
@@ -1493,7 +1500,7 @@ async function boot() {
   // ---------- 各分界线拖拽调整尺寸（分隔条在目标右侧/下侧时用 reverse） ----------
   initDragResize($('#sidebar-divider'), { target: '#sidebar', dir: 'x', min: 200, max: 520 });
   initDragResize($('#bottom-divider'), { target: '#bottom-panel', dir: 'y', min: 120, max: 640, reverse: true });
-  initDragResize($('#tree-search-divider'), { target: '#sidebar-search', dir: 'y', min: 80, max: 400, reverse: true });
+  // v0.11.0：`#tree-search-divider` 随侧栏搜索分区一起移除（左栏只剩文件树，无需再分配高度）。
   // 右侧收藏栏：分隔条在栏**左侧**，向左拖 = 加宽 → reverse:true（同 bottom-panel 的方向关系）
   initDragResize(favRailDivider, { target: '#fav-rail', dir: 'x', min: FAVRAIL_WIDTH_MIN, max: FAVRAIL_WIDTH_MAX, reverse: true });
   // 右栏宽度持久化（initDragResize 无回调且 ui.js 不在改动面）：拖完（mouseup）/ 双击复位后量真实宽度落盘
@@ -1581,7 +1588,7 @@ async function boot() {
     save: () => editor.saveNow(),
     find: () => { switchPanel('find'); find.focus(); },
     replace: () => { switchPanel('find'); find.focusReplace(); },
-    'global-search': () => globalSearch.focus(),
+    'global-search': () => openGlobalSearchPanel(),
     'preview-cycle': () => {
       const mode = preview.cycleMode();
       if (mode) btnPreview.textContent = previewModeNames[mode];
@@ -1757,21 +1764,27 @@ async function boot() {
     window.__app = { state, editor, tree, preview, find, globalSearch, python, openDirFromPath, closeSidebarRoot, favorites, syncExternalTree, session: { save: () => persistSession(true), restore: restoreSession }, applyTheme, THEME_NAMES, DARK_THEMES,
       // ---------- 0.5.0 Phase 5a 测试面（dev 独有） ----------
       // E1：底部面板折叠 / 最大化（getState 里的 bootCollapsed = boot 当下对真实 DOM 的观测快照）
+      // v0.11.0：`active` = 当前激活页签（find / globalsearch / python），布局迁移用例据此断言
+      //   Ctrl+Shift+F 切到了「全局搜索」页签。
       bottomPanel: {
         DEFAULT_COLLAPSED: BOTTOM_DEFAULT_COLLAPSED,
-        getState: () => ({
-          collapsed: isPanelCollapsed(),
-          maximized: isPanelMaximized(),
-          bootCollapsed: bottomBootCollapsed,
-          height: Math.round(panelEl.getBoundingClientRect().height),
-          bodyVisible: Array.from(document.querySelectorAll('.panel-body')).some((p) => !p.classList.contains('hidden') && p.offsetHeight > 0),
-        }),
+        getState: () => {
+          const act = document.querySelector('.ptab.active');
+          return {
+            collapsed: isPanelCollapsed(),
+            maximized: isPanelMaximized(),
+            bootCollapsed: bottomBootCollapsed,
+            height: Math.round(panelEl.getBoundingClientRect().height),
+            bodyVisible: Array.from(document.querySelectorAll('.panel-body')).some((p) => !p.classList.contains('hidden') && p.offsetHeight > 0),
+            active: act ? act.dataset.panel : null,
+          };
+        },
         collapse: () => { setPanelCollapsed(true); return isPanelCollapsed(); },
         expand: () => { setPanelCollapsed(false); return isPanelCollapsed(); },
         toggleMax: () => togglePanelMax(),
         switchTo: (name) => { switchPanel(name); return name; },
       },
-      // E2：侧栏三分区折叠（getState 返回落盘同源的展开/折叠真值）
+      // E2：侧栏分区折叠（v0.11.0 起两分区 fav/tree；getState 返回落盘同源的展开/折叠真值）
       sidebarSections: {
         SECTIONS: SIDEBAR_SECTIONS.slice(),
         getState: () => ({ ...sidebarCollapsed }),

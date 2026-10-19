@@ -1,5 +1,30 @@
 # 更新说明（Changelog）
 
+## v0.11.0（2026-10-20）
+
+主题：**布局调整（用户需求）—— 文件内搜索 / 全局搜索都沉到底部面板，Markdown 大纲搬进正文区左栏**。
+
+### 文件内搜索 + 全局搜索都在底部面板
+- 全局搜索从左侧栏迁入**底部面板页签**：页签栏变为「文件内搜索 | 全局搜索 | 运行（Python / 批处理）」三个并列；`Ctrl+Shift+F` / 工具栏「🔍 搜索」直达「全局搜索」页签并聚焦输入框（`switchPanel('globalsearch')` + `globalSearch.focus()`）。
+- 所有既有 ID（`#gs-input` / `#btn-gs-go` / `#gs-replace-input` / `#btn-gs-replace-all` / `#gs-results` / `#gs-count`）原样保留，`globalsearch.js` **零改动**；分组结果 / 批量替换 / 文件名与目录名命中 / 分批渲染行为不变。
+- 左侧栏删掉搜索分区（`#sidebar-search` / `#search-header` / `#tree-search-divider`），只剩「文件树」；`settings.sidebarCollapsed` 只剩 `{fav, tree}` 两键（旧数据里残留的 `search` 键被 `normalizeCollapsed` 静默忽略，不报错、不写回）。
+
+### Markdown 大纲：正文区左栏（不再与文件树同一栏）
+- 新增 `#outline-rail`（`#workbench` 的第一个 flex 子项）⇒ 布局 = **文件树 | 大纲 | 编辑区**；`#outline-block` 及内部全部既有 ID 原样保留，`outline.js` 的解析 / 点击跳转 / 随光标高亮 / 类型门控语义不变（非 Markdown / huge / viewer-lg / image / diff 整体隐藏）。
+- 展开宽度 `clamp(180px, 18vw, 280px)`（1424px 窗口实测 256px）；折叠（`Ctrl+Shift+O` / 点标题行）= 收成 34px 细条（只留 ▶，列表隐藏）。
+- 可见性由 `outline.js` 统一驱动：`#outline-rail` 与 `#outline-block` 的 `.hidden` 同步（只藏一个会留下空栏）；`getState()` 新增 `railHidden / railCollapsed / railWidth` 供断言。
+
+### 冒烟与回归（244 → 245 项）
+- 新增 `layoutDock`：真实窗口几何断言 —— 大纲栏在 `#workbench` 内（文件树右侧、编辑区左侧，宽度 >100px）、`Ctrl+Shift+O` 折叠/展开、非 Markdown 隐藏（rail 宽 0）；全局搜索页签与输入框都在 `#bottom-panel` 内（输入框矩形落在面板矩形内）、`Ctrl+Shift+F` 从折叠态展开并切到该页签、侧栏不再有搜索输入。
+- 更新 `sidebarCollapse`（三分区 → 两分区 `{fav, tree}`，并正向断言搜索分区已不在侧栏）、`sidebarButtons`（旧断言「底部无全局搜索 tab」按新需求反转为「底部有全局搜索页签」）、`outlinePanel`（新增 rail 几何）、`bottomPanelCollapse`（新增全局搜索页签断言）。
+- **`sameFileTwoPanes` 的弱断言修正**：正文区新增大纲栏后两栏可用宽度从 ~550px 降到 ~419px，若某栏处于「预览分屏」模式（CM 只占栏宽一半）长行会换行 ⇒ 两栏 CM 的 `textContent`（只含视口内已渲染行）长度天然可能不等。这条原本就被 `docs/开发计划-多视图-Phase3-施工简报.md:872` 标为弱验证项（"若某天两栏宽度差导致换行差异，这条会先红"）。改为断言「两栏各有一个真实渲染出内容的 CM（高度 >100、文本 >0）」；"同一文档"由既有 `docSame`（两视图 `state.doc` 逐字符相等）证明 —— 比 DOM 渲染文本等长更强且与视口布局无关。
+- 验收：`npm run smoke` **245 项全绿**（`smoke-verify` 四元组：结果行 245 / `false` 0 / `ERR:` 0 / 非 true 非信息型 0；true 240 + 信息型 5），日志 `%TEMP%\mh-smoke-v0110-r2.log`。
+
+### 布局探针实测（真实窗口 1424×861，`--exttest` 临时探针 + 截图目检）
+- 大纲栏 x=323..579（侧栏 0..320、编辑区 579..1424，均在同一行 `#workbench` 内）；折叠后宽 34px、再展开 256px；切到 `.txt` 后 rail 带 `.hidden` 且实测宽 0（不残留空白列）。
+- 底部面板默认折叠（34px）→ `Ctrl+Shift+F` 后 240px、active 页签 `globalsearch`、输入框聚焦且矩形在面板内；全局搜索在底部面板正常出结果（2 处匹配）。
+- 对照截图：`.probe/layout.png`（施工期探针产物，未入库）。
+
 ## v0.10.0（2026-10-18）
 
 主题：**大文件视图补齐最后两项能力 —— 视图内 Ctrl+F、索引未覆盖区域的真实内容预览**。
