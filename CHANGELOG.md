@@ -17,6 +17,11 @@
 - 扩展 `diffCompareEntry`：Ctrl 多选两个文件（断言 2 行高亮 + `getSelectedFiles()` 顺序）→ 工具栏「对比」开 diff（左右路径与修改行数正确）→ 关闭后选择保留 → 右键「对比选中的两个文件」再开 diff → 普通点击回落单选（1 个选中）。
 - 验收：`npm run smoke` **250 项全绿**（`smoke-verify` 四元组 250/0/0/0；true 245 + 信息型 5，日志 `%TEMP%\mh-smoke-v0121.log`）；真实窗口 `--exttest` 布局/交互探针按同一流程实测通过。
 
+### 发布记录（2026-10-20）
+- 提交 `6c2525a`（9 files，+181/−31），**tag `v0.12.1` 已推送**（远端指向 `6c2525a`）；CI（`.github/workflows/release.yml`）run 39370867607 **success**（04:41:08Z → 04:42:48Z），GitHub Release **已发布**：https://github.com/hwm-1114/markhunter/releases/tag/v0.12.1
+- Release 资产（CI 构建）：`MarkHunter-Setup-0.12.1.exe`（102,471,663 B，sha256 `7d99f9f7bd29bd03537365eff6313b1df9738cba033b6d311460a43dada57af8`）、`.exe.blockmap`、`latest.yml`
+- 本地安装包（本机 electron-builder 构建，未上传）：`dist\MarkHunter-Setup-0.12.1.exe`（102,470,201 B ≈97.7MB，FileVersion/ProductVersion = 0.12.1，sha256 `CA417F7F0F101FE97D55E03A741E844676C5EA5E5AD7B749E8A0F13AACF28E9A`）；**未在本机静默安装**（用户未要求覆盖现有安装）。
+
 ## v0.12.0（2026-10-20）
 
 主题：**交互体验完善 —— 任务栏可辨目录、大纲栏可隐藏、标签多行换行、对比功能五项增强**（含 v0.11.0 之后用户追加的「底部面板只出现在正文区下方」布局修正）。
