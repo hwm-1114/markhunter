@@ -34,6 +34,11 @@
 - 扩展 `layoutDock`：大纲栏可隐藏（按钮→rail 宽 0/落盘 false→再点恢复）与窗口标题=最后一级目录名；`tabOverflowUI` 显式切到单行模式验证旧溢出能力并在结尾恢复默认。
 - 验收：`npm run smoke` **250 项全绿**（`smoke-verify` 四元组：结果行 250 / `false` 0 / `ERR:` 0 / 非 true 非信息型 0；true 245 + 信息型 5），日志 `%TEMP%\mh-smoke-v0120-r3.log`。施工探针截图（未入库，可删）：`.probe/v0111-tabs.png`（多行标签 + 大纲开关）、`.probe/v0111-diff.png`（对比选项/折叠/跳原文按钮）、`.probe/layout-v0111.png`（底部面板只在正文区下方）。
 
+### 发布记录（2026-10-20）
+- 提交 `bc922be`（15 files，+1119/−181），**tag `v0.12.0` 已推送**（远端指向 `bc922be`）；CI（`.github/workflows/release.yml`）run #40 **success**（00:46:26Z → 00:48:06Z），GitHub Release **已发布**：https://github.com/hwm-1114/markhunter/releases/tag/v0.12.0
+- Release 资产（CI 构建）：`MarkHunter-Setup-0.12.0.exe`（102,470,439 B，sha256 `88b43f43c942a2f5b49129dfac94b867018a3204657f3bb1800d258d216b8364`）、`.exe.blockmap`、`latest.yml`
+- 本地安装包（本机 electron-builder 构建，未上传）：`dist\MarkHunter-Setup-0.12.0.exe`（102,468,854 B ≈97.7MB，FileVersion/ProductVersion = 0.12.0，sha256 前 32 = `35D3BA89826D3CCD080A78CE4B4FEBBD`）；**未在本机静默安装**（用户未要求覆盖现有安装）。
+
 ## v0.11.0（2026-10-20）
 
 主题：**布局调整（用户需求）—— 文件内搜索 / 全局搜索都沉到底部面板，Markdown 大纲搬进正文区左栏**。
