@@ -716,6 +716,11 @@ async function boot() {
         toast('读取对比文件失败：' + (err.message || err));
       }
     },
+    // v0.12.1：文件树 Ctrl/Cmd 多选恰好两个文件 → 右键「🔀 对比选中的两个文件」
+    onCompareSelected: async (files) => {
+      if (!Array.isArray(files) || files.length !== 2) return;
+      await openDiffFromFiles(files[0], files[1]);
+    },
     onSwitchRoot: (dir) => openDirFromPath(dir), // 需求1：外部区目录行「切换工作目录到此目录」
     // v0.2.3 多目录：根行关闭 / 设为活动；拖拽移动后同步已打开标签路径
     onRootClose: (dir) => closeSidebarRoot(dir),
@@ -1414,9 +1419,37 @@ async function boot() {
     if (!mode) toast('当前文件不是 Markdown，无法预览');
     else btnPreview.textContent = previewModeNames[mode];
   });
-  $('#btn-diff').addEventListener('click', () => openCompareDialog());
+  /** v0.12.1：把两个磁盘文件直接开成对比标签（文件树 Ctrl 多选 / 对话框「两个文件…」共用）。
+   *  对比标签带 leftPath/rightPath → 支持「跳回原文」。 */
+  async function openDiffFromFiles(a, b) {
+    try {
+      const [ra, rb] = await Promise.all([window.api.readFile(a), window.api.readFile(b)]);
+      editor.openDiffTab({
+        leftLabel: baseName(a),
+        leftContent: ra.content,
+        leftPath: a,
+        rightLabel: baseName(b),
+        rightContent: rb.content,
+        rightPath: b,
+        exportDir: state.rootDir || '',
+      });
+    } catch (err) {
+      toast('读取对比文件失败：' + (err && err.message ? err.message : err));
+    }
+  }
 
-  /** 对比入口：选择对比目标（其它打开的标签 / 剪贴板 / 磁盘版本）→ 打开对比标签 */
+  $('#btn-diff').addEventListener('click', () => {
+    // v0.12.1（用户需求）：文件树里 Ctrl/Cmd 多选**恰好两个文件**后点「对比」→ 直接对比这两个文件，
+    // 不要求已打开文档、也不再弹选择框；其它情况走原来的对比对话框。
+    const picked = typeof tree.getSelectedFiles === 'function' ? tree.getSelectedFiles() : [];
+    if (picked.length === 2) {
+      openDiffFromFiles(picked[0], picked[1]);
+      return;
+    }
+    openCompareDialog();
+  });
+
+  /** 对比入口：选择对比目标（其它打开的标签 / 剪贴板 / 磁盘版本 / 任意磁盘文件）→ 打开对比标签 */
   function openCompareDialog() {
     const cur = getActiveTab();
     if (!cur || cur.kind || !cur.state) {
@@ -1507,24 +1540,11 @@ async function boot() {
           label: '两个文件…',
           onClick: async () => {
             closeModal();
-            try {
-              const a = await window.api.selectFile({ title: '对比：选择左侧文件' });
-              if (!a) return;
-              const b = await window.api.selectFile({ title: '对比：选择右侧文件' });
-              if (!b) return;
-              const [ra, rb] = await Promise.all([window.api.readFile(a), window.api.readFile(b)]);
-              editor.openDiffTab({
-                leftLabel: baseName(a),
-                leftContent: ra.content,
-                leftPath: a,
-                rightLabel: baseName(b),
-                rightContent: rb.content,
-                rightPath: b,
-                exportDir: state.rootDir || '',
-              });
-            } catch (err) {
-              toast('读取对比文件失败：' + (err && err.message ? err.message : err));
-            }
+            const a = await window.api.selectFile({ title: '对比：选择左侧文件' });
+            if (!a) return;
+            const b = await window.api.selectFile({ title: '对比：选择右侧文件' });
+            if (!b) return;
+            await openDiffFromFiles(a, b);
           },
         },
         {

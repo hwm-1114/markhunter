@@ -147,6 +147,9 @@ export function createTree() {
   let roots = [];              // v0.2.3 多目录：侧栏打开的全部根（渲染顺序 = 列表顺序）
   let rootDir = null;          // 活动工作目录（须含于 roots；全局搜索/新建等默认目标）
   let selectedPath = null;
+  // v0.12.1：文件树多选（Ctrl/Cmd+点击）—— 恰好两个文件时可直接对比（工具栏 🔀 对比 /
+  // 右键「对比选中的两个文件」）。普通点击仍保持单选语义（选中并打开）。
+  let multiSelected = new Set();
   let expanded = new Set(); // 展开的目录集合
   let onOpenFile = null;
   let onOpenDir = null;
@@ -165,6 +168,7 @@ export function createTree() {
 
   let onCompareFiles = null; // v0.2.1：与基准对比（app.js 传入，读取两文件开对比标签）
   let onCompareWithActive = null; // v0.11.0：与当前编辑器文档对比（树右键任意文件）
+  let onCompareSelected = null; // v0.12.1：对比多选中的两个文件（Ctrl/Cmd+点击多选）
 
   function setCallbacks(cbs) {
     onOpenFile = cbs.onOpenFile;
@@ -173,6 +177,7 @@ export function createTree() {
     onSwitchRoot = cbs.onSwitchRoot;
     onCompareFiles = cbs.onCompareFiles;
     onCompareWithActive = cbs.onCompareWithActive;
+    onCompareSelected = cbs.onCompareSelected;
     onRootClose = cbs.onRootClose;
     onActivateRoot = cbs.onActivateRoot;
     getOpenPaths = cbs.getOpenPaths;
@@ -184,6 +189,7 @@ export function createTree() {
     rootDir = dir || null;
     expanded = new Set(dir ? [dir] : []);
     selectedPath = null;
+    multiSelected.clear();
     return render(); // 返回渲染完成 Promise（供 await）
   }
 
@@ -193,6 +199,7 @@ export function createTree() {
     rootDir = activeDir || roots[0] || null;
     for (const d of roots) expanded.add(d);
     selectedPath = null;
+    multiSelected.clear();
     return render();
   }
 
@@ -270,6 +277,8 @@ export function createTree() {
     const row = document.createElement('div');
     row.className = 'tree-node';
     row.dataset.path = node.path;
+    // 重建/懒加载出来的行也要恢复选择高亮（v0.12.1 多选：逐个成员回填）
+    if (multiSelected.has(node.path) || (!multiSelected.size && selectedPath === node.path)) row.classList.add('selected');
 
     const caret = document.createElement('span');
     caret.className = `caret ${node.isDir ? '' : 'leaf'}`;
@@ -303,6 +312,11 @@ export function createTree() {
       // 选中目录）作用于树（VS Code 同款行为）。合成事件（冒烟/自动化）不转移焦点，
       // 用例需要键盘路径时可显式 container.focus()。
       if (e.isTrusted) { try { container.focus({ preventScroll: true }); } catch { /* 忽略 */ } }
+      // v0.12.1：Ctrl/Cmd+点击 = 多选切换（不打开文件 / 不展开目录），用于「对比」入口
+      if (e.ctrlKey || e.metaKey) {
+        toggleSelect(node.path);
+        return;
+      }
       if (opts.onClick) {
         await opts.onClick(node, row, children);
         return;
@@ -327,7 +341,7 @@ export function createTree() {
         opts.onContext(e.clientX, e.clientY, node, row);
         return;
       }
-      select(node.path);
+      selectForMenu(node.path);
       showCtx(e.clientX, e.clientY, node);
     });
 
@@ -400,9 +414,44 @@ export function createTree() {
 
   function select(path) {
     selectedPath = path;
+    multiSelected.clear();
+    if (path) multiSelected.add(path);
+    syncSelectionClasses();
+  }
+
+  /** 把当前选择集合映射到 DOM 类（多选时逐个高亮；单选/未选回退 selectedPath） */
+  function syncSelectionClasses() {
     nodeMap.forEach((v, p) => {
-      v.row.classList.toggle('selected', p === path);
+      v.row.classList.toggle('selected', multiSelected.size ? multiSelected.has(p) : p === selectedPath);
     });
+  }
+
+  /** v0.12.1：Ctrl/Cmd+点击切换多选（不清空已有选择，不打开/展开） */
+  function toggleSelect(path) {
+    if (!path) return [];
+    const existing = [...multiSelected].find((p) => normalizeKey(p) === normalizeKey(path));
+    if (existing) multiSelected.delete(existing);
+    else multiSelected.add(path);
+    selectedPath = [...multiSelected].pop() || null;
+    syncSelectionClasses();
+    return [...multiSelected];
+  }
+
+  /** 当前多选中的**文件**（目录被忽略；最多返回 2 个，顺序 = Ctrl 点击顺序）—— 对比入口消费 */
+  function getSelectedFiles() {
+    const out = [];
+    for (const p of multiSelected) {
+      const entry = findNode(normalizeKey(p)); // findNode 收**规范化 key**（调用方其余路径都先归一）
+      if (entry && !entry.isDir) out.push(entry.row.dataset.path);
+      if (out.length >= 2) break;
+    }
+    return out;
+  }
+
+  /** 右键菜单用：点击的行已在多选集合里 → 保留整组多选（否则回落单选） */
+  function selectForMenu(path) {
+    if (multiSelected.has(path)) return;
+    select(path);
   }
 
   // ---------- 需求1：外部文件区（虚拟分支） ----------
@@ -526,11 +575,15 @@ export function createTree() {
 
   /** 外部区文件行菜单：v0.7.1 起与内部文件行同面（打开/对比基准/重命名/删除/复制/粘贴） */
   function showExternalFileCtx(x, y, node) {
-    select(node.path);
+    selectForMenu(node.path);
     const items = [{ label: '📄 打开', onClick: () => onOpenFile && onOpenFile(node.path) }];
     // v0.11.0：任意两个文件直接对比 —— 当前编辑文档 ↔ 树中该文件（含未保存内容）
     if (typeof onCompareWithActive === 'function') {
       items.push({ label: '🔀 与当前文档对比', onClick: () => onCompareWithActive(node.path) });
+    }
+    // v0.12.1：已用 Ctrl 多选两个文件时，右键其中一个可直接对比这组选择
+    if (multiSelected.size === 2 && multiSelected.has(node.path) && typeof onCompareSelected === 'function') {
+      items.push({ label: '🔀 对比选中的两个文件', onClick: () => onCompareSelected([...multiSelected]) });
     }
     // v0.2.1 对比：与内部文件行同款（无基准 → 设为基准；有基准且非自身 → 与基准对比）
     if (!compareBase) {
@@ -559,7 +612,7 @@ export function createTree() {
   /** 外部区目录行菜单：v0.7.1 起与内部目录行同面（新建文件/目录/刷新/重命名/删除/复制/粘贴）
    *  + 外部链特有的「切换工作目录到此目录」；仅虚拟根/盘符行（合成 key）保持只读展示。 */
   function showExternalDirCtx(x, y, node) {
-    select(node.path);
+    selectForMenu(node.path);
     const items = [
       { label: '📝 新建文件', onClick: () => createEntry(node.path, 'file') },
       { label: '📁 新建目录', onClick: () => createEntry(node.path, 'dir') },
@@ -817,6 +870,10 @@ export function createTree() {
       // v0.11.0：任意两个文件直接对比 —— 当前编辑文档 ↔ 树中该文件（含未保存内容）
       if (typeof onCompareWithActive === 'function') {
         items.push({ label: '🔀 与当前文档对比', onClick: () => onCompareWithActive(node.path) });
+      }
+      // v0.12.1：已用 Ctrl 多选两个文件时，右键其中一个可直接对比这组选择
+      if (multiSelected.size === 2 && multiSelected.has(node.path) && typeof onCompareSelected === 'function') {
+        items.push({ label: '🔀 对比选中的两个文件', onClick: () => onCompareSelected([...multiSelected]) });
       }
       items.push({ sep: true });
       // v0.2.1 对比：无基准 → 设为基准；有基准且非自身 → 与基准对比
@@ -1097,5 +1154,5 @@ export function createTree() {
     fileEntry.row.scrollIntoView({ block: 'nearest' });
   }
 
-  return { setRoot, setRoots, setCallbacks, refreshNode, refreshSelected, getTargetDir, select, hideCtx, reveal, isInsideRoot, setExternalFiles, revealExternal, copyEntryToClipboard, pasteEntryFromClipboard, renameEntry };
+  return { setRoot, setRoots, setCallbacks, refreshNode, refreshSelected, getTargetDir, select, hideCtx, reveal, isInsideRoot, setExternalFiles, revealExternal, copyEntryToClipboard, pasteEntryFromClipboard, renameEntry, getSelectedFiles, toggleSelect };
 }

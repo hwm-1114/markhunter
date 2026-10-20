@@ -7834,6 +7834,52 @@ async function runSmoke(win) {
               if (cancel) cancel.click();
               return { optValues, labels, modalHidden: document.getElementById('modal-mask').classList.contains('hidden') };
             })()`);
+            // v0.12.1（用户需求）：文件树 Ctrl 多选恰好两个文件 → 工具栏「🔀 对比」直接开对比
+            const multi = await p5Eval(`(async () => {
+              const norm = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+              const rows = Array.from(document.querySelectorAll('#file-tree .tree-node'));
+              const find = (p) => rows.find((n) => norm(n.dataset.path) === norm(p));
+              window.__app.tree.select(null);
+              const rowL = find(${p5J(P5_DIFF_L)});
+              const rowR = find(${p5J(P5_DIFF_R)});
+              if (!rowL || !rowR) return { found: false };
+              const opt = { bubbles: true, cancelable: true, ctrlKey: true };
+              rowL.dispatchEvent(new MouseEvent('click', opt));
+              rowR.dispatchEvent(new MouseEvent('click', opt));
+              const selected = Array.from(document.querySelectorAll('#file-tree .tree-node.selected')).map((n) => n.dataset.path);
+              const picked = window.__app.tree.getSelectedFiles();
+              document.getElementById('btn-diff').click();
+              await new Promise((r) => setTimeout(r, 800));
+              const t = window.__app.editor.getActiveTab();
+              const host = document.getElementById('diff-host');
+              return { found: true, selectedN: selected.length, picked: picked.map((p) => norm(p)),
+                kind: t ? t.kind : null, leftPath: t ? norm(t.leftPath) : null, rightPath: t ? norm(t.rightPath) : null,
+                mod: host.querySelectorAll('.diff-row.mod').length };
+            })()`);
+            // 右键入口：已多选两个文件时，右键其中一个 → 「🔀 对比选中的两个文件」
+            const menuMulti = await p5Eval(`(async () => {
+              window.__app.editor.closeAll();
+              await new Promise((r) => setTimeout(r, 200));
+              const norm = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+              const rows = Array.from(document.querySelectorAll('#file-tree .tree-node'));
+              const find = (p) => rows.find((n) => norm(n.dataset.path) === norm(p));
+              window.__app.tree.select(null);
+              const opt = { bubbles: true, cancelable: true, ctrlKey: true };
+              const rowL = find(${p5J(P5_DIFF_L)});
+              const rowR = find(${p5J(P5_DIFF_R)});
+              if (!rowL || !rowR) return { found: false };
+              rowL.dispatchEvent(new MouseEvent('click', opt));
+              rowR.dispatchEvent(new MouseEvent('click', opt));
+              rowR.dispatchEvent(new MouseEvent('contextmenu', { clientX: 300, clientY: 300, bubbles: true, cancelable: true }));
+              await new Promise((r) => setTimeout(r, 250));
+              const item = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).find((el) => el.textContent.includes('对比选中的两个文件'));
+              const hasItem = !!item;
+              if (item) item.click();
+              await new Promise((r) => setTimeout(r, 800));
+              const t = window.__app.editor.getActiveTab();
+              return { found: true, hasItem, kind: t ? t.kind : null };
+            })()`);
+            await p5Eval(`(() => { window.__app.editor.closeAll(); window.__app.tree.select(null); return true; })()`);
             const normMain = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
             const conj = {
               'tree-menu-compare-active': !!(menu.found === true && click.item === true),
@@ -7842,8 +7888,15 @@ async function runSmoke(win) {
               'jump-buttons-enabled': !!(st && st.jumpBtns === 2 && st.jumpEnabled.length === 2 && st.jumpEnabled.every((v) => v === true)),
               'dialog-has-file-entries': !!(dialog && dialog.optValues.indexOf('__pick__') >= 0
                 && dialog.labels.indexOf('两个文件…') >= 0 && dialog.modalHidden === true),
+              // v0.12.1：Ctrl 多选两个文件 + 工具栏「🔀 对比」
+              'ctrl-multiselect-two-files': !!(multi && multi.found === true && multi.selectedN === 2
+                && multi.picked.length === 2 && multi.picked[0] === normMain(P5_DIFF_L) && multi.picked[1] === normMain(P5_DIFF_R)),
+              'toolbar-compare-selected': !!(multi && multi.kind === 'diff' && multi.mod === 2
+                && multi.leftPath === normMain(P5_DIFF_L) && multi.rightPath === normMain(P5_DIFF_R)),
+              'context-menu-compare-selected': !!(menuMulti && menuMulti.found === true && menuMulti.hasItem === true && menuMulti.kind === 'diff'),
             };
-            return p5Fail(conj, 'menu=' + p5J(menu) + ' click=' + p5J(click) + ' st=' + p5J(st) + ' dialog=' + p5J(dialog));
+            return p5Fail(conj, 'menu=' + p5J(menu) + ' click=' + p5J(click) + ' st=' + p5J(st) + ' dialog=' + p5J(dialog) +
+              ' multi=' + p5J(multi) + ' menuMulti=' + p5J(menuMulti));
           });
 
           // ---------------- 7. helpPanel：F1 / Ctrl+/ 快捷键面板 + 键位单一数据源 ----------------
