@@ -164,6 +164,7 @@ export function createTree() {
   let externalOpen = new Map();
 
   let onCompareFiles = null; // v0.2.1：与基准对比（app.js 传入，读取两文件开对比标签）
+  let onCompareWithActive = null; // v0.11.0：与当前编辑器文档对比（树右键任意文件）
 
   function setCallbacks(cbs) {
     onOpenFile = cbs.onOpenFile;
@@ -171,6 +172,7 @@ export function createTree() {
     onClosePath = cbs.onClosePath;
     onSwitchRoot = cbs.onSwitchRoot;
     onCompareFiles = cbs.onCompareFiles;
+    onCompareWithActive = cbs.onCompareWithActive;
     onRootClose = cbs.onRootClose;
     onActivateRoot = cbs.onActivateRoot;
     getOpenPaths = cbs.getOpenPaths;
@@ -526,6 +528,10 @@ export function createTree() {
   function showExternalFileCtx(x, y, node) {
     select(node.path);
     const items = [{ label: '📄 打开', onClick: () => onOpenFile && onOpenFile(node.path) }];
+    // v0.11.0：任意两个文件直接对比 —— 当前编辑文档 ↔ 树中该文件（含未保存内容）
+    if (typeof onCompareWithActive === 'function') {
+      items.push({ label: '🔀 与当前文档对比', onClick: () => onCompareWithActive(node.path) });
+    }
     // v0.2.1 对比：与内部文件行同款（无基准 → 设为基准；有基准且非自身 → 与基准对比）
     if (!compareBase) {
       items.push({ label: '🔖 设为对比基准', onClick: () => {
@@ -808,6 +814,10 @@ export function createTree() {
       }
     } else {
       items.push({ label: '📄 打开', onClick: () => onOpenFile && onOpenFile(node.path) });
+      // v0.11.0：任意两个文件直接对比 —— 当前编辑文档 ↔ 树中该文件（含未保存内容）
+      if (typeof onCompareWithActive === 'function') {
+        items.push({ label: '🔀 与当前文档对比', onClick: () => onCompareWithActive(node.path) });
+      }
       items.push({ sep: true });
       // v0.2.1 对比：无基准 → 设为基准；有基准且非自身 → 与基准对比
       if (!compareBase) {

@@ -11,6 +11,14 @@ const { registerWatchIpc, markSelfWrite, stopAllWatches } = require('./filewatch
 let mainWindow = null;        // 首窗口（smoke/测试钩子绑定；多窗口下仅作其中之一）
 const allWindows = new Set(); // v0.1.51：窗口集合（window-all-closed 以其清空为准）
 
+// ---------- v0.11.0：任务栏身份（多窗口分组 + 悬停预览） ----------
+// Windows 任务栏按 AppUserModelID 分组：所有窗口用同一个 AUMID，系统才会把它们合并成**一个**
+// 任务栏按钮（悬停显示全部窗口缩略图），而不是按进程/窗口各显示一个。必须在创建任何窗口之前设置。
+const APP_USER_MODEL_ID = 'com.hwm.markhunter';
+if (process.platform === 'win32') {
+  try { app.setAppUserModelId(APP_USER_MODEL_ID); } catch { /* 非 Windows/受限环境忽略 */ }
+}
+
 // ---------- 测试隔离（v0.3.0） ----------
 // 背景：--smoke/--mmtest/--exttest 过去直接使用真实 userData，测试会写脏用户配置
 // （实测被改：theme、lastSession、lastDirectory、sidebarRoots、maxFileSizeMB、favoriteDirs）。

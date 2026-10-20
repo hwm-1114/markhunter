@@ -1004,6 +1004,14 @@ const RENDERER_TEST = `
     // ① 劫持守卫（本次 bug 的直接断言：daisyUI scrollbar-color 注入后 Chromium 忽略 webkit 宽度）
     const sc = getComputedStyle(document.documentElement).scrollbarColor;
     const el = document.querySelector('#file-tree');
+    // v0.12.0：侧栏改成完整高度后，早期用例阶段文件树可能**没有纵向溢出**（offsetWidth-clientWidth=0，
+    // 与滚动条宽度无关）→ 先塞一个超高占位元素强制出现纵向滚动条，量完再移除，断言才与布局高度无关。
+    let spacer = null;
+    if (el && el.scrollHeight <= el.clientHeight + 1) {
+      spacer = document.createElement('div');
+      spacer.style.height = '5000px';
+      el.appendChild(spacer);
+    }
     // 变量按 applyScrollbarWidth 同路径注入，保证本次设置即时生效（API 直改不触发 UI 应用）；
     // 必须先注入再读伪元素宽，否则读到的是 boot/上次持久化的旧值（v0.1.44 修正测试时序）
     document.documentElement.style.setProperty('--scrollbar-width', '30px');
@@ -1017,6 +1025,7 @@ const RENDERER_TEST = `
     const overlay = det.offsetWidth - det.clientWidth === 0;
     det.remove();
     const layoutW = el ? el.offsetWidth - el.clientWidth : -1;
+    if (spacer) spacer.remove();
     const layoutOk = overlay || !el ? true : layoutW === 30;
     return sc === 'auto' && pw === '30px' && layoutOk
       ? true
@@ -6766,6 +6775,11 @@ async function runSmoke(win) {
         const P5_OUTLINE = path.join(TEST_ROOT, 'p5-outline.md');
         const P5_OUTLINE2 = path.join(TEST_ROOT, 'p5-outline2.md');
         const P5_TXT = path.join(TEST_ROOT, 'p5-plain.txt');
+        // v0.12.0：对比完善用例夹具（左右内容有空白/大小写差异；供路径跳转与「与当前文档对比」）
+        const P5_DIFF_L = path.join(TEST_ROOT, 'p5-diff-left.md');
+        const P5_DIFF_R = path.join(TEST_ROOT, 'p5-diff-right.md');
+        const DIFF_L = 'same 1\nsame 2\nsame 3\nline a\nline b\nsame 6\nsame 7\nsame 8\nsame 9\nsame 10\nsame 11\nsame 12\n';
+        const DIFF_R = 'same 1\nsame 2\nsame 3\nline  a\nLINE B\nsame 6\nsame 7\nsame 8\nsame 9\nsame 10\nsame 11\nsame 12\n';
         const P5_QO = path.join(TEST_ROOT, 'p5-qo-alpha-target.md');
         const P5_QO2 = path.join(TEST_ROOT, 'p5-qo-beta.md');
         const P5_QO3 = path.join(TEST_ROOT, 'p5-qo-gamma.md');
@@ -6773,7 +6787,7 @@ async function runSmoke(win) {
         const P5_TREE_FILES = [path.join(P5_TREE_DIR, 'tree-a.md'), path.join(P5_TREE_DIR, 'tree-b.md')];
         // 标签溢出夹具：名字够长 + 数量够多（分栏后每栏 ~530px，单标签最小 ~60px → 必然溢出）
         const P5_TABS = Array.from({ length: 14 }, (_, i) => path.join(TEST_ROOT, 'p5-tab-' + String(i + 1).padStart(2, '0') + '-长名字标签夹具.md'));
-        const P5_ALL_FILES = [P5_OUTLINE, P5_OUTLINE2, P5_TXT, P5_QO, P5_QO2, P5_QO3].concat(P5_TREE_FILES, P5_TABS);
+        const P5_ALL_FILES = [P5_OUTLINE, P5_OUTLINE2, P5_TXT, P5_DIFF_L, P5_DIFF_R, P5_QO, P5_QO2, P5_QO3].concat(P5_TREE_FILES, P5_TABS);
         // 大纲夹具：4 个 ATX 标题 + 1 个围栏代码块内的伪标题（必须被跳过）+ 1 个四空格缩进的伪标题
         fs.writeFileSync(P5_OUTLINE, [
           '# 一级标题',
@@ -6799,6 +6813,8 @@ async function runSmoke(win) {
         ].join('\n'), 'utf8');
         fs.writeFileSync(P5_OUTLINE2, '# P2 标题\n\n## P2 二级\n\n内容\n', 'utf8');
         fs.writeFileSync(P5_TXT, '# 这行在 txt 里不算标题\n普通文本\n', 'utf8');
+        fs.writeFileSync(P5_DIFF_L, DIFF_L, 'utf8');   // v0.12.0：对比用例夹具（空白差异）
+        fs.writeFileSync(P5_DIFF_R, DIFF_R, 'utf8');   // v0.12.0：对比用例夹具（空白 + 大小写差异）
         for (const f of [P5_QO, P5_QO2, P5_QO3]) fs.writeFileSync(f, '# ' + path.basename(f) + '\n内容\n', 'utf8');
         fs.mkdirSync(P5_TREE_DIR, { recursive: true });
         for (const f of P5_TREE_FILES) fs.writeFileSync(f, '# ' + path.basename(f) + '\n', 'utf8');
@@ -6946,6 +6962,10 @@ async function runSmoke(win) {
           // ---------------- 2. tabOverflowUI：标签栏溢出（滚轮横滚 / ▾ 下拉 / Ctrl+Tab 浮层，按 pane） ----------------
           await p5Case('tabOverflowUI', async () => {
             await p5Reset();
+            // v0.12.0：本用例验证**单行模式**的溢出能力（▾ 下拉 / 滚轮横滚）。默认的多行换行模式
+            // 由后面的 tabWrapMultiRow 覆盖 —— 先显式关闭换行（用例末尾恢复默认）。
+            await p5Eval(`(async () => { await window.api.setSettings({ tabWrap: false }); window.__app.state.settings = await window.api.getSettings(); window.__app.editor.setTabWrap(false); return true; })()`);
+            await p5Sleep(250);
             // p0 开 14 个长名标签；分栏；p1 只开 1 个 → 两栏溢出判据必须**各自**成立/不成立
             await p5Effect(`(async () => { const e = window.__app.editor; for (const p of ${p5J(P5_TABS)}) { await e.openFile(p); } })()`);
             await p5Sleep(600);
@@ -7010,9 +7030,88 @@ async function runSmoke(win) {
               'hud-auto-hides': hudHide === false,
             };
             await p5Eval(`window.__app.editor.hideTabsHud()`);
+            // 恢复默认（多行换行开），后续用例按新默认口径断言
+            await p5Eval(`(async () => { await window.api.setSettings({ tabWrap: true }); window.__app.state.settings = await window.api.getSettings(); window.__app.editor.setTabWrap(true); return true; })()`);
             return p5Fail(conj, 'ov=' + p5J(ov && { p0: ov.p0 && { o: ov.p0.overflow, n: ov.p0.tabCount, sw: ov.p0.scrollWidth, cw: ov.p0.clientWidth, btn: ov.p0.btnVisible }, p1: ov.p1 && { o: ov.p1.overflow, n: ov.p1.tabCount } }) +
               ' wheel=' + p5J(wheel) + ' menu=' + p5J(menu && { items: menu.items, current: menu.current, first3: menu.names.slice(0, 3), p1: menu.p1names }) +
               ' click=' + p5J(clickItem) + ' hud=' + p5J(hud && { visible: hud.visible, items: hud.items, current: hud.current, before: hud.before, after: hud.after, leaked: hud.leaked }));
+          });
+
+          // ---------------- 2b. tabWrapMultiRow：标签多行换行（像 VSCode Wrap Tabs）+ 跨行拖拽 ----------------
+          //    用户需求：打开的会话很多时不必全挤在一行，可以多行显示，且标签可拖拽。
+          //    断言 = 真实几何（行数/高度/无横向溢出）+ 合成 DnD 的 DOM/会话顺序 + 设置开关的两种模式。
+          await p5Case('tabWrapMultiRow', async () => {
+            await p5Reset();
+            // 显式确保换行模式开启（避免用例顺序耦合）
+            await p5Eval(`(async () => { await window.api.setSettings({ tabWrap: true }); window.__app.state.settings = await window.api.getSettings(); window.__app.editor.setTabWrap(true); return true; })()`);
+            await p5Effect(`(async () => { for (const p of ${p5J(P5_TABS)}) { await window.__app.editor.openFile(p); } })()`);
+            await p5Sleep(700);
+            const wrap = await p5Eval(`(() => {
+              const el = document.getElementById('tabs');
+              const tops = new Set(Array.from(el.querySelectorAll('.tab')).map((t) => Math.round(t.getBoundingClientRect().top)));
+              const ov = window.__app.editor.tabsOverflowOf('p0');
+              return { rows: tops.size, h: Math.round(el.getBoundingClientRect().height), wrap: window.__app.editor.getTabWrap(),
+                overflow: ov.overflow, scrollW: el.scrollWidth, clientW: el.clientWidth,
+                tabCount: el.querySelectorAll('.tab').length,
+                allVisible: Array.from(el.querySelectorAll('.tab')).every((t) => t.offsetParent !== null && t.getBoundingClientRect().height > 10),
+                moreVisible: (document.getElementById('tabs-more') || {}).offsetParent != null };
+            })()`);
+            const before = await p5Eval(`(() => Array.from(document.querySelectorAll('#tabs .tab .tab-name')).map((n) => n.textContent))()`);
+            const drag = await p5Eval(`(() => {
+              const tabs = Array.from(document.querySelectorAll('#tabs .tab'));
+              if (tabs.length < 10) return { err: 'tabs=' + tabs.length };
+              const target = tabs[9];
+              const r = target.getBoundingClientRect();
+              const dt = new DataTransfer();
+              const opts = { dataTransfer: dt, bubbles: true, cancelable: true, clientX: r.right - 2, clientY: r.top + r.height / 2 };
+              tabs[0].dispatchEvent(new DragEvent('dragstart', opts));
+              target.dispatchEvent(new DragEvent('dragover', opts));
+              target.dispatchEvent(new DragEvent('drop', opts));
+              tabs[0].dispatchEvent(new DragEvent('dragend', opts));
+              return { err: null };
+            })()`);
+            await p5Sleep(500);
+            const after = await p5Eval(`(() => ({
+              names: Array.from(document.querySelectorAll('#tabs .tab .tab-name')).map((n) => n.textContent),
+              session: window.__app.editor.getSession().paths.map((p) => p.split(/[\\\\/]/).pop()),
+            }))()`);
+            const movedOk = before.length === 14 && after.names.length === 14 && after.names[0] !== before[0] && after.names.indexOf(before[0]) === 9;
+            const sessionOk = after.session.length === 14 && after.session.indexOf(before[0]) === 9 && after.session[0] === after.names[0];
+            // 设置弹窗里有「标签多行换行」勾选项（默认勾选）
+            const dialogOpt = await p5Eval(`(async () => {
+              document.getElementById('btn-settings').click();
+              await new Promise((r) => setTimeout(r, 250));
+              const cb = document.getElementById('tab-wrap-setting');
+              const has = !!cb;
+              const checked = cb ? cb.checked === true : null;
+              const cancel = Array.from(document.querySelectorAll('#modal-actions .tbtn')).find((b) => b.textContent === '取消');
+              if (cancel) cancel.click();
+              await new Promise((r) => setTimeout(r, 150));
+              return { has, checked, modalHidden: document.getElementById('modal-mask').classList.contains('hidden') };
+            })()`);
+            // 关闭换行 → 回到单行横向滚动 + ▾ 溢出按钮重新出现
+            const single = await p5Eval(`(async () => {
+              window.__app.editor.setTabWrap(false);
+              await new Promise((r) => setTimeout(r, 250));
+              const el = document.getElementById('tabs');
+              const tops = new Set(Array.from(el.querySelectorAll('.tab')).map((t) => Math.round(t.getBoundingClientRect().top)));
+              const ov = window.__app.editor.tabsOverflowOf('p0');
+              return { rows: tops.size, overflow: ov.overflow, btnVisible: ov.btnVisible };
+            })()`);
+            // 恢复默认（多行换行开 + 设置落盘）
+            await p5Eval(`(async () => { window.__app.editor.setTabWrap(true); await window.api.setSettings({ tabWrap: true }); window.__app.state.settings = await window.api.getSettings(); return true; })()`);
+            const conj = {
+              'wrap-default-on': !!(wrap && wrap.wrap === true && wrap.tabCount === 14),
+              'wraps-to-multiple-rows': !!(wrap && wrap.rows >= 2 && wrap.h > 50),
+              'no-horizontal-overflow': !!(wrap && wrap.overflow === false && wrap.scrollW <= wrap.clientW + 2 && wrap.moreVisible === false),
+              'all-tabs-visible': !!(wrap && wrap.allVisible === true),
+              'drag-across-rows': !!(drag && drag.err === null && movedOk === true),
+              'drag-session-order': !!(sessionOk === true),
+              'settings-checkbox': !!(dialogOpt && dialogOpt.has === true && dialogOpt.checked === true && dialogOpt.modalHidden === true),
+              'single-row-mode-restorable': !!(single && single.rows === 1 && single.overflow === true && single.btnVisible === true),
+            };
+            return p5Fail(conj, 'wrap=' + p5J(wrap) + ' before=' + p5J(before && before.slice(0, 3)) + ' after=' + p5J(after && after.names.slice(0, 3)) + '/idx=' + p5J(after && after.names.indexOf(before[0])) +
+              ' session0=' + p5J(after && after.session[0]) + ' dialog=' + p5J(dialogOpt) + ' single=' + p5J(single));
           });
 
           // ---------------- 3. outlinePanel：大纲（markdown 标题树 / 点击跳转 / 随光标高亮 / 类型门控） ----------------
@@ -7428,22 +7527,33 @@ async function runSmoke(win) {
               ' indep=' + p5J(indep) + ' reset=' + p5J(reset));
           });
 
-          // ---------------- 6b. layoutDock：v0.11.0 布局迁移（大纲在正文区左栏 / 全局搜索在底部面板） ----------------
-          //    用户需求：① 文件内搜索与全局搜索都放最下方；② Markdown 大纲不与文件树同栏，放到正文区
-          //    （文件树右边一栏 → 正文左侧独立栏）。断言口径 = 真实窗口几何事实（getBoundingClientRect）
-          //    + 快捷键真键盘事件（Ctrl+Shift+O / Ctrl+Shift+F）。
+          // ---------------- 6b. layoutDock：布局迁移（大纲在正文区左栏 / 搜索在底部面板 / 底部面板只在正文区下方） ----------------
+          //    用户需求（v0.11.0）：① 文件内搜索与全局搜索都放最下方；② Markdown 大纲不与文件树同栏，
+          //    放到正文区（文件树右边一栏 → 正文左侧独立栏）。
+          //    用户需求（v0.11.1 追加）：③ 左侧文件树一栏完整到底、不被底部面板截断；④ 大纲栏同样保持
+          //    完整高度；⑤ 底部面板只出现在大纲右侧的正文区下方（#editor-column 内），不再横跨整个窗口。
+          //    断言口径 = 真实窗口几何事实（getBoundingClientRect）+ 快捷键真键盘事件（Ctrl+Shift+O / Ctrl+Shift+F）。
           await p5Case('layoutDock', async () => {
             await p5Reset();
             await p5Effect(`window.__app.editor.openFile(${p5J(P5_OUTLINE)})`);
             await p5Sleep(500);
+            // 底部面板显式展开（默认折叠；几何断言需要面板真实占位）
+            await p5Eval(`(() => { window.__app.bottomPanel.expand(); return true; })()`);
+            await p5Sleep(200);
             const md = await p5Eval(`(() => {
               const rail = document.getElementById('outline-rail');
               const ep = document.getElementById('editor-panes');
               const side = document.getElementById('sidebar');
               const wb = document.getElementById('workbench');
+              const col = document.getElementById('editor-column');
+              const panel = document.getElementById('bottom-panel');
+              const status = document.getElementById('status-bar');
               const rr = rail.getBoundingClientRect();
               const er = ep.getBoundingClientRect();
               const sr = side.getBoundingClientRect();
+              const cr = col.getBoundingClientRect();
+              const pr = panel.getBoundingClientRect();
+              const str = status.getBoundingClientRect();
               return {
                 railInWorkbench: !!(rail && wb && wb.contains(rail)),
                 railNotInSidebar: !!(rail && side && !side.contains(rail)),
@@ -7453,6 +7563,17 @@ async function runSmoke(win) {
                 railW: Math.round(rr.width),
                 items: document.querySelectorAll('#outline-list .outline-item').length,
                 state: window.__app.outline.getState(),
+                // v0.11.1：侧栏完整高度 / 面板只在正文编辑列内 / 状态栏在面板下方
+                sideBottom: Math.round(sr.bottom), railBottom: Math.round(rr.bottom),
+                panelTop: Math.round(pr.top), panelLeft: Math.round(pr.left),
+                panelW: Math.round(pr.width), colW: Math.round(cr.width),
+                panelInEditorColumn: !!(col && col.contains(panel)),
+                sidebarFullHeight: Math.abs(sr.bottom - pr.bottom) <= 2 && sr.top < pr.top,
+                railFullHeight: Math.abs(rr.bottom - pr.bottom) <= 2 && rr.top < pr.top,
+                panelBelowEditor: pr.top >= er.bottom - 1,
+                panelRightOfRail: pr.left >= rr.right - 1,
+                panelInsideColumn: pr.left >= cr.left - 1 && pr.right <= cr.right + 1 && pr.bottom <= cr.bottom + 1,
+                statusBelowPanel: str.top >= pr.bottom - 1,
               };
             })()`);
             // Ctrl+Shift+O：折叠（收成细条、列表隐藏）→ 再按一次展开（宽度恢复、列表可见）
@@ -7463,6 +7584,25 @@ async function runSmoke(win) {
             await p5Eval(ctrlShiftO);
             await p5Sleep(350);
             const expanded = await p5Eval(`(() => { const r = document.getElementById('outline-rail'); return { w: Math.round(r.getBoundingClientRect().width), cls: r.classList.contains('collapsed'), listH: document.getElementById('outline-list').offsetHeight }; })()`);
+            // v0.12.0：大纲栏可整体隐藏（#btn-outline，偏好落盘 settings.outlineVisible）
+            const hideSt = await p5Eval(`(async () => {
+              document.getElementById('btn-outline').click();
+              await new Promise((r) => setTimeout(r, 400));
+              const rail = document.getElementById('outline-rail');
+              return { hidden: rail.classList.contains('hidden'), w: Math.round(rail.getBoundingClientRect().width),
+                saved: (await window.api.getSettings()).outlineVisible,
+                btnOn: document.getElementById('btn-outline').classList.contains('on') };
+            })()`);
+            const showSt = await p5Eval(`(async () => {
+              document.getElementById('btn-outline').click();
+              await new Promise((r) => setTimeout(r, 400));
+              const rail = document.getElementById('outline-rail');
+              return { hidden: rail.classList.contains('hidden'), w: Math.round(rail.getBoundingClientRect().width),
+                saved: (await window.api.getSettings()).outlineVisible,
+                items: document.querySelectorAll('#outline-list .outline-item').length };
+            })()`);
+            // v0.12.0：窗口标题 = 当前打开的目录（多窗口任务栏可分辨）；p5Reset 已把活动目录设为 TEST_ROOT
+            const titleSt = await p5Eval(`(() => ({ title: document.title, hasSuffix: document.title.endsWith(' — MarkHunter') }))()`);
             // 非 markdown：大纲栏整体隐藏（rail 与 block 同步 .hidden、实测宽度 0 —— 不残留空白列）
             const txt = await p5Eval(`(async () => {
               await window.__app.editor.openFile(${p5J(P5_TXT)});
@@ -7496,16 +7636,214 @@ async function runSmoke(win) {
               'rail-in-workbench': !!(md && md.railInWorkbench === true && md.railNotInSidebar === true),
               'rail-between-tree-and-editor': !!(md && md.railRightOfTree === true && md.railLeftOfEditor === true && md.railW > 100),
               'rail-shows-markdown-headings': !!(md && md.railVisible === true && md.items === 4 && md.state && md.state.railHidden === false),
+              // v0.11.1：文件树与大纲栏都完整到底（不被底部面板截断）
+              'sidebars-full-height': !!(md && md.sidebarFullHeight === true && md.railFullHeight === true),
+              // v0.11.1：底部面板只在正文编辑列内（大纲右侧、编辑区下方，宽度 = 编辑列宽），状态栏在其下
+              'panel-only-under-editor': !!(md && md.panelInEditorColumn === true && md.panelBelowEditor === true
+                && md.panelRightOfRail === true && md.panelInsideColumn === true && Math.abs(md.panelW - md.colW) <= 2),
+              'status-bar-below-panel': !!(md && md.statusBelowPanel === true),
               'outline-collapse-narrows': !!(collapsed && collapsed.cls === true && collapsed.w <= 40 && collapsed.listH === 0 && collapsed.state.collapsed === true),
               'outline-expand-restores': !!(expanded && expanded.cls === false && expanded.w > 100 && expanded.listH > 0),
+              // v0.12.0：大纲栏可整体隐藏（按钮 + 落盘），再次点击恢复
+              'outline-hide-button': !!(hideSt && hideSt.hidden === true && hideSt.w === 0 && hideSt.saved === false && hideSt.btnOn === false),
+              'outline-show-restores': !!(showSt && showSt.hidden === false && showSt.w > 100 && showSt.saved === true && showSt.items === 4),
+              // v0.12.0：窗口标题 = 当前打开的目录的**最后一级目录名**（完整路径太长，任务栏看不全）
+              'window-title-is-dir': !!(titleSt && titleSt.title === path.basename(TEST_ROOT)),
               'rail-hidden-for-non-md': !!(txt && txt.railHidden === true && txt.railW === 0 && txt.blockHidden === true),
               'gs-tab-in-bottom-panel': !!(gs && gs.tab === true && gs.inputInPanel === true && gs.sidebarHasGs === false),
               'ctrl-shift-f-opens-gs-tab': !!(gs && gs.state && gs.state.collapsed === false && gs.state.active === 'globalsearch' && gs.activeBodyVisible === true && gs.findHidden === true),
               'gs-input-focused-and-visible': !!(gs && gs.inputVisible === true && gs.focused === true && gs.inputInsidePanel === true),
             };
             return p5Fail(conj, 'md=' + p5J(md && { inWb: md.railInWorkbench, notSide: md.railNotInSidebar, w: md.railW, items: md.items, st: md.state }) +
+              ' dock=' + p5J(md && { sideBottom: md.sideBottom, railBottom: md.railBottom, panelTop: md.panelTop, panelLeft: md.panelLeft, panelW: md.panelW, colW: md.colW, inCol: md.panelInEditorColumn, belowEd: md.panelBelowEditor, rightRail: md.panelRightOfRail, inColBox: md.panelInsideColumn, statusBelow: md.statusBelowPanel }) +
               ' collapse=' + p5J(collapsed && { w: collapsed.w, cls: collapsed.cls, listH: collapsed.listH }) +
+              ' hideSt=' + p5J(hideSt) + ' showSt=' + p5J(showSt) + ' title=' + p5J(titleSt) +
               ' expand=' + p5J(expanded) + ' txt=' + p5J(txt) + ' gs=' + p5J(gs && { tab: gs.tab, st: gs.state, vis: gs.inputVisible, focus: gs.focused, inPanel: gs.inputInsidePanel }));
+          });
+
+          // ---------------- 7c. diffOptions：忽略空白 / 忽略大小写 / 自动换行（v0.12.0 对比完善） ----------------
+          await p5Case('diffOptions', async () => {
+            await p5Reset();
+            await p5Eval(`(() => { window.__app.editor.openDiffTab({
+              leftLabel: 'p5-diff-left.md', leftContent: ${p5J(DIFF_L)}, leftPath: ${p5J(P5_DIFF_L)},
+              rightLabel: 'p5-diff-right.md', rightContent: ${p5J(DIFF_R)}, rightPath: ${p5J(P5_DIFF_R)},
+              exportDir: ${p5J(TEST_ROOT)} }); return true; })()`);
+            await p5Sleep(500);
+            const read = `(() => {
+              const host = document.getElementById('diff-host');
+              const toggles = Array.from(host.querySelectorAll('.diff-toggle'));
+              const turns = {};
+              for (const b of toggles) turns[b.textContent] = b.classList.contains('active');
+              const sc = host.querySelector('.diff-scroller');
+              return { mod: host.querySelectorAll('.diff-row.mod').length,
+                stats: (host.querySelector('.diff-stats') || {}).textContent || '',
+                labels: toggles.map((b) => b.textContent), turns: turns,
+                nowrap: !!(sc && sc.classList.contains('diff-nowrap')) };
+            })()`;
+            const clickToggle = (label) => p5Eval(`(() => { const b = Array.from(document.querySelectorAll('#diff-host .diff-toggle')).find((x) => x.textContent === ${p5J(label)}); if (b) b.click(); return true; })()`);
+            const base = await p5Eval(read);
+            await clickToggle('空白');
+            await p5Sleep(350);
+            const ws = await p5Eval(read);
+            await clickToggle('大小写');
+            await p5Sleep(350);
+            const both = await p5Eval(read);
+            await clickToggle('自动换行');
+            await p5Sleep(250);
+            const nowrap = await p5Eval(read);
+            const conj = {
+              'two-mods-strict': !!(base && base.mod === 2 && base.stats.indexOf('~2') >= 0),
+              'toggle-buttons-present': !!(base && base.labels.indexOf('空白') >= 0 && base.labels.indexOf('大小写') >= 0 && base.labels.indexOf('自动换行') >= 0),
+              'ignore-whitespace': !!(ws && ws.mod === 1 && ws.turns['空白'] === true),
+              'ignore-case': !!(both && both.mod === 0 && both.turns['空白'] === true && both.turns['大小写'] === true),
+              'wrap-toggle': !!(nowrap && nowrap.nowrap === true && nowrap.turns['自动换行'] === false && base.nowrap === false),
+            };
+            return p5Fail(conj, 'base=' + p5J(base) + ' ws=' + p5J(ws) + ' both=' + p5J(both) + ' nowrap=' + p5J(nowrap));
+          });
+
+          // ---------------- 7d. diffFold：折叠未改动的大段内容 + 展开 + 导航（v0.12.0） ----------------
+          await p5Case('diffFold', async () => {
+            await p5Reset();
+            const longL = Array.from({ length: 30 }, (_, i) => 'eq ' + i).join('\n') + '\nchange here\n' + Array.from({ length: 30 }, (_, i) => 'tail ' + i).join('\n') + '\n';
+            const longR = Array.from({ length: 30 }, (_, i) => 'eq ' + i).join('\n') + '\nCHANGED here\n' + Array.from({ length: 30 }, (_, i) => 'tail ' + i).join('\n') + '\n';
+            await p5Eval(`(() => { window.__app.editor.openDiffTab({ leftLabel: 'fold-l', leftContent: ${p5J(longL)}, rightLabel: 'fold-r', rightContent: ${p5J(longR)} }); return true; })()`);
+            await p5Sleep(550);
+            const st = await p5Eval(`(() => {
+              const host = document.getElementById('diff-host');
+              return { folds: host.querySelectorAll('.diff-fold').length,
+                foldLabels: Array.from(host.querySelectorAll('.diff-fold .tbtn')).map((b) => b.textContent),
+                rows: host.querySelectorAll('.diff-row').length,
+                mod: host.querySelectorAll('.diff-row.mod').length,
+                badge: (host.querySelector('.diff-cur') || {}).textContent };
+            })()`);
+            const expand = await p5Eval(`(() => {
+              const host = document.getElementById('diff-host');
+              const before = host.querySelectorAll('.diff-row').length;
+              const btn = host.querySelector('.diff-fold .tbtn');
+              if (btn) btn.click();
+              const after = host.querySelectorAll('.diff-row').length;
+              return { before, after, folds: host.querySelectorAll('.diff-fold').length };
+            })()`);
+            const nav = await p5Eval(`(() => {
+              const host = document.getElementById('diff-host');
+              const btn = Array.from(host.querySelectorAll('.diff-bar .tbtn')).find((b) => b.textContent.includes('下一处'));
+              if (btn) btn.click();
+              return { cur: host.querySelectorAll('.diff-row.current').length, badge: (host.querySelector('.diff-cur') || {}).textContent };
+            })()`);
+            const conj = {
+              'long-eq-runs-folded': !!(st && st.folds === 2 && st.foldLabels.length === 2 && st.foldLabels[0].indexOf('展开 24 行未改动内容') >= 0),
+              'only-context-rows-rendered': !!(st && st.rows < 30 && st.mod === 1),
+              'fold-expands': !!(expand && expand.folds === 1 && expand.after > expand.before + 10),
+              'nav-reaches-change': !!(nav && nav.cur === 1 && nav.badge === '1/1'),
+            };
+            return p5Fail(conj, 'st=' + p5J(st) + ' expand=' + p5J(expand) + ' nav=' + p5J(nav));
+          });
+
+          // ---------------- 7e. diffKeyboardJump：n 导航 + Enter 跳回原文 + Esc 关闭（v0.12.0） ----------------
+          await p5Case('diffKeyboardJump', async () => {
+            await p5Reset();
+            await p5Effect(`window.__app.editor.openFile(${p5J(P5_DIFF_L)})`);
+            await p5Sleep(300);
+            const openDiff = `(() => { window.__app.editor.openDiffTab({
+              leftLabel: 'p5-diff-left.md', leftContent: ${p5J(DIFF_L)}, leftPath: ${p5J(P5_DIFF_L)},
+              rightLabel: 'p5-diff-right.md', rightContent: ${p5J(DIFF_R)}, rightPath: ${p5J(P5_DIFF_R)},
+              exportDir: ${p5J(TEST_ROOT)} }); return true; })()`;
+            await p5Eval(openDiff);
+            await p5Sleep(500);
+            const jump = await p5Eval(`(async () => {
+              const host = document.getElementById('diff-host');
+              const sc = host.querySelector('.diff-scroller');
+              sc.focus();
+              sc.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', bubbles: true, cancelable: true }));
+              await new Promise((r) => setTimeout(r, 250));
+              const badge = (host.querySelector('.diff-cur') || {}).textContent;
+              sc.focus();
+              sc.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+              await new Promise((r) => setTimeout(r, 700));
+              const t = window.__app.editor.getActiveTab();
+              return { badge, kind: t ? (t.kind || 'text') : null, path: t ? t.path : null,
+                pos: (document.getElementById('sb-pos') || {}).textContent || '' };
+            })()`);
+            const esc = await p5Eval(`(async () => {
+              window.__app.editor.openDiffTab({
+                leftLabel: 'p5-diff-left.md', leftContent: ${p5J(DIFF_L)}, leftPath: ${p5J(P5_DIFF_L)},
+                rightLabel: 'p5-diff-right.md', rightContent: ${p5J(DIFF_R)}, rightPath: ${p5J(P5_DIFF_R)} });
+              await new Promise((r) => setTimeout(r, 450));
+              const before = window.__app.editor.getPaneLayout().panes[0].docs;
+              const host = document.getElementById('diff-host');
+              const sc = host.querySelector('.diff-scroller');
+              sc.focus();
+              sc.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+              await new Promise((r) => setTimeout(r, 450));
+              const t = window.__app.editor.getActiveTab();
+              return { before, after: window.__app.editor.getPaneLayout().panes[0].docs,
+                activeKind: t ? (t.kind || 'text') : null, activePath: t ? t.path : null };
+            })()`);
+            const conj = {
+              'n-navigates-blocks': !!(jump && jump.badge === '1/1'),
+              'enter-jumps-right-source': !!(jump && jump.kind === 'text' && jump.path === P5_DIFF_R && jump.pos.indexOf('行 4') >= 0),
+              'esc-closes-diff': !!(esc && esc.after === esc.before - 1 && esc.activeKind === 'text' && esc.activePath === P5_DIFF_L),
+            };
+            return p5Fail(conj, 'jump=' + p5J(jump) + ' esc=' + p5J(esc));
+          });
+
+          // ---------------- 7f. diffCompareEntry：任意两个文件直接对比（树右键 + 对话框入口，v0.12.0） ----------------
+          await p5Case('diffCompareEntry', async () => {
+            await p5Reset();
+            await p5Effect(`window.__app.editor.openFile(${p5J(P5_DIFF_L)})`);
+            await p5Sleep(400);
+            await p5Eval(`(async () => { await window.__app.tree.refreshNode(${p5J(TEST_ROOT)}, true); return true; })()`);
+            await p5Sleep(500);
+            // 树右键右侧文件 → 「🔀 与当前文档对比」
+            const menu = await p5Eval(`(() => {
+              const norm = (p) => String(p).replace(/\\\\/g, '/').toLowerCase();
+              const row = Array.from(document.querySelectorAll('#file-tree .tree-node')).find((n) => norm(n.dataset.path) === norm(${p5J(P5_DIFF_R)}));
+              if (!row) return { found: false };
+              row.dispatchEvent(new MouseEvent('contextmenu', { clientX: 300, clientY: 300, bubbles: true, cancelable: true }));
+              return { found: true };
+            })()`);
+            await p5Sleep(300);
+            const click = await p5Eval(`(() => {
+              const item = Array.from(document.querySelectorAll('#ctx-menu .ctx-item')).find((el) => el.textContent.includes('与当前文档对比'));
+              if (!item) return { item: false };
+              item.click();
+              return { item: true };
+            })()`);
+            await p5Sleep(650);
+            const st = await p5Eval(`(() => {
+              const t = window.__app.editor.getActiveTab();
+              const host = document.getElementById('diff-host');
+              const norm = (p) => String(p || '').replace(/\\\\/g, '/').toLowerCase();
+              const jump = Array.from(host.querySelectorAll('.diff-bar .tbtn')).filter((b) => b.textContent.indexOf('原文') >= 0);
+              return { kind: t ? t.kind : null, mod: host.querySelectorAll('.diff-row.mod').length,
+                leftPath: t ? norm(t.leftPath) : null, rightPath: t ? norm(t.rightPath) : null,
+                jumpBtns: jump.length, jumpEnabled: jump.map((b) => b.disabled === false) };
+            })()`);
+            // 对比对话框：新增「选择磁盘文件…」选项 + 「两个文件…」按钮（任意文件入口，不要求已打开）
+            const dialog = await p5Eval(`(async () => {
+              window.__app.editor.closeAll();
+              await new Promise((r) => setTimeout(r, 150));
+              await window.__app.editor.openFile(${p5J(P5_DIFF_L)});
+              await new Promise((r) => setTimeout(r, 250));
+              document.getElementById('btn-diff').click();
+              await new Promise((r) => setTimeout(r, 300));
+              const sel = document.querySelector('#modal-body select');
+              const optValues = sel ? Array.from(sel.options).map((o) => o.value) : [];
+              const labels = Array.from(document.querySelectorAll('#modal-actions .tbtn')).map((b) => b.textContent);
+              const cancel = Array.from(document.querySelectorAll('#modal-actions .tbtn')).find((b) => b.textContent === '取消');
+              if (cancel) cancel.click();
+              return { optValues, labels, modalHidden: document.getElementById('modal-mask').classList.contains('hidden') };
+            })()`);
+            const normMain = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
+            const conj = {
+              'tree-menu-compare-active': !!(menu.found === true && click.item === true),
+              'opens-diff-with-paths': !!(st && st.kind === 'diff' && st.mod === 2
+                && st.leftPath === normMain(P5_DIFF_R) && st.rightPath === normMain(P5_DIFF_L)),
+              'jump-buttons-enabled': !!(st && st.jumpBtns === 2 && st.jumpEnabled.length === 2 && st.jumpEnabled.every((v) => v === true)),
+              'dialog-has-file-entries': !!(dialog && dialog.optValues.indexOf('__pick__') >= 0
+                && dialog.labels.indexOf('两个文件…') >= 0 && dialog.modalHidden === true),
+            };
+            return p5Fail(conj, 'menu=' + p5J(menu) + ' click=' + p5J(click) + ' st=' + p5J(st) + ' dialog=' + p5J(dialog));
           });
 
           // ---------------- 7. helpPanel：F1 / Ctrl+/ 快捷键面板 + 键位单一数据源 ----------------

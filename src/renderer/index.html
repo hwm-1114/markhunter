@@ -28,6 +28,8 @@
       <!-- 右侧收藏栏开合入口（pin 态下点击 = 取消 pin 并关闭，语义恒为「切换收藏栏」）；
            ☆ 收藏按钮保持「收藏/取消当前目录」语义不动（smoke fav* 用例断言它的星标行为） -->
       <button id="btn-fav-rail" class="tbtn" title="显示 / 隐藏右侧收藏栏">🗂 收藏栏</button>
+      <!-- v0.11.0：大纲栏显隐开关（正文区左栏；偏好落盘 settings.outlineVisible，Markdown 文件有效） -->
+      <button id="btn-outline" class="tbtn on" title="隐藏大纲栏（Markdown 文件）" aria-pressed="true">🧭 大纲</button>
       <span id="dir-label" class="dir-label" title="">未打开目录</span>
     </div>
     <div class="toolbar-group">
@@ -85,14 +87,83 @@
           <div id="outline-list" class="outline-list"></div>
         </div>
       </aside>
-      <!-- 0.5.0 多视图 Phase 2：编辑区改为「栏容器」，各栏（.pane）由 tabs.js 的 buildPaneDom 模板生成。
-           · p0 沿用历史 ID（#tabs / #editor-host / #image-host / #diff-host /
-             #split-divider / #preview-host / #preview-content / #zoom-badge / #editor-empty）——
-             find.js / preview.js / globalsearch.js / 冒烟里所有按 ID 取值的地方零改动；
-             （#viewer-bar 已随大文件悬浮操作条在 v0.9.0 删除）
-           · p1（Ctrl+\ 或拖标签到编辑区边缘时创建）只用 class 定位，DOM 与 p0 完全对称；
-           · 两栏之间的 .pane-divider 也由 tabs.js 动态插入（回到单栏时移除）。 -->
-      <div id="editor-panes" class="editor-panes"></div>
+      <!-- v0.11.1：编辑列 = 编辑/预览区 + 底部面板。
+           用户需求：① 左侧文件树一栏完整到底、不被底部面板截断；② 大纲栏也保持完整高度；
+           ③ 底部面板只出现在大纲右侧的正文区下方（不再横跨整个窗口）。
+           位置关系：文件树 | 大纲 |（编辑区 ↔ 底部面板 的纵向列）| 收藏栏。 -->
+      <div id="editor-column" class="editor-column">
+        <!-- 0.5.0 多视图 Phase 2：编辑区改为「栏容器」，各栏（.pane）由 tabs.js 的 buildPaneDom 模板生成。
+             · p0 沿用历史 ID（#tabs / #editor-host / #image-host / #diff-host /
+               #split-divider / #preview-host / #preview-content / #zoom-badge / #editor-empty）——
+               find.js / preview.js / globalsearch.js / 冒烟里所有按 ID 取值的地方零改动；
+               （#viewer-bar 已随大文件悬浮操作条在 v0.9.0 删除）
+             · p1（Ctrl+\ 或拖标签到编辑区边缘时创建）只用 class 定位，DOM 与 p0 完全对称；
+             · 两栏之间的 .pane-divider 也由 tabs.js 动态插入（回到单栏时移除）。 -->
+        <div id="editor-panes" class="editor-panes"></div>
+
+        <!-- 底部面板（v0.11.1：从 body 移入编辑列 → 只在大纲右侧的正文区下方；所有 ID 不变）。
+             折叠 / 最大化 / 页签切换逻辑（app.js）与 find.js / globalsearch.js / python.js 零改动。 -->
+        <div id="bottom-divider" class="resize-divider h"></div>
+        <footer id="bottom-panel">
+          <div class="panel-tabs">
+            <button class="ptab" data-panel="find">文件内搜索</button>
+            <!-- v0.11.0：全局搜索从左侧栏迁入底部面板（与「文件内搜索」并列的页签；Ctrl+Shift+F 直达本页签） -->
+            <button class="ptab" data-panel="globalsearch">全局搜索</button>
+            <button class="ptab" data-panel="python">运行（Python / 批处理）</button>
+            <div class="panel-actions">
+              <span id="save-status" class="save-status"></span>
+              <button id="btn-max-panel" class="tbtn small" title="最大化 / 还原面板">⛶</button>
+              <button id="btn-close-panel" class="tbtn small" title="收起面板（Esc）">✕</button>
+            </div>
+          </div>
+
+          <!-- 文件内查找与替换 -->
+          <div class="panel-body" id="panel-find">
+            <div class="find-bar">
+              <span class="find-label">查找</span>
+              <input id="find-input" type="text" placeholder="在当前文件中查找（默认不区分大小写，Enter 下一处）…" />
+              <!-- 0.5.0 Phase 5a G1：三个匹配开关（默认全关 = 旧口径）。状态由 find.js 统一维护 -->
+              <button id="find-case" class="tbtn small find-toggle" type="button" title="Aa 区分大小写" aria-pressed="false">Aa</button>
+              <button id="find-word" class="tbtn small find-toggle" type="button" title="整词匹配（前后不得是字母/数字/下划线）" aria-pressed="false">整词</button>
+              <button id="find-regex" class="tbtn small find-toggle" type="button" title="正则表达式（模式 ≤ 200 字符；含嵌套量词的模式会被拒绝）" aria-pressed="false">.*</button>
+              <span id="find-count" class="find-count"></span>
+            </div>
+            <div class="find-bar">
+              <span class="find-label">替换</span>
+              <input id="replace-input" type="text" placeholder="替换为…（留空 = 删除匹配内容）" />
+              <button id="btn-replace" class="tbtn small" title="替换当前选中处（Enter）">替换</button>
+              <button id="btn-replace-all" class="tbtn small" title="替换当前文件中全部匹配">全部替换</button>
+            </div>
+            <div id="find-results" class="find-results"></div>
+          </div>
+
+          <!-- 全局搜索（v0.11.0：从左侧栏迁入底部面板页签）：
+               #gs-input / #btn-gs-go / #gs-replace-input / #btn-gs-replace-all / #gs-results / #gs-count
+               全部 ID 原样保留 —— globalsearch.js 与 globalSearchUI / gsHighlight 等既有用例零改动。 -->
+          <div class="panel-body hidden" id="panel-globalsearch">
+            <div class="gs-bar">
+              <input id="gs-input" type="text" placeholder="全局搜索（Ctrl+Shift+F）…" />
+              <button id="btn-gs-go" class="tbtn">搜索</button>
+            </div>
+            <div class="gs-bar gs-replace-bar">
+              <input id="gs-replace-input" type="text" placeholder="替换为…（对结果文件的全部匹配）" />
+              <button id="btn-gs-replace-all" class="tbtn small danger" title="在当前搜索结果涉及的文件中批量替换">全部替换</button>
+            </div>
+            <div id="gs-results" class="gs-results"></div>
+            <div class="gs-count-row"><span id="gs-count" class="find-count"></span></div>
+          </div>
+
+          <!-- Python 输出 -->
+          <div class="panel-body hidden" id="panel-python">
+            <div class="python-bar">
+              <span id="py-status" class="py-status">未运行</span>
+              <button id="btn-py-kill" class="tbtn small danger">■ 终止</button>
+              <button id="btn-py-clear" class="tbtn small">清空</button>
+            </div>
+            <pre id="py-output" class="py-output"></pre>
+          </div>
+        </footer>
+      </div>
     </section>
 
     <!-- 右侧收藏栏分隔条（仅 pin 挤压式常驻时可见；reverse 拖拽 = 向左拖加宽，宽度落盘 favRailWidth） -->
@@ -116,70 +187,6 @@
     </aside>
 
   </main>
-
-  <!-- 底部面板 -->
-  <div id="bottom-divider" class="resize-divider h"></div>
-  <footer id="bottom-panel">
-    <div class="panel-tabs">
-      <button class="ptab" data-panel="find">文件内搜索</button>
-      <!-- v0.11.0：全局搜索从左侧栏迁入底部面板（与「文件内搜索」并列的页签；Ctrl+Shift+F 直达本页签） -->
-      <button class="ptab" data-panel="globalsearch">全局搜索</button>
-      <button class="ptab" data-panel="python">运行（Python / 批处理）</button>
-      <div class="panel-actions">
-        <span id="save-status" class="save-status"></span>
-        <button id="btn-max-panel" class="tbtn small" title="最大化 / 还原面板">⛶</button>
-        <button id="btn-close-panel" class="tbtn small" title="收起面板（Esc）">✕</button>
-      </div>
-    </div>
-
-    <!-- 文件内查找与替换 -->
-    <div class="panel-body" id="panel-find">
-      <div class="find-bar">
-        <span class="find-label">查找</span>
-        <input id="find-input" type="text" placeholder="在当前文件中查找（默认不区分大小写，Enter 下一处）…" />
-        <!-- 0.5.0 Phase 5a G1：三个匹配开关（默认全关 = 旧口径）。状态由 find.js 统一维护 -->
-        <button id="find-case" class="tbtn small find-toggle" type="button" title="Aa 区分大小写" aria-pressed="false">Aa</button>
-        <button id="find-word" class="tbtn small find-toggle" type="button" title="整词匹配（前后不得是字母/数字/下划线）" aria-pressed="false">整词</button>
-        <button id="find-regex" class="tbtn small find-toggle" type="button" title="正则表达式（模式 ≤ 200 字符；含嵌套量词的模式会被拒绝）" aria-pressed="false">.*</button>
-        <span id="find-count" class="find-count"></span>
-      </div>
-      <div class="find-bar">
-        <span class="find-label">替换</span>
-        <input id="replace-input" type="text" placeholder="替换为…（留空 = 删除匹配内容）" />
-        <button id="btn-replace" class="tbtn small" title="替换当前选中处（Enter）">替换</button>
-        <button id="btn-replace-all" class="tbtn small" title="替换当前文件中全部匹配">全部替换</button>
-      </div>
-      <div id="find-results" class="find-results"></div>
-    </div>
-
-    <!-- 全局搜索（v0.11.0：从左侧栏迁入底部面板页签）：
-         #gs-input / #btn-gs-go / #gs-replace-input / #btn-gs-replace-all / #gs-results / #gs-count
-         全部 ID 原样保留 —— globalsearch.js 与 globalSearchUI / gsHighlight 等既有用例零改动。
-         搜索/替换输入行沿用底部面板 .find-bar 的量级（max-width 与 find 输入框一致），结果区
-         .gs-results 由通用规则提供 flex:1 + 滚动。 -->
-    <div class="panel-body hidden" id="panel-globalsearch">
-      <div class="gs-bar">
-        <input id="gs-input" type="text" placeholder="全局搜索（Ctrl+Shift+F）…" />
-        <button id="btn-gs-go" class="tbtn">搜索</button>
-      </div>
-      <div class="gs-bar gs-replace-bar">
-        <input id="gs-replace-input" type="text" placeholder="替换为…（对结果文件的全部匹配）" />
-        <button id="btn-gs-replace-all" class="tbtn small danger" title="在当前搜索结果涉及的文件中批量替换">全部替换</button>
-      </div>
-      <div id="gs-results" class="gs-results"></div>
-      <div class="gs-count-row"><span id="gs-count" class="find-count"></span></div>
-    </div>
-
-    <!-- Python 输出 -->
-    <div class="panel-body hidden" id="panel-python">
-      <div class="python-bar">
-        <span id="py-status" class="py-status">未运行</span>
-        <button id="btn-py-kill" class="tbtn small danger">■ 终止</button>
-        <button id="btn-py-clear" class="tbtn small">清空</button>
-      </div>
-      <pre id="py-output" class="py-output"></pre>
-    </div>
-  </footer>
 
   <!-- 状态栏：当前文件位置 / 字数 -->
   <div id="status-bar">

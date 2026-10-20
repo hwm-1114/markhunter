@@ -72,14 +72,18 @@ export function outlineSupported(name, kind) {
  * @param {Object} opts
  * @param {() => any} opts.getEditor        editor 模块（tabs.js 的 API 面）
  * @param {() => any} opts.getActiveDoc     焦点栏的活动文档（app.js 传 `() => editor.getActiveTab()`）
+ * @param {() => boolean} [opts.getVisible]  用户偏好：大纲栏是否允许显示（v0.11.0 起 #btn-outline 切换，
+ *                                           落盘 settings.outlineVisible；缺省 = 恒允许）
  */
-export function createOutline({ getEditor, getActiveDoc }) {
+export function createOutline({ getEditor, getActiveDoc, getVisible }) {
   const block = $('#outline-block');
   const rail = $('#outline-rail'); // v0.11.0：正文区左栏容器（可见性与折叠类同步到它）
   const header = $('#outline-header');
   const caret = $('#outline-caret');
   const titleEl = $('#outline-title');
   const listEl = $('#outline-list');
+
+  const userVisible = () => (typeof getVisible === 'function' ? getVisible() !== false : true);
 
   let items = [];       // [{ level, text, line, el }]
   let collapsed = false;
@@ -204,10 +208,12 @@ export function createOutline({ getEditor, getActiveDoc }) {
     return idx;
   }
 
-  /** 主刷新：显隐（按文档类型）+ 列表（按文档内容缓存）+ 当前项（按光标） */
+  /** 主刷新：显隐（按文档类型 + 用户显隐偏好）+ 列表（按文档内容缓存）+ 当前项（按光标） */
   function refresh(cursorLine) {
     const tab = getActiveDoc();
-    const ok = supported(tab);
+    // v0.11.0：用户可整体隐藏大纲栏（#btn-outline → settings.outlineVisible）；类型门控与用户偏好的
+    // 唯一落地口就在这里 —— 两者任一不满足即整体隐藏（非 Markdown 即使打开偏好也不显示）。
+    const ok = supported(tab) && userVisible();
     setVisible(ok);
     if (!ok) {
       // 非 markdown / huge / 查看器：整体隐藏并清空（不残留上一个文档的大纲）
@@ -265,6 +271,7 @@ export function createOutline({ getEditor, getActiveDoc }) {
       railHidden: rail ? rail.classList.contains('hidden') : null,
       railCollapsed: rail ? rail.classList.contains('collapsed') : null,
       railWidth: rail ? Math.round(rail.getBoundingClientRect().width) : 0,
+      userVisible: userVisible(),
     }),
     supports: (name, kind) => outlineSupported(name, kind),
     parse: (text) => parseHeadings(text),

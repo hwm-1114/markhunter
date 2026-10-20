@@ -109,6 +109,12 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 /* v0.1.45（小项）：原 #fdf0f0 为暗色主题下刺眼的浅色硬编码 hover 底，改由主题令牌推导（danger 12% 混面板色） */
 .tbtn.danger:hover { background: color-mix(in oklab, var(--mh-danger) 12%, var(--mh-bg-panel)); }
 .tbtn:disabled { opacity: 0.45; cursor: not-allowed; }
+/* v0.11.0：工具栏开关按钮的「开启」态（🧭 大纲：表示大纲栏当前显示） */
+.tbtn.on {
+  color: var(--mh-accent);
+  background: var(--mh-accent-soft);
+  border-color: color-mix(in oklab, var(--mh-accent) 55%, var(--mh-border));
+}
 
 .dir-label {
   max-width: 260px;
@@ -445,8 +451,17 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   background: var(--mh-accent-soft);
 }
 
-/* 编辑区（v0.11.0：正文区改成横向三列中的「编辑列」—— 左侧 #outline-rail 大纲栏 + #editor-panes） */
+/* 正文区（v0.11.1）：#workbench 是一条横向 flex 行 = 大纲栏 | 编辑列；编辑列内部再纵向分成
+   编辑/预览区 + 底部面板。文件树（#sidebar）与大纲栏（#outline-rail）都是整高的列 ——
+   底部面板不再横跨到它们下方（用户需求：左侧栏完整、面板只在正文区下方）。 */
 #workbench { flex: 1; display: flex; flex-direction: row; min-width: 0; min-height: 0; }
+
+/* ---------- v0.11.1：编辑列（编辑/预览区 + 底部面板） ----------
+   本列是 #workbench 里大纲栏右侧的纵向列：上半 #editor-panes，下半 #bottom-panel。
+   用户需求：左侧文件树一栏完整到底、不被底部面板截断；大纲栏同样保持完整高度；底部面板只在
+   大纲右侧的正文区下方。故底部面板由 body 移入本列 —— app.js 的折叠/最大化/拖拽逻辑均按 ID
+   取值（#bottom-panel / #bottom-divider），零改动。 */
+.editor-column { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
 /* ---------- 0.5.0 Phase 2：左右双栏容器（硬上限 2 栏） ----------
    #editor-panes 是各栏的 flex 行；每栏 .pane 是「标签栏 + 编辑体」的纵向列。
@@ -517,6 +532,18 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   flex-wrap: nowrap; /* 压过 daisyUI .tabs 组件类的 flex-wrap:wrap（撞名泄漏），保持单行横向滚动 */
 }
 
+/* ---------- v0.11.0：标签多行换行（像 VSCode Wrap Tabs；settings.tabWrap 默认开） ----------
+   打开很多标签时逐行折行显示（不再横向滚动）；此时「▾ 全部标签」下拉与滚轮横滚自然停用。
+   标签顺序 = DOM 顺序，拖拽排序仍走 moveTabToIndex（落点按行/列几何计算，见 tabs.js tabDropIndex）。 */
+.tabs.tabs-wrap {
+  flex-wrap: wrap;
+  align-content: flex-start;
+  overflow-x: hidden;
+  row-gap: 3px;
+  /* 换行模式没有右侧悬浮的 ▾ 按钮：取消单行模式为它预留的 30px，避免每行末尾浪费空间 */
+  padding-right: 8px;
+}
+
 /* ---------- 0.5.0 多视图 Phase 4：跨窗口编辑权横幅 / 冲突横幅 ----------
    位置：标签栏之下、编辑体之上（每栏各一份，随该栏活动文档的锁态显隐）。
    只读横幅是**显性**入口：按钮直接摆在横幅上，不藏在标签右键菜单里（0.3.0 §2.6 的 L2 口径）。
@@ -542,6 +569,8 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
   display: inline-flex;
   align-items: center;
   position: relative; /* 拖拽排序的插入指示线（.tab-drop-*::before/::after）锚在这里 */
+  /* v0.11.0：多行换行时标签不参与 flex 伸缩（宽度按内容，行满自动折行） */
+  flex: none;
   /* L2（v0.1.44）：对抗 daisyUI .tab 组件类泄漏 —— height 40px / 居中 / 文本居中 / 允许换行
      均由 daisyUI 注入，这里显式压回应用侧语义（styles.css unlayered 后加载，同值覆盖、缺省补全） */
   height: auto;
@@ -917,6 +946,8 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 .help-empty { padding: 12px; text-align: center; color: var(--mh-text-2); font-size: 12.5px; }
 
 /* ============ 底部面板 ============ */
+/* v0.11.1：面板在 #editor-column 内部（大纲右侧正文区下方），不再横跨整个窗口 ——
+   左侧文件树与大纲栏保持完整高度。所有 ID/折叠逻辑不变。 */
 #bottom-panel {
   flex: none;
   height: 240px;
@@ -930,8 +961,8 @@ button { font-family: inherit; cursor: pointer; } /* v4 移除了按钮手型，
 #bottom-panel.collapsed .panel-body { display: none; }
 /* 0.5.0 Phase 5a E1：最大化 / 还原（标题栏 ⛶ 按钮）。
    .maximized 只改高度：折叠态与最大化互斥（展开时才可最大化，见 app.js 的 togglePanelMax）。
-   用 vh 而不是百分比：body 是 flex 列容器，#bottom-panel 为 flex:none，百分比高度在部分
-   主题的 body 尺寸链上不可靠（vh 与窗口高度直接挂钩，行为确定）。 */
+   用 vh 而不是百分比：#editor-column 是 flex 列容器，#bottom-panel 为 flex:none，百分比高度在
+   部分主题的尺寸链上不可靠（vh 与窗口高度直接挂钩，行为确定；72vh 恒小于窗口减去工具栏/状态栏后的列高）。 */
 #bottom-panel.maximized { height: 72vh; }
 
 .panel-tabs {
@@ -1886,6 +1917,29 @@ html[data-theme^="fx-"] .cm-editor { background: color-mix(in srgb, var(--mh-bg-
   min-width: 44px;
   text-align: center;
 }
+/* v0.11.0：对比选项开关（忽略空白 / 忽略大小写 / 自动换行）与折叠段 */
+.diff-bar .diff-toggle { min-width: 34px; font-family: var(--mono); }
+.diff-bar .diff-toggle.active {
+  background: var(--mh-accent);
+  color: var(--mh-accent-content, #fff);
+  border-color: var(--mh-accent);
+  font-weight: 700;
+}
+.diff-bar .tbtn:disabled { opacity: 0.4; cursor: not-allowed; }
+.diff-scroller:focus { outline: none; }
+.diff-scroller.diff-nowrap .diff-cell { white-space: pre; word-break: normal; }
+.diff-scroller.diff-nowrap .diff-row { min-width: max-content; }
+.diff-fold {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 0;
+  background: color-mix(in srgb, var(--mh-bg-panel) 65%, transparent);
+  border-top: 1px dashed var(--mh-border);
+  border-bottom: 1px dashed var(--mh-border);
+}
+.diff-fold .tbtn { font-size: 11.5px; color: var(--mh-text-2); }
+.diff-fold .tbtn:hover { color: var(--mh-text); }
 .diff-scroller {
   flex: 1;
   overflow: auto;

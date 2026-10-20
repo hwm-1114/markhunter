@@ -25,6 +25,10 @@ const ALLOWED_KEYS = new Set([
   'favRailOpen',
   'favRailPinned',
   'favRailWidth',
+  // v0.11.0：Markdown 大纲栏显隐（正文区左栏，用户可隐藏；默认显示）
+  'outlineVisible',
+  // v0.11.0：标签多行换行（像 VSCode Wrap Tabs：打开很多标签时换行显示，默认开）
+  'tabWrap',
 ]);
 
 // 主题引擎：56 个合法主题名（daisyUI 内置 35 + 自研经典 markhunter-classic + 特效皮肤 20）
@@ -80,6 +84,10 @@ const DEFAULTS = {
   favRailOpen: false,   // 收藏栏开合（bool）
   favRailPinned: false, // 收藏栏 pin 常显（bool；true 时隐含可见，open 键不参与其中判定）
   favRailWidth: 260,    // 收藏栏宽度（px，渲染端夹取 200~480）
+  // v0.11.0：大纲栏显隐（true = 显示；仅对 Markdown 有意义，非 Markdown 无论如何都隐藏）
+  outlineVisible: true,
+  // v0.11.0：标签多行换行（true = 像 VSCode Wrap Tabs 换行显示；false = 单行横向滚动 + ▾ 全部标签）
+  tabWrap: true,
 };
 
 /** v0.2.3 sidebarRoots 规范化：仅保留字符串项、去重（Windows 大小写不敏感）、上限 12 */

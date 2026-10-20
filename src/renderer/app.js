@@ -1,5 +1,5 @@
 // 应用入口：组装各模块
-import { $, $$, showPrompt, toast, closeModal, openModal, initDragResize, escapeHtml, debounce } from './ui.js';
+import { $, $$, showPrompt, toast, closeModal, openModal, initDragResize, escapeHtml, debounce, baseName } from './ui.js';
 import { createTree } from './tree.js';
 import { createEditor } from './tabs.js';
 import { createFind } from './find.js';
@@ -240,6 +240,7 @@ async function boot() {
   // ---------- 初始化各模块 ----------
   editor = createEditor({
     getWordWrap: () => state.settings.wordWrap,
+    getTabWrap: () => state.settings.tabWrap !== false, // v0.11.0：标签多行换行（像 VSCode Wrap Tabs）
     getIndentSize: () => state.settings.indentSize,
     getMaxFileSizeMB: () => state.settings.maxFileSizeMB, // v0.4.0：打开上限在 openFile 统一把关
     // v0.9.0：大文件状态条的「↵ 自动换行」= 应用级 wordWrap —— 与设置面板同一份状态：
@@ -413,7 +414,12 @@ async function boot() {
   python = createPythonPanel(getActiveTab, () => state.settings, (tab) => editor.saveNow(tab));
   tree = createTree();
   // B1：大纲 / TOC 侧栏（数据源 = 焦点栏的活动文档；见 outline.js 顶部三条硬口径）
-  outline = createOutline({ getEditor: () => editor, getActiveDoc: () => getActiveTab() });
+  // v0.11.0：增加用户显隐偏好（#btn-outline → settings.outlineVisible），用户可整体隐藏大纲栏。
+  outline = createOutline({
+    getEditor: () => editor,
+    getActiveDoc: () => getActiveTab(),
+    getVisible: () => state.settings.outlineVisible !== false,
+  });
   outline.refresh();
   // A1：Ctrl+P 快速打开（数据源 = search-worker 的文件清单，见 quickopen.js）
   quickOpen = createQuickOpen({
@@ -671,14 +677,39 @@ async function boot() {
     },
     onOpenDir: () => {},
     // v0.2.1：树右键「与基准对比」—— 读取两文件开对比标签（超限走截断对比）
+    // v0.11.0：带上 leftPath/rightPath，对比视图可「跳回原文」对应行
     onCompareFiles: async (base, target) => {
       try {
         const [a, b] = await Promise.all([window.api.readFile(base), window.api.readFile(target)]);
         editor.openDiffTab({
-          leftLabel: base.split(/[\\/]/).pop(),
+          leftLabel: baseName(base),
           leftContent: a.content,
-          rightLabel: target.split(/[\\/]/).pop(),
+          leftPath: base,
+          rightLabel: baseName(target),
           rightContent: b.content,
+          rightPath: target,
+          exportDir: state.rootDir || '',
+        });
+      } catch (err) {
+        toast('读取对比文件失败：' + (err.message || err));
+      }
+    },
+    // v0.11.0：树右键「与当前文档对比」—— 当前编辑器文档（含未保存内容）↔ 树中任意文件
+    onCompareWithActive: async (targetPath) => {
+      const cur = getActiveTab();
+      if (!cur || cur.kind || !cur.state) {
+        toast('请先在编辑器中打开一个可编辑的文本文档再对比');
+        return;
+      }
+      try {
+        const data = await window.api.readFile(targetPath);
+        editor.openDiffTab({
+          leftLabel: baseName(targetPath),
+          leftContent: data.content,
+          leftPath: targetPath,
+          rightLabel: cur.name,
+          rightContent: cur.state.doc.toString(),
+          rightPath: cur.path || null,
           exportDir: state.rootDir || '',
         });
       } catch (err) {
@@ -731,9 +762,20 @@ async function boot() {
   // ---------- 打开目录（v0.2.3 多目录侧栏） ----------
   const normKey = (p) => String(p || '').replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '');
 
+  /** v0.11.0：窗口标题 = 当前打开的目录（任务栏可分辨不同窗口打开的是哪个目录）。
+   *  v0.12.0（用户反馈）：**只显示最后一级目录名**（完整路径太长，任务栏标签看不完整）；
+   *  多窗口时通常最后一级目录名足以分辨，未打开目录时回退「MarkHunter」。
+   *  渲染端改 document.title，Electron 默认把页面标题同步到窗口标题（任务栏悬停缩略图可见）。 */
+  function applyWindowTitle() {
+    const dir = state.rootDir ? String(state.rootDir) : '';
+    const leaf = dir ? (dir.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).pop() || dir) : '';
+    document.title = leaf || 'MarkHunter';
+  }
+
   /** 激活某根为活动目录：重渲染侧栏 + 同步主进程根集合 + 刷新收藏/外部分支（openDirFromPath 公共尾段） */
   function activateSidebarRoot(dir) {
     state.rootDir = dir;
+    applyWindowTitle(); // v0.11.0：任务栏标题跟随活动目录
     $('#dir-label').textContent = dir;
     $('#dir-label').title =
       state.sidebarRoots.length > 1
@@ -817,6 +859,7 @@ async function boot() {
     if (next) return activateSidebarRoot(next);
     // 全部关闭：回到空侧栏
     state.rootDir = null;
+    applyWindowTitle(); // v0.11.0：无目录 → 标题回退 MarkHunter
     $('#dir-label').textContent = '未打开目录';
     $('#dir-label').title = '';
     window.api.setSettings({ lastDirectory: '', sidebarRoots: [] });
@@ -1244,6 +1287,17 @@ async function boot() {
     wrapText.textContent = '自动换行';
     wrapRow.append(wrapInput, wrapText);
 
+    // v0.11.0：标签多行换行（像 VSCode 的 Wrap Tabs）—— 打开很多标签时折行显示，而不是单行横向滚动
+    const tabWrapRow = document.createElement('label');
+    tabWrapRow.className = 'check-row';
+    const tabWrapInput = document.createElement('input');
+    tabWrapInput.type = 'checkbox';
+    tabWrapInput.id = 'tab-wrap-setting';
+    tabWrapInput.checked = s.tabWrap !== false;
+    const tabWrapText = document.createElement('span');
+    tabWrapText.textContent = '标签多行换行（标签很多时像 VSCode 一样折行显示；关闭 = 单行横向滚动）';
+    tabWrapRow.append(tabWrapInput, tabWrapText);
+
     // ---------- 0.5.0 Phase 5a B8：字号 / 行高（编辑器 + 预览；快捷键 Ctrl+= / Ctrl+- / Ctrl+0） ----------
     const mkNumField = (label, value, min, max, step) => {
       const f = document.createElement('div');
@@ -1269,7 +1323,7 @@ async function boot() {
     const fsPreview = mkNumField('预览字号（像素，10~32）', clampFont('previewFontSize', s.previewFontSize), 10, 32, 0.5);
     fsPreview.hint.textContent = 'Markdown 预览区字号（标题/代码等按比例缩放）';
 
-    body.append(themeField, pyField, sizeField, saveField, sbField, indentField, fsEditor.field, fsLine.field, fsPreview.field, wrapRow);
+    body.append(themeField, pyField, sizeField, saveField, sbField, indentField, fsEditor.field, fsLine.field, fsPreview.field, wrapRow, tabWrapRow);
 
     openModal({
       title: '设置',
@@ -1293,6 +1347,8 @@ async function boot() {
               scrollbarWidth: Math.min(40, Math.max(6, parseInt(sbInput.value, 10) || 10)),
               indentSize: Math.min(8, Math.max(1, parseInt(indentInput.value, 10) || 4)),
               wordWrap: wrapInput.checked,
+              // v0.11.0：标签多行换行（settings.tabWrap，白名单键）
+              tabWrap: tabWrapInput.checked,
               // B8：字号 / 行高（三个键必须都在 settings.js 白名单里，否则 settings:set 会静默丢弃）
               editorFontSize: clampFont('editorFontSize', parseFloat(fsEditor.input.value)),
               editorLineHeight: clampFont('editorLineHeight', parseFloat(fsLine.input.value)),
@@ -1301,6 +1357,7 @@ async function boot() {
             state.settings = await window.api.setSettings(patch);
             applyTheme(state.settings.theme); // 兜底：保证 data-theme 与落盘值一致（change 已即时预览，此处幂等）
             editor.setWordWrap(patch.wordWrap);
+            editor.setTabWrap(patch.tabWrap);
             editor.setIndentSize(patch.indentSize);
             applyScrollbarWidth(patch.scrollbarWidth);
             applyFonts(state.settings); // B8：设置弹窗与快捷键走同一个落地函数
@@ -1332,6 +1389,24 @@ async function boot() {
   $('#btn-global-search').addEventListener('click', () => {
     openGlobalSearchPanel();
   });
+  // ---------- v0.11.0：大纲栏显隐（正文区左栏；偏好落盘，跨窗口同步） ----------
+  const btnOutline = $('#btn-outline');
+  function applyOutlineVisibleUI() {
+    const on = state.settings.outlineVisible !== false;
+    btnOutline.classList.toggle('on', on);
+    btnOutline.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btnOutline.title = on ? '隐藏大纲栏（Markdown 文件）' : '显示大纲栏（Markdown 文件）';
+  }
+  btnOutline.addEventListener('click', async () => {
+    const next = state.settings.outlineVisible === false; // 当前隐藏 → 改为显示
+    state.settings = await window.api.setSettings({ outlineVisible: next });
+    applyOutlineVisibleUI();
+    if (outline) outline.refresh();
+    const t = getActiveTab();
+    if (t && isMarkdown(t.name)) toast(next ? '大纲栏已显示' : '大纲栏已隐藏');
+    else toast(next ? '大纲栏偏好已设为显示（Markdown 文件生效）' : '大纲栏偏好已设为隐藏（Markdown 文件生效）');
+  });
+  applyOutlineVisibleUI();
   const btnPreview = $('#btn-preview-mode');
   const previewModeNames = { edit: '👁 预览', split: '👁 分屏', preview: '✍ 编辑' };
   btnPreview.addEventListener('click', () => {
@@ -1371,6 +1446,11 @@ async function boot() {
     optClip.value = '__clip__';
     optClip.textContent = '📋 剪贴板内容';
     sel.appendChild(optClip);
+    // v0.11.0：任意两个文件直接对比 —— 选择一个磁盘文件与当前文档对比（不要求它已打开）
+    const optPick = document.createElement('option');
+    optPick.value = '__pick__';
+    optPick.textContent = '📁 选择磁盘文件…（任意文件 ↔ 当前文档）';
+    sel.appendChild(optPick);
     for (const t of others) {
       if (t.state.doc.length > 20 * 1024 * 1024) continue;
       const o = document.createElement('option');
@@ -1423,6 +1503,31 @@ async function boot() {
       actions: [
         { label: '取消', onClick: () => closeModal() },
         {
+          // v0.11.0：任意两个文件直接对比（两次磁盘文件选择，都不要求已打开）
+          label: '两个文件…',
+          onClick: async () => {
+            closeModal();
+            try {
+              const a = await window.api.selectFile({ title: '对比：选择左侧文件' });
+              if (!a) return;
+              const b = await window.api.selectFile({ title: '对比：选择右侧文件' });
+              if (!b) return;
+              const [ra, rb] = await Promise.all([window.api.readFile(a), window.api.readFile(b)]);
+              editor.openDiffTab({
+                leftLabel: baseName(a),
+                leftContent: ra.content,
+                leftPath: a,
+                rightLabel: baseName(b),
+                rightContent: rb.content,
+                rightPath: b,
+                exportDir: state.rootDir || '',
+              });
+            } catch (err) {
+              toast('读取对比文件失败：' + (err && err.message ? err.message : err));
+            }
+          },
+        },
+        {
           label: '开始对比',
           primary: true,
           onClick: async () => {
@@ -1430,13 +1535,16 @@ async function boot() {
             const v = sel.value;
             const rightContent = cur.state.doc.toString();
             const rightLabel = cur.name + '（当前）';
+            const rightPath = cur.path || null;
             let leftContent = null;
             let leftLabel = '';
+            let leftPath = null;
             try {
               if (v === '__disk__') {
                 const data = await window.api.readFile(cur.path);
                 leftContent = data.content;
                 leftLabel = cur.name + '（磁盘）';
+                leftPath = cur.path || null;
               } else if (v === '__clip__') {
                 leftContent = await window.api.readClipboardText();
                 leftLabel = '剪贴板';
@@ -1444,28 +1552,39 @@ async function boot() {
                   toast('剪贴板为空或不是文本');
                   return;
                 }
+              } else if (v === '__pick__') {
+                const p = await window.api.selectFile({ title: '对比：选择磁盘文件' });
+                if (!p) return;
+                const data = await window.api.readFile(p);
+                leftContent = data.content;
+                leftLabel = baseName(p);
+                leftPath = p;
               } else {
                 const t = tabsById(String(v));
                 if (!t) return;
                 leftContent = t.state.doc.toString();
                 leftLabel = t.name;
+                leftPath = t.path || null;
               }
             } catch (err) {
               toast('读取对比内容失败：' + (err.message || err));
               return;
             }
             // 三方模式：基准=baseSel 所选标签；本方=当前；对方=sel 所选标签（标签模式）
-            if (threeChk.checked && baseSel.style.display !== 'none' && v !== '__disk__' && v !== '__clip__') {
+            if (threeChk.checked && baseSel.style.display !== 'none' && v !== '__disk__' && v !== '__clip__' && v !== '__pick__') {
               const baseTab = tabsById(baseSel.value);
               if (!baseTab) return;
               editor.openDiffTab({
                 three: true,
                 leftLabel: baseTab.name,
                 leftContent: baseTab.state.doc.toString(),
+                leftPath: baseTab.path || null,
                 midLabel: cur.name + '（本方）',
                 midContent: rightContent,
+                midPath: cur.path || null,
                 rightLabel: leftLabel,
                 rightContent: leftContent,
+                rightPath: leftPath,
                 exportDir: state.rootDir || '',
               });
               return;
@@ -1473,8 +1592,10 @@ async function boot() {
             editor.openDiffTab({
               leftLabel,
               leftContent,
+              leftPath,
               rightLabel,
               rightContent,
+              rightPath,
               exportDir: state.rootDir || '',
             });
           },
@@ -1691,6 +1812,14 @@ async function boot() {
     // E2：其它窗口改了侧栏折叠态 → 本窗口跟随（窗口级 UI，不写回，避免两个窗口互相覆盖）
     if (s.sidebarCollapsed && JSON.stringify(s.sidebarCollapsed) !== JSON.stringify(prev.sidebarCollapsed)) {
       applySidebarCollapsed(s.sidebarCollapsed);
+    }
+    // v0.11.0：大纲栏显隐 / 标签多行换行 是应用级偏好 → 其它窗口改了即时跟随
+    if (s.outlineVisible !== prev.outlineVisible) {
+      applyOutlineVisibleUI();
+      if (outline) outline.refresh();
+    }
+    if (s.tabWrap !== prev.tabWrap) {
+      editor.setTabWrap(s.tabWrap !== false);
     }
     // 右侧收藏栏：其它窗口改了开合/pin/宽度 → 本窗口跟随（同为窗口级 UI，不写回）
     if (s.favRailOpen !== prev.favRailOpen || s.favRailPinned !== prev.favRailPinned || s.favRailWidth !== prev.favRailWidth) {

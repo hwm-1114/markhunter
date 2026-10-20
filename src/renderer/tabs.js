@@ -154,7 +154,7 @@ const lightTheme = EditorView.theme({
 export function createEditor(callbacks) {
   /** 栏容器（0.5.0 Phase 2 起，index.html 里只剩这一个挂载点，各栏 DOM 由 buildPaneDom 模板生成） */
   const panesRoot = document.getElementById('editor-panes');
-  const { onDocChanged, onTabSwitch, onTabLeave, onRequestClose, getWordWrap, onWordWrapChange, onSaveStatus, onSessionChange, getIndentSize, getMaxFileSizeMB, onCursorMove } = callbacks;
+  const { onDocChanged, onTabSwitch, onTabLeave, onRequestClose, getWordWrap, onWordWrapChange, onSaveStatus, onSessionChange, getIndentSize, getMaxFileSizeMB, onCursorMove, getTabWrap } = callbacks;
 
   // 文档集合与活动指针由 docmodel.js 的注册表持有（0.5.0 多视图 Phase 1；Phase 2 扩为「每栏一份活动指针」）。
   // 行为中性要点：注册表里装的就是下面这些 tab 对象**本身**（同一引用），没有对象搬家、没有代理；
@@ -164,6 +164,9 @@ export function createEditor(callbacks) {
   const docs = () => registry.list();
   let idSeq = 0;
   let wordWrapOn = getWordWrap();
+  // v0.11.0：标签多行换行（像 VSCode Wrap Tabs）。true = 标签溢出时换行成多行（默认）；
+  // false = 旧行为（单行横向滚动 + ▾ 全部标签）。运行时由 setTabWrap 切换（设置面板/跨窗口同步）。
+  let tabWrapOn = typeof getTabWrap === 'function' ? getTabWrap() !== false : true;
 
   // ---------- 0.5.0 Phase 4：跨窗口编辑权（L2 接管 / L3 冲突提示）的渲染端状态 ----------
   /** path → { mode:'edit'|'read', owner:winId|null, sharedEdit:boolean, freed:boolean }
@@ -464,7 +467,7 @@ export function createEditor(callbacks) {
     const root = document.createElement('div');
     root.className = 'pane';
     const tabsEl = document.createElement('div');
-    tabsEl.className = 'tabs pane-tabs';
+    tabsEl.className = 'tabs pane-tabs' + (tabWrapOn ? ' tabs-wrap' : '');
     const body = document.createElement('div');
     body.className = 'editor-wrap pane-body';
     const el = (cls) => { const d = document.createElement('div'); d.className = cls; return d; };
@@ -551,19 +554,23 @@ export function createEditor(callbacks) {
     // 路径除外，故保留 closest('.tab') 判空）。
     // ⚠️ 容器监听必须在 createPane 一次性绑定 —— renderPaneTabs 每轮都重建 innerHTML，
     //    在渲染函数里绑会让监听器随重建次数叠加。
+    // v0.11.0：多行换行后空白落点同样是「按几何算插入下标」（行尾空白 / 最后一行之下 = 末尾）。
     pane.tabsEl.addEventListener('dragover', (e) => {
       if (!dragTab) return; // 树节点 / OS 文件拖拽不归这里管（window 级捕获处理器负责文件拖入）
       if (e.target.closest('.tab')) return;
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      applyTabDropMark(pane, dropIndexWithout(pane, tabDropIndex(pane, e.clientX, e.clientY)));
     });
     pane.tabsEl.addEventListener('drop', (e) => {
       if (!dragTab) return;
       if (e.target.closest('.tab')) return;
       e.preventDefault();
       const t = dragTab;
+      const idx = dropIndexWithout(pane, tabDropIndex(pane, e.clientX, e.clientY));
       dragTab = null;
-      moveTabToIndex(t, pane, registry.docsOf(pane.id).filter((x) => x !== t).length); // 末尾
+      clearTabDropMarks(pane);
+      moveTabToIndex(t, pane, idx);
     });
     // 视图归属靠 updateListener 里的 registry.docOfView(u.view) —— 每个 pane 一个 EditorView
     pane.view = new EditorView({ parent: dom.host, state: makeState('', 'text') });
@@ -681,6 +688,52 @@ export function createEditor(callbacks) {
   function clearTabDropMarks(pane) {
     for (const el of pane.tabsEl.querySelectorAll('.tab-drop-before, .tab-drop-after')) {
       el.classList.remove('tab-drop-before', 'tab-drop-after');
+    }
+  }
+
+  // ==========================================================================
+  // v0.11.0：标签多行换行（像 VSCode 的 Wrap Tabs）+ 换行后的拖拽落点
+  // --------------------------------------------------------------------------
+  // · 换行模式下 .tabs 变成 flex-wrap:wrap，不再有横向溢出：「▾ 全部标签」下拉与滚轮横滚
+  //   自然停用（Tab 顺序 = DOM 顺序，拖拽仍走 moveTabToIndex）；单行模式（设置关）行为一字不改。
+  // · 拖拽落点不能再用「目标标签左半/右半」的单一 x 判据 —— 多行时先比行（y）再比行内水平中点。
+  // ==========================================================================
+  /** 切换标签多行换行（应用级设置；返回生效后的值） */
+  function setTabWrap(on) {
+    tabWrapOn = on !== false;
+    for (const pane of panes) pane.tabsEl.classList.toggle('tabs-wrap', tabWrapOn);
+    updateAllTabsOverflow(); // 换行模式恒不溢出 → ▾ 按钮隐藏；切回单行时重新计算
+    return tabWrapOn;
+  }
+
+  /** 拖拽落点下标（0 = 最前，n = 末尾）：按 DOM 文档顺序 + 换行后的几何。
+   *  单行模式下等价于旧口径（目标左半插到它前面、右半插到它后面）。 */
+  function tabDropIndex(pane, x, y) {
+    const els = Array.from(pane.tabsEl.querySelectorAll('.tab'));
+    for (let i = 0; i < els.length; i++) {
+      const r = els[i].getBoundingClientRect();
+      if (y < r.top) return i; // 指针在这一行之上 → 插到该行第一个标签之前
+      if (y <= r.bottom && x < r.left + r.width / 2) return i;
+    }
+    return els.length;
+  }
+
+  /** tabDropIndex 的「去掉被拖标签」下标换算（moveTabToIndex 的下标口径） */
+  function dropIndexWithout(pane, allIndex) {
+    return registry.docsOf(pane.id).slice(0, allIndex).filter((t) => t !== dragTab).length;
+  }
+
+  /** 拖拽插入指示线：清旧标记后按落点下标高亮目标（before）/ 末尾（after） */
+  function applyTabDropMark(pane, withoutIndex) {
+    clearTabDropMarks(pane);
+    const rest = registry.docsOf(pane.id).filter((t) => t !== dragTab);
+    const target = rest[withoutIndex];
+    if (target) {
+      const el = pane.tabBadges.get(target);
+      if (el) el.classList.add('tab-drop-before');
+    } else if (rest.length) {
+      const el = pane.tabBadges.get(rest[rest.length - 1]);
+      if (el) el.classList.add('tab-drop-after');
     }
   }
 
@@ -2833,17 +2886,14 @@ export function createEditor(callbacks) {
           clearTabDropMarks(p);
         }
       });
-      // 栏内/跨栏拖拽排序：鼠标在目标标签左半 → 插到它前面，右半 → 插到它后面（指示线类见 styles.css）。
-      // 落点下标在「去掉被拖标签」的栏内数组里算（before=目标位，after=目标位+1），跨栏同样适用。
+      // 栏内/跨栏拖拽排序：v0.11.0 起落点改由 tabDropIndex 按几何计算（多行换行时先比行 y 再比
+      // 行内水平中点；单行模式等价于旧的「左半前 / 右半后」口径），指示线由 applyTabDropMark 统一画。
       el.addEventListener('dragover', (e) => {
         if (!dragTab || dragTab === tab) return;
         e.preventDefault();
-        e.stopPropagation(); // 不冒泡到 .tabs 容器（容器空白处落点 = 末尾，见 createPane）
+        e.stopPropagation(); // 不冒泡到 .tabs 容器（容器空白处落点同样按几何算，见 createPane）
         if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-        const r = el.getBoundingClientRect();
-        const before = e.clientX < r.left + r.width / 2;
-        el.classList.toggle('tab-drop-before', before);
-        el.classList.toggle('tab-drop-after', !before);
+        applyTabDropMark(pane, dropIndexWithout(pane, tabDropIndex(pane, e.clientX, e.clientY)));
       });
       el.addEventListener('dragleave', () => {
         el.classList.remove('tab-drop-before', 'tab-drop-after');
@@ -2852,15 +2902,11 @@ export function createEditor(callbacks) {
         if (!dragTab || dragTab === tab) return;
         e.preventDefault();
         e.stopPropagation();
-        const r = el.getBoundingClientRect();
-        const before = e.clientX < r.left + r.width / 2;
-        el.classList.remove('tab-drop-before', 'tab-drop-after');
         const t = dragTab;
+        const idx = dropIndexWithout(pane, tabDropIndex(pane, e.clientX, e.clientY));
+        clearTabDropMarks(pane);
         dragTab = null;
-        const siblings = registry.docsOf(pane.id).filter((x) => x !== t);
-        let idx = siblings.indexOf(tab);
-        if (idx < 0) idx = siblings.length;
-        moveTabToIndex(t, pane, before ? idx : idx + 1);
+        moveTabToIndex(t, pane, idx);
       });
       const name = document.createElement('span');
       name.className = 'tab-name';
@@ -2926,8 +2972,10 @@ export function createEditor(callbacks) {
   // ③ Ctrl+Tab 切换浮层（HUD，只显示焦点栏）。判据与数据源全部走 registry 的按栏 API
   // （docsOf / activeOf），没有任何"全窗口唯一活动标签"的假设 —— 双栏下两栏各自独立。
   // ==========================================================================
-  /** 该栏标签栏是否溢出（1px 容差：亚像素布局下 scrollWidth 可能比 clientWidth 大 0.x） */
+  /** 该栏标签栏是否溢出（1px 容差：亚像素布局下 scrollWidth 可能比 clientWidth 大 0.x）。
+   *  v0.11.0：换行模式（默认）恒不溢出 —— 标签换行显示，不再需要横向滚动与 ▾ 下拉。 */
   function tabsOverflowing(pane) {
+    if (tabWrapOn) return false;
     const el = pane.tabsEl;
     return el.scrollWidth > el.clientWidth + 1;
   }
@@ -3279,6 +3327,10 @@ export function createEditor(callbacks) {
       existing.leftContent = opts.leftContent;
       existing.rightContent = opts.rightContent;
       if (opts.three) existing.midContent = opts.midContent;
+      // v0.11.0：源路径随内容一起刷新（键盘 Enter / 「跳回原文」按钮用）
+      if (opts.leftPath !== undefined) existing.leftPath = opts.leftPath;
+      if (opts.rightPath !== undefined) existing.rightPath = opts.rightPath;
+      if (opts.midPath !== undefined) existing.midPath = opts.midPath;
       switchTab(existing);
       renderDiff(existing); // 内容可能已变，重渲染
       return existing;
@@ -3296,6 +3348,12 @@ export function createEditor(callbacks) {
       midContent: opts.midContent || '',
       leftContent: opts.leftContent,
       rightContent: opts.rightContent,
+      // v0.11.0：对比源路径（可跳回原文；来自剪贴板/手输内容时为 null → 跳转按钮禁用）
+      leftPath: opts.leftPath || null,
+      rightPath: opts.rightPath || null,
+      midPath: opts.midPath || null,
+      // v0.11.0：对比选项（忽略空白/大小写、自动换行）；同一 diff 标签重开时保留用户已选项
+      diffOpts: { ignoreWhitespace: false, ignoreCase: false, wrap: true },
       exportDir: opts.exportDir || '', // 报告导出目录（app.js 传入当前工作目录）
       state: null,
       dirty: false,
@@ -3324,10 +3382,31 @@ export function createEditor(callbacks) {
         tab.leftLabel = tab.rightLabel;
         tab.rightContent = l;
         tab.rightLabel = ll;
+        // v0.11.0：源路径跟着交换（跳回原文落到正确的文件）
+        const lp = tab.leftPath;
+        tab.leftPath = tab.rightPath;
+        tab.rightPath = lp;
         tab.scrollTop = 0;
         renderDiff(tab, paneOpt);
         if (isFocusedPane(paneOfDoc(tab))) updateStatusBar();
       },
+      // v0.11.0：键盘 Enter / 「↩ 左原文 / 右原文 ↪」按钮 —— 跳到对应源标签的对应行
+      onJumpSource: async ({ side, line, path, label }) => {
+        try {
+          if (!path) return;
+          let target = registry.byPath(path);
+          if (!target) target = await openFile(path);
+          if (!target) target = registry.byPath(path);
+          if (!target) return;
+          switchTab(target);
+          jumpToLine(target, Number(line) || 1);
+          toast(`已跳到${label ? '「' + label + '」' : ''}第 ${line} 行`);
+        } catch (err) {
+          toast('跳回原文失败：' + (err && err.message ? err.message : err));
+        }
+      },
+      // v0.11.0：Esc 关闭对比标签（与键盘导航同组；避免与「Esc 收底部面板」冲突 —— diffview 内已 stopPropagation）
+      onClose: () => { closeTab(tab); },
       onExport: async () => {
         // 导出 Markdown 报告（有工作目录则保存并打开，无目录仅提示）
         const dir = tab.exportDir;
@@ -3758,6 +3837,9 @@ export function createEditor(callbacks) {
   }
 
   return { openFile, openDiffTab, closeTab, closeAll, saveNow, setWordWrap, setIndentSize, getActiveTab, getView, renderTabs, jumpToLine, findTabByPath, closeByPath, cycleTab, getSession, activateByPath, togglePinned, setPinned, closeOthers, closeLeft, closeRight, reorderTabs, scrollToTop, scrollToBottom, viewerJump, setViewerEditing, revealViewerAt, slideViewerWindow: slideViewer, setTabReadOnly, toggleReadOnly, reconfigureTabLang, ensureFullyLoaded,
+    // v0.11.0：标签多行换行（像 VSCode Wrap Tabs）—— 设置面板 / 跨窗口同步 / 冒烟用例共用
+    setTabWrap: (on) => setTabWrap(on),
+    getTabWrap: () => tabWrapOn,
     // ---------- 0.5.0 Phase 2：分栏 API（app.js 的 Ctrl+\ / Ctrl+1/2 与冒烟 split* 用例使用） ----------
     /** 分屏/合屏开关：单栏 → 右侧开一个空栏并聚焦；两栏 → 合并回单栏。返回合栏后的栏数 */
     toggleSplit: () => { toggleSplit(); return panes.length; },
@@ -3867,6 +3949,14 @@ export function createEditor(callbacks) {
       return {
         paneId: p.id,
         overflow: tabsOverflowing(p),
+        wrap: tabWrapOn,
+        // 换行后的实际行数（按各标签 top 去重；单行模式恒 1）
+        rows: (() => {
+          const tops = new Set();
+          for (const el of p.tabsEl.querySelectorAll('.tab')) tops.add(Math.round(el.getBoundingClientRect().top));
+          return tops.size;
+        })(),
+        height: Math.round(p.tabsEl.getBoundingClientRect().height),
         scrollWidth: p.tabsEl.scrollWidth,
         clientWidth: p.tabsEl.clientWidth,
         scrollLeft: Math.round(p.tabsEl.scrollLeft),
